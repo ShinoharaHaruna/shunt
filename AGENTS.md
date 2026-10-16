@@ -29,12 +29,6 @@ Unified entry is `just` (`just --list`):
 
 Raw cargo equivalents work too (`cargo build/test/clippy`).
 
-## CI
-
-Not configured yet — repo is unpublished. Git hooks + `just check`
-are the only gates for now; hooks and future CI only check, they never
-modify files.
-
 ## Repository structure
 
 - `src/cli.rs` — full clap command tree; server vs client subcommands
@@ -44,8 +38,15 @@ modify files.
 - `docs/design.md` — **authoritative behavioral spec**; when ambiguous, this file wins
 - `etc/vendors/` — client templates (`autodl.toml` seeds AutoDL defaults)
 - `task_template.sh` — guard-pattern task skeleton
+- `justfile`, `dprint.json`, `rust-toolchain.toml`, `.githooks/` — toolchain
 - `reference/` — bash prototype oracle (gitignored; contains deployment-specific
   details, never commit it)
+
+## CI
+
+Not configured — repo is unpublished. Git hooks + `just check` are the
+only gates for now; hooks and future CI only check, they never modify
+files.
 
 ## Conventions
 
