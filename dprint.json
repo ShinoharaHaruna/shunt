@@ -1,0 +1,22 @@
+{
+  "markdown": {
+    "textWrap": "maintain"
+  },
+  "includes": [
+    "**/*.md",
+    "**/*.toml",
+    "**/*.json"
+  ],
+  "excludes": [
+    "target/",
+    "reference/",
+    "node_modules/",
+    ".pi/",
+    "**/Cargo.lock"
+  ],
+  "plugins": [
+    "https://plugins.dprint.dev/markdown-0.26.0.wasm",
+    "https://plugins.dprint.dev/toml-0.9.0.wasm",
+    "https://plugins.dprint.dev/json-0.25.2.wasm"
+  ]
+}

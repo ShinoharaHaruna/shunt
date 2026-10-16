@@ -16,10 +16,24 @@ filesystem queue daemon). Wire protocol is `ssh <box> 'shunt <cmd> --json'`.
 
 ## Commands
 
-- `cargo build` / `cargo check` — build / typecheck
-- `cargo test` — unit tests (6 passing at scaffold stage)
-- `cargo clippy` / `cargo fmt` — lint / format (no custom config files)
-- No CI configured (no .github/, no pipeline files)
+Unified entry is `just` (`just --list`):
+
+- `just fmt` — auto-fix: rustfmt + dprint (md/toml/json); the only
+  write-to-source path besides the editor
+- `just fmt-check` — read-only format gate (pre-commit hook)
+- `just lint` — clippy `-D warnings` (pre-push hook)
+- `just test` — cargo test (CI only, not in hooks)
+- `just check` — full gate = fmt-check + lint + test
+- `just setup` — after clone, points git at the versioned hooks dir
+  (`core.hooksPath = .githooks`)
+
+Raw cargo equivalents work too (`cargo build/test/clippy`).
+
+## CI
+
+Not configured yet — repo is unpublished. Git hooks + `just check`
+are the only gates for now; hooks and future CI only check, they never
+modify files.
 
 ## Repository structure
 

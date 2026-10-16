@@ -1,0 +1,3 @@
+#!/bin/sh
+# Static analysis gate before push. Tests stay in CI (`just test`).
+exec just lint

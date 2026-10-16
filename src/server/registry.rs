@@ -74,8 +74,8 @@ pub fn shunt_home() -> Result<PathBuf> {
 
 fn load<T: for<'de> Deserialize<'de>>(dir: &str, name: &str) -> Result<T> {
     let path = shunt_home()?.join(dir).join(format!("{name}.toml"));
-    let text = fs::read_to_string(&path)
-        .with_context(|| format!("cannot read {}", path.display()))?;
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
     toml::from_str(&text).with_context(|| format!("bad TOML in {}", path.display()))
 }
 
@@ -108,11 +108,10 @@ pub fn save_project(entry: &ProjectEntry) -> Result<PathBuf> {
 pub fn load_server_config() -> Result<ServerConfig> {
     let path = shunt_home()?.join("server.toml");
     match fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text)
-            .with_context(|| format!("bad TOML in {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(ServerConfig::default())
+        Ok(text) => {
+            toml::from_str(&text).with_context(|| format!("bad TOML in {}", path.display()))
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ServerConfig::default()),
         Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
     }
 }

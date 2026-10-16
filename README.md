@@ -86,19 +86,19 @@ plus billing rate metadata so an agent can reason about cost.
 
 ## Command summary
 
-| command | side | what it does |
-|---|---|---|
-| `shunt client add\|bootstrap\|probe\|ls\|rm` | server | register and set up boxes |
-| `shunt project add\|bind\|ls` | server | register projects, bind to clients |
-| `shunt submit -p proj -c client [--guard p] -- cmd...` | server | stage a task in the spool |
-| `shunt status [--all] [--json]` | server | aggregate queue states |
-| `shunt spool ls` | server | inspect staged submissions |
-| `shunt dispatch` | server | run the spool → client loop |
-| `shunt start\|stop\|daemon` | client | queue daemon lifecycle |
-| `shunt enqueue\|new\|cancel\|prio\|kill` | client | task operations |
-| `shunt workers [N]` | client | pool size get/set |
-| `shunt shutdown on\|off\|status` | client | idle poweroff |
-| `shunt status\|logs\|probe` | client | queue state, logs, machine facts |
+| command                                                | side   | what it does                       |
+| ------------------------------------------------------ | ------ | ---------------------------------- |
+| `shunt client add\|bootstrap\|probe\|ls\|rm`           | server | register and set up boxes          |
+| `shunt project add\|bind\|ls`                          | server | register projects, bind to clients |
+| `shunt submit -p proj -c client [--guard p] -- cmd...` | server | stage a task in the spool          |
+| `shunt status [--all] [--json]`                        | server | aggregate queue states             |
+| `shunt spool ls`                                       | server | inspect staged submissions         |
+| `shunt dispatch`                                       | server | run the spool → client loop        |
+| `shunt start\|stop\|daemon`                            | client | queue daemon lifecycle             |
+| `shunt enqueue\|new\|cancel\|prio\|kill`               | client | task operations                    |
+| `shunt workers [N]`                                    | client | pool size get/set                  |
+| `shunt shutdown on\|off\|status`                       | client | idle poweroff                      |
+| `shunt status\|logs\|probe`                            | client | queue state, logs, machine facts   |
 
 ## What shunt is not
 
@@ -106,7 +106,7 @@ No DAG dependencies (use Airflow). No retry backoff — failures land in
 `failed/` and the agent decides. No user-facing HTTP API — the client
 CLI over SSH is the API. No multi-machine load balancing — submission
 names the client; matching requirements to machine facts is the agent's
-job. No remote power-on — on hourly-billed vendors, powering on *is*
+job. No remote power-on — on hourly-billed vendors, powering on _is_
 paying, and that click stays with a human.
 
 ## Status

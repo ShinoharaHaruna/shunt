@@ -35,7 +35,7 @@ Non-goals, by deliberate exclusion:
   via `shunt clients --json`.
 - No remote power-on. Billing on AutoDL-class vendors is bound to the
   console "power on" action a human (or an upstream automation outside
-  shunt's scope) performs. shunt only ever powers a box *off*.
+  shunt's scope) performs. shunt only ever powers a box _off_.
 
 ## 2. Architecture
 
@@ -80,20 +80,20 @@ Under `$QROOT` (client-local; resolved as `--root` flag > `$SHUNT_ROOT`
 env > configured qroot, since the binary no longer lives inside the
 queue directory):
 
-| Entry | Meaning |
-|---|---|
-| `pending/` | `NNNN_<slug>.sh` task files; claimed in filename sort order |
-| `running/` | in-flight `<task>.sh` plus `<task>.sh.log` and `<task>.sh.pid` |
-| `done/` | task + `.log` + `.exit` for rc 0 |
-| `failed/` | task + `.log` + `.exit` for nonzero rc or killed tasks |
-| `workers` | pool size file, re-read every poll cycle |
-| `STOP` | sentinel file: drain in-flight tasks, then daemon exits |
-| `shutdown_on_idle` | flag file: power off once queue fully drains |
-| `shutdown_grace_s` | countdown seconds (default 60) |
-| `shutdown_cmd` | command exec'd at countdown end |
-| `daemon.pid` | daemon pid, written at startup |
-| `daemon.log` | structured JSONL event stream (see §3.9) |
-| `.seq` + `.seq.lock` | enqueue counter under flock |
+| Entry                | Meaning                                                        |
+| -------------------- | -------------------------------------------------------------- |
+| `pending/`           | `NNNN_<slug>.sh` task files; claimed in filename sort order    |
+| `running/`           | in-flight `<task>.sh` plus `<task>.sh.log` and `<task>.sh.pid` |
+| `done/`              | task + `.log` + `.exit` for rc 0                               |
+| `failed/`            | task + `.log` + `.exit` for nonzero rc or killed tasks         |
+| `workers`            | pool size file, re-read every poll cycle                       |
+| `STOP`               | sentinel file: drain in-flight tasks, then daemon exits        |
+| `shutdown_on_idle`   | flag file: power off once queue fully drains                   |
+| `shutdown_grace_s`   | countdown seconds (default 60)                                 |
+| `shutdown_cmd`       | command exec'd at countdown end                                |
+| `daemon.pid`         | daemon pid, written at startup                                 |
+| `daemon.log`         | structured JSONL event stream (see §3.9)                       |
+| `.seq` + `.seq.lock` | enqueue counter under flock                                    |
 
 The daemon only manages tasks it dequeued itself, tracked via
 `running/*.pid`. Other jobs on the box are never touched. This boundary
@@ -121,7 +121,7 @@ to a pgid recorded in a `.pid` file, never to a name match.
 2. Take the `.seq` lock, increment, write back, release.
 3. Install the task file into `pending/` with mode 0755 via
    write-temp-then-`mv` inside `pending/` (atomic on the same
-   filesystem). A remote `scp` + `mv` is *not* atomic across
+   filesystem). A remote `scp` + `mv` is _not_ atomic across
    filesystems; never install directly to the final name from an
    off-queue temp.
 
@@ -158,7 +158,7 @@ Any `running/*.sh` present at daemon start means a previous daemon died
 mid-flight. For each:
 
 1. If its `.pid` file exists and `kill -0 -- -<pgid>` succeeds, the task
-   process group is *still alive* — log a WARNING and requeue anyway.
+   process group is _still alive_ — log a WARNING and requeue anyway.
    The task's own guard makes the rerun a no-op. (This happens when the
    daemon dies but a detached task survives.)
 2. Strip any stacked `0000_requeued_` prefixes from the basename in a
@@ -197,7 +197,7 @@ daemon start) > built-in default 3.
 - Raising takes effect on the next dispatch. Lowering only stops new
   dispatches — running tasks finish naturally ("drain"), so shrinking
   never kills work. To free a slot now, use `shunt kill`.
-- Status output must report the *resolved* value and its source; never
+- Status output must report the _resolved_ value and its source; never
   hardcode the default (the bash `qstatus.sh` printed `3 (default)` as a
   literal — a defect).
 
@@ -281,13 +281,13 @@ guard on the artifact they produce.
 
 ### 3.14 Known defects in the bash source — fix in the port
 
-| Defect | Required behavior |
-|---|---|
-| `qprio.sh` uses `mv -f`: renumbering onto an existing `NNNN_slug` silently destroys a pending task | `shunt prio` must fail if the target name exists |
-| `rwq_enqueue.sh` uses predictable remote tmp `/tmp/rwq_enqueue_$$.sh` | remote temp files come from `mktemp` |
-| `daemon_alive` duplicated in three scripts with the grep string inline | liveness check + identity string are single-sourced |
-| `qstatus.sh` prints `3 (default)` as a literal | report the resolved workers value and source |
-| task-wrap logic duplicated client-side (`rwq_enqueue`) and remote (`qnew`) | one generator: `shunt mktask` on the client; submit paths forward args |
+| Defect                                                                                             | Required behavior                                                      |
+| -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `qprio.sh` uses `mv -f`: renumbering onto an existing `NNNN_slug` silently destroys a pending task | `shunt prio` must fail if the target name exists                       |
+| `rwq_enqueue.sh` uses predictable remote tmp `/tmp/rwq_enqueue_$$.sh`                              | remote temp files come from `mktemp`                                   |
+| `daemon_alive` duplicated in three scripts with the grep string inline                             | liveness check + identity string are single-sourced                    |
+| `qstatus.sh` prints `3 (default)` as a literal                                                     | report the resolved workers value and source                           |
+| task-wrap logic duplicated client-side (`rwq_enqueue`) and remote (`qnew`)                         | one generator: `shunt mktask` on the client; submit paths forward args |
 
 ## 4. Server: registry, spool, dispatcher
 
@@ -309,14 +309,14 @@ never needs to reach the server.
 
 `clients/<name>.toml`:
 
-| field | meaning |
-|---|---|
-| `name` | registry key |
-| `ssh.host`, `ssh.port`, `ssh.user`, `ssh.key` | exec endpoint |
-| `qroot` | queue dir on the box |
-| `deploy_root` | vendor work root (AutoDL: `/root/autodl-tmp`) |
-| `facts` | table filled by `probe`/`bootstrap`: `gpu`, `cuda`, `driver`, `cores`, `mem_gb`, `disk_free_gb`, `python` |
-| `billing.hourly`, `billing.currency` | cost metadata surfaced to the agent |
+| field                                         | meaning                                                                                                   |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `name`                                        | registry key                                                                                              |
+| `ssh.host`, `ssh.port`, `ssh.user`, `ssh.key` | exec endpoint                                                                                             |
+| `qroot`                                       | queue dir on the box                                                                                      |
+| `deploy_root`                                 | vendor work root (AutoDL: `/root/autodl-tmp`)                                                             |
+| `facts`                                       | table filled by `probe`/`bootstrap`: `gpu`, `cuda`, `driver`, `cores`, `mem_gb`, `disk_free_gb`, `python` |
+| `billing.hourly`, `billing.currency`          | cost metadata surfaced to the agent                                                                       |
 
 `projects/<name>.toml`:
 
@@ -370,21 +370,21 @@ The remote interface is `shunt <subcmd> --json` on the client. Every
 response is a single JSON object with `"protocol": 1`. Errors exit
 nonzero with `{"protocol":1,"ok":false,"error":"..."}`.
 
-| op | request | response sketch |
-|---|---|---|
-| `enqueue` | task body on stdin; `--slug` | `{ok, name}` |
-| `new` | `--slug`, `--guard`, `--` argv | `{ok, name}` |
-| `mktask` | same as `new` | task body on stdout |
-| `status` | — | `{daemon:{alive,pid}, workers:{value,source}, running[], pending[], done_recent[], failed_recent[], stop, shutdown:{armed,grace_s}}` |
-| `cancel` | pattern | `{ok, name}` or error on 0/multi match |
-| `prio` | pattern, n | `{ok, from, to}`; error if target exists |
-| `kill` | pattern | `{ok, pgid, escalated}` |
-| `workers get` / `workers set N` | — | `{workers, source}` |
-| `shutdown on [grace]` / `off` / `status` | — | `{armed, grace_s, running, pending}` |
-| `probe` | — | `{gpu, driver, cuda, cores, mem_gb, disk_free_gb, python}` |
-| `logs` | `--task pat` or daemon | text stream (may be non-JSON for `-f`) |
-| `start` / `stop` / `daemon` | — | `{ok, pid}` / `{ok}` / runs the loop (foreground; `start` daemonizes) |
-| `init` | `--qroot` | `{ok}` creates dirs |
+| op                                       | request                        | response sketch                                                                                                                      |
+| ---------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `enqueue`                                | task body on stdin; `--slug`   | `{ok, name}`                                                                                                                         |
+| `new`                                    | `--slug`, `--guard`, `--` argv | `{ok, name}`                                                                                                                         |
+| `mktask`                                 | same as `new`                  | task body on stdout                                                                                                                  |
+| `status`                                 | —                              | `{daemon:{alive,pid}, workers:{value,source}, running[], pending[], done_recent[], failed_recent[], stop, shutdown:{armed,grace_s}}` |
+| `cancel`                                 | pattern                        | `{ok, name}` or error on 0/multi match                                                                                               |
+| `prio`                                   | pattern, n                     | `{ok, from, to}`; error if target exists                                                                                             |
+| `kill`                                   | pattern                        | `{ok, pgid, escalated}`                                                                                                              |
+| `workers get` / `workers set N`          | —                              | `{workers, source}`                                                                                                                  |
+| `shutdown on [grace]` / `off` / `status` | —                              | `{armed, grace_s, running, pending}`                                                                                                 |
+| `probe`                                  | —                              | `{gpu, driver, cuda, cores, mem_gb, disk_free_gb, python}`                                                                           |
+| `logs`                                   | `--task pat` or daemon         | text stream (may be non-JSON for `-f`)                                                                                               |
+| `start` / `stop` / `daemon`              | —                              | `{ok, pid}` / `{ok}` / runs the loop (foreground; `start` daemonizes)                                                                |
+| `init`                                   | `--qroot`                      | `{ok}` creates dirs                                                                                                                  |
 
 All argv crossing SSH is shell-quoted with `%q`-equivalent escaping on
 the server side; quoting is centralized in the transport layer, never
@@ -392,18 +392,18 @@ hand-rolled per call site.
 
 ## 6. Rust mapping table
 
-| bash construct | Rust mechanism |
-|---|---|
-| `setsid bash qexec.sh task &` | `Command::spawn` + `process_group(0)` (pre-exec `setsid`); pid = pgid |
-| `flock -w 30` on `.seq.lock` | `fs2::FileExt::lock_exclusive` + timeout retry |
-| `trap on_term TERM INT HUP` | `signal-hook` iterator; forward TERM→2 s→KILL to tracked pgids; exit 143 |
-| `wait $pid; rc=$?` | `Child::wait` / `try_wait` for the reaper |
-| `find -printf '%f' \| LC_ALL=C sort` | `read_dir` + byte-wise sort on filenames |
-| `kill -0 -- -pgid` | `kill(-pgid, 0)` via `nix`-style libc call |
-| tmux `queue` session | none — `shunt start` self-daemonizes: `setsid`, redirect stdout/stderr to `daemon.log`, write pidfile |
-| `env` file / inline exports | parsed `KEY=value` map per binding, injected into task `Command` env |
-| `date -Is` log stamps | `OffsetDateTime` RFC 3339 |
-| `daemon.log` text lines | JSONL: `{ts, event, ...}` per line; `shunt logs` renders human-readable |
+| bash construct                       | Rust mechanism                                                                                        |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `setsid bash qexec.sh task &`        | `Command::spawn` + `process_group(0)` (pre-exec `setsid`); pid = pgid                                 |
+| `flock -w 30` on `.seq.lock`         | `fs2::FileExt::lock_exclusive` + timeout retry                                                        |
+| `trap on_term TERM INT HUP`          | `signal-hook` iterator; forward TERM→2 s→KILL to tracked pgids; exit 143                              |
+| `wait $pid; rc=$?`                   | `Child::wait` / `try_wait` for the reaper                                                             |
+| `find -printf '%f' \| LC_ALL=C sort` | `read_dir` + byte-wise sort on filenames                                                              |
+| `kill -0 -- -pgid`                   | `kill(-pgid, 0)` via `nix`-style libc call                                                            |
+| tmux `queue` session                 | none — `shunt start` self-daemonizes: `setsid`, redirect stdout/stderr to `daemon.log`, write pidfile |
+| `env` file / inline exports          | parsed `KEY=value` map per binding, injected into task `Command` env                                  |
+| `date -Is` log stamps                | `OffsetDateTime` RFC 3339                                                                             |
+| `daemon.log` text lines              | JSONL: `{ts, event, ...}` per line; `shunt logs` renders human-readable                               |
 
 ## 7. End-to-end lifecycle
 
@@ -411,7 +411,7 @@ hand-rolled per call site.
    row.
 2. `shunt client bootstrap rw-a` — probe over raw SSH (no binary yet:
    the probe is server-side shell), scp the binary, remote `shunt init`
-   + `shunt start`, facts merged into the row.
+   - `shunt start`, facts merged into the row.
 3. `shunt project add riboworld` + `shunt project bind riboworld --client rw-a --workdir /root/autodl-tmp/RiboWorld`.
 4. `shunt submit -p riboworld -c rw-a --guard runs/x.json -- uv run python ...` → lands in `spool/`.
 5. Dispatcher pushes when the box is reachable; box runs it; on drain,
@@ -445,26 +445,26 @@ context, and rates.
 
 ## 10. CLI surface
 
-| command | side | purpose |
-|---|---|---|
-| `shunt submit -p proj -c client [--guard p] -- cmd...` | server | spool a task |
-| `shunt submit -c client file.sh` | server | spool a script file |
-| `shunt status [--all] [--json]` | server | aggregate client states |
-| `shunt spool ls\|rm` | server | inspect staging |
-| `shunt client add\|ls\|show\|bootstrap\|probe\|rm` | server | registry |
-| `shunt project add\|bind\|ls\|show` | server | registry |
-| `shunt dispatch [--once]` | server | run the dispatcher loop |
-| `shunt daemon` | client | run queue loop (foreground) |
-| `shunt init` | client | create queue dirs |
-| `shunt start` / `shunt stop` | client | daemon lifecycle |
-| `shunt enqueue [file\|-] [slug]` | client | install into pending |
-| `shunt new` / `shunt mktask` | client | wrap argv as task (guard) |
-| `shunt status` | client | queue summary |
-| `shunt cancel` / `prio` / `kill` | client | pending/running ops |
-| `shunt workers [N]` | client | pool size get/set |
-| `shunt shutdown on\|off\|status` | client | idle poweroff |
-| `shunt logs [pat]` / `shunt dlog` | client | task/daemon logs |
-| `shunt probe` | client | machine facts JSON |
+| command                                                | side   | purpose                     |
+| ------------------------------------------------------ | ------ | --------------------------- |
+| `shunt submit -p proj -c client [--guard p] -- cmd...` | server | spool a task                |
+| `shunt submit -c client file.sh`                       | server | spool a script file         |
+| `shunt status [--all] [--json]`                        | server | aggregate client states     |
+| `shunt spool ls\|rm`                                   | server | inspect staging             |
+| `shunt client add\|ls\|show\|bootstrap\|probe\|rm`     | server | registry                    |
+| `shunt project add\|bind\|ls\|show`                    | server | registry                    |
+| `shunt dispatch [--once]`                              | server | run the dispatcher loop     |
+| `shunt daemon`                                         | client | run queue loop (foreground) |
+| `shunt init`                                           | client | create queue dirs           |
+| `shunt start` / `shunt stop`                           | client | daemon lifecycle            |
+| `shunt enqueue [file\|-] [slug]`                       | client | install into pending        |
+| `shunt new` / `shunt mktask`                           | client | wrap argv as task (guard)   |
+| `shunt status`                                         | client | queue summary               |
+| `shunt cancel` / `prio` / `kill`                       | client | pending/running ops         |
+| `shunt workers [N]`                                    | client | pool size get/set           |
+| `shunt shutdown on\|off\|status`                       | client | idle poweroff               |
+| `shunt logs [pat]` / `shunt dlog`                      | client | task/daemon logs            |
+| `shunt probe`                                          | client | machine facts JSON          |
 
 ## 11. Testing strategy
 

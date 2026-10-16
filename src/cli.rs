@@ -585,7 +585,9 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
 /// to the binary's source tree; falls back to $SHUNT_VENDOR_DIR.
 fn load_vendor_template(name: &str) -> Result<crate::server::registry::ClientEntry> {
     let candidates = [
-        std::env::var("SHUNT_VENDOR_DIR").ok().map(std::path::PathBuf::from),
+        std::env::var("SHUNT_VENDOR_DIR")
+            .ok()
+            .map(std::path::PathBuf::from),
         Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("etc/vendors")),
     ];
     for dir in candidates.into_iter().flatten() {

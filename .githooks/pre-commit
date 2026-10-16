@@ -1,0 +1,3 @@
+#!/bin/sh
+# Fast format gate. Auto-fix with `just fmt`, never edit files here.
+exec just fmt-check

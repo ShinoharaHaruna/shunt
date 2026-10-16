@@ -6,10 +6,9 @@ use anyhow::Result;
 
 /// Quote one arg for the remote shell (`%q` equivalent).
 pub fn shell_quote(arg: &str) -> String {
-    if arg
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '/' | ':' | '=' | '+' | ','))
-        && !arg.is_empty()
+    if arg.chars().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '/' | ':' | '=' | '+' | ',')
+    }) && !arg.is_empty()
     {
         return arg.to_string();
     }
