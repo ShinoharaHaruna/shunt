@@ -12,6 +12,11 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientEntry {
     pub name: String,
+    /// Local loopback client: transport execs the local `shunt` binary
+    /// instead of SSH. Always true for the built-in `localhost` row.
+    #[serde(default)]
+    pub local: bool,
+    #[serde(default)]
     pub ssh: SshEndpoint,
     /// Queue dir on the box.
     pub qroot: String,
@@ -25,11 +30,16 @@ pub struct ClientEntry {
     pub billing: Option<Billing>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SshEndpoint {
+    #[serde(default)]
     pub host: String,
+    /// 0 = unset (port may genuinely be 0 in a template before fill-in).
+    #[serde(default)]
     pub port: u16,
+    #[serde(default)]
     pub user: String,
+    #[serde(default)]
     pub key: String,
 }
 
@@ -90,7 +100,43 @@ fn save<T: Serialize>(dir: &str, name: &str, value: &T) -> Result<PathBuf> {
 }
 
 pub fn load_client(name: &str) -> Result<ClientEntry> {
+    // `localhost` is built-in (design.md §4.1): when no row exists the
+    // loopback client is synthesized with qroot=$SHUNT_HOME/queue and
+    // deploy_root=$HOME. A real row overrides the defaults but the
+    // local flag always stands.
+    if name == "localhost" {
+        let path = shunt_home()?.join("clients").join("localhost.toml");
+        if !path.exists() {
+            return localhost_default();
+        }
+        let mut entry: ClientEntry = load("clients", name)?;
+        entry.local = true;
+        return Ok(entry);
+    }
     load("clients", name)
+}
+
+fn localhost_default() -> Result<ClientEntry> {
+    let home = std::env::var("HOME").context("HOME not set")?;
+    Ok(ClientEntry {
+        name: "localhost".into(),
+        local: true,
+        ssh: SshEndpoint::default(),
+        qroot: shunt_home()?.join("queue").display().to_string(),
+        deploy_root: home,
+        facts: BTreeMap::new(),
+        billing: None,
+    })
+}
+
+/// Client names including the built-in `localhost` loopback.
+pub fn list_clients() -> Result<Vec<String>> {
+    let mut names = list_names("clients")?;
+    if !names.iter().any(|n| n == "localhost") {
+        names.push("localhost".into());
+        names.sort();
+    }
+    Ok(names)
 }
 
 pub fn save_client(entry: &ClientEntry) -> Result<PathBuf> {
@@ -164,6 +210,7 @@ mod tests {
                 user: "root".into(),
                 key: "/path/to/key".into(),
             },
+            local: false,
             qroot: "/root/autodl-tmp/queue".into(),
             deploy_root: "/root/autodl-tmp".into(),
             facts: BTreeMap::new(),
@@ -176,6 +223,13 @@ mod tests {
         let back = load_client("box-1").unwrap();
         assert_eq!(back.ssh.port, 22);
         assert_eq!(list_names("clients").unwrap(), vec!["box-1"]);
+
+        // Built-in loopback: synthesized row, local transport flag,
+        // and present in the client listing even with no file on disk.
+        let lo = load_client("localhost").unwrap();
+        assert!(lo.local);
+        assert_eq!(lo.qroot, tmp.join("queue").display().to_string());
+        assert_eq!(list_clients().unwrap(), vec!["box-1", "localhost"]);
         std::fs::remove_dir_all(&tmp).ok();
     }
 }

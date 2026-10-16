@@ -23,6 +23,11 @@ shunt is a FIFO + priority-band + at-least-once experiment queue for
 rented GPU boxes, operated headlessly by agents over SSH. It is not a CI
 system, not Slurm, not a task spooler clone.
 
+FIFO is the _claim_ order, not the execution shape: the client runs a
+concurrent worker pool (`workers`, live-tunable), so several tasks run
+in parallel and the daemon's job is to keep the box saturated, not
+serialized.
+
 Non-goals, by deliberate exclusion:
 
 - No DAG dependencies between tasks. Use Airflow.
@@ -77,23 +82,25 @@ failure the bash version already survived.
 ### 3.1 Filesystem layout
 
 Under `$QROOT` (client-local; resolved as `--root` flag > `$SHUNT_ROOT`
-env > configured qroot, since the binary no longer lives inside the
-queue directory):
+env. Every wire op passes `--root <qroot>` from the client row, so the
+registry stays authoritative and the remote never resolves its own
+queue root):
 
-| Entry                | Meaning                                                        |
-| -------------------- | -------------------------------------------------------------- |
-| `pending/`           | `NNNN_<slug>.sh` task files; claimed in filename sort order    |
-| `running/`           | in-flight `<task>.sh` plus `<task>.sh.log` and `<task>.sh.pid` |
-| `done/`              | task + `.log` + `.exit` for rc 0                               |
-| `failed/`            | task + `.log` + `.exit` for nonzero rc or killed tasks         |
-| `workers`            | pool size file, re-read every poll cycle                       |
-| `STOP`               | sentinel file: drain in-flight tasks, then daemon exits        |
-| `shutdown_on_idle`   | flag file: power off once queue fully drains                   |
-| `shutdown_grace_s`   | countdown seconds (default 60)                                 |
-| `shutdown_cmd`       | command exec'd at countdown end                                |
-| `daemon.pid`         | daemon pid, written at startup                                 |
-| `daemon.log`         | structured JSONL event stream (see §3.9)                       |
-| `.seq` + `.seq.lock` | enqueue counter under flock                                    |
+| Entry                | Meaning                                                                        |
+| -------------------- | ------------------------------------------------------------------------------ |
+| `pending/`           | `NNNN_<slug>.sh` task files; claimed in filename sort order                    |
+| `running/`           | in-flight `<task>.sh` plus `<task>.sh.log` and `<task>.sh.pid`                 |
+| `done/`              | task + `.log` + `.exit` for rc 0                                               |
+| `failed/`            | task + `.log` + `.exit` for nonzero rc or killed tasks                         |
+| `workers`            | pool size file, re-read every poll cycle                                       |
+| `env`                | runner env dotenv: `WORKDIR`, `PATH_PREPEND`, `TASK_THREADS`, passthrough keys |
+| `STOP`               | sentinel file: drain in-flight tasks, then daemon exits                        |
+| `shutdown_on_idle`   | flag file: power off once queue fully drains                                   |
+| `shutdown_grace_s`   | countdown seconds (default 60)                                                 |
+| `shutdown_cmd`       | command exec'd at countdown end                                                |
+| `daemon.pid`         | daemon pid, written at startup                                                 |
+| `daemon.log`         | structured JSONL event stream (see §3.9)                                       |
+| `.seq` + `.seq.lock` | enqueue counter under flock                                                    |
 
 The daemon only manages tasks it dequeued itself, tracked via
 `running/*.pid`. Other jobs on the box are never touched. This boundary
@@ -243,19 +250,25 @@ poweroff. The last re-check narrows but cannot close it.
 
 ### 3.12 Task environment (exec wrapper)
 
-Every task runs under a fixed prologue (the bash `qexec.sh`):
+Every task runs under a fixed prologue (the bash `qexec.sh`). The
+queue-level `env` file under `$QROOT` supplies defaults; per-task
+`# shunt:` directives in the task's comment head override them for
+that task only:
 
-- `cwd` = the binding's `workdir` (bash hardcoded the repo path; if the
-  workdir is unreachable the task fails rc 97 without running).
-- `PATH` prepended with the binding's `PATH_PREPEND`.
+- `cwd` = task's `# shunt:workdir=` directive, else `env`'s `WORKDIR`,
+  else `$QROOT` itself. If the workdir is unreachable the task fails
+  rc 97 without running.
+- `PATH` prepended with `env`'s `PATH_PREPEND`.
 - All proxy variables unset: `ALL_PROXY all_proxy http_proxy https_proxy
   HTTP_PROXY HTTPS_PROXY`. A task that needs a tunnel re-exports it
   inside itself.
-- `OMP_NUM_THREADS` / `MKL_NUM_THREADS` set to the binding's thread cap
-  (`TASK_THREADS`, or `auto` → cgroup probe, see §8). Rationale: AutoDL
-  containers are cgroup-capped while `nproc`/`free` report host values —
-  on RW-A, 14 real cores vs 112 reported. An uncapped torch process
-  claims all of them and N workers thrash.
+- `OMP_NUM_THREADS` / `MKL_NUM_THREADS` set to `env`'s `TASK_THREADS`
+  (`auto` → cgroup probe, see §8). Rationale: AutoDL containers are
+  cgroup-capped while `nproc`/`free` report host values — on RW-A, 14
+  real cores vs 112 reported. An uncapped torch process claims all of
+  them and N workers thrash.
+- Remaining `env` keys pass through as environment; per-task
+  `# shunt-env:K=V` directives apply last and win.
 - Then `exec bash <taskfile>`.
 
 A task may override any of these inside itself. `set -uo pipefail` is
@@ -274,10 +287,21 @@ if [ -e <guard> ]; then echo "guard hit: <guard> exists; skipping"; exit 0; fi
 exec <cmd...>            # args shell-quoted
 ```
 
-No `cd` line — the runner already places cwd at `workdir` (the bash
-version's generated `cd` was redundant). The guard convention is the
-contract that makes at-least-once safe: tasks must be idempotent or
-guard on the artifact they produce.
+A submitted task carries its binding inside the body, as comment-head
+directives the runner parses at spawn (the wire carries only the
+body, so metadata cannot travel beside it):
+
+```bash
+# shunt:workdir=/abs/path        # runner cwd for this task only
+# shunt-env:KEY=value            # env overlay; beats the queue env file
+```
+
+Both are optional and repeatable (`env`); scanning stops at the first
+non-comment line, so hand-written tasks can set them too. No `cd`
+line — the runner already places cwd at `workdir` (the bash version's
+generated `cd` was redundant). The guard convention is the contract
+that makes at-least-once safe: tasks must be idempotent or guard on
+the artifact they produce.
 
 ### 3.14 Known defects in the bash source — fix in the port
 
@@ -306,6 +330,16 @@ Registry files are human-editable TOML and safe to keep in git (minus
 key paths). "Registration" is server-local bookkeeping:
 `shunt client add` writes the row with zero network traffic. A client
 never needs to reach the server.
+
+**`localhost` is a built-in client.** The dev machine itself is always a
+valid target — same wire surface, minus SSH: the transport runs the
+local `shunt` binary's argv directly (loopback). Defaults when no
+`clients/localhost.toml` row exists: `qroot=$SHUNT_HOME/queue`,
+`deploy_root=$HOME`; a real row file overrides either. This exists so
+the whole submit → dispatch → execute → finalize path runs on the dev
+box alone, which is also the integration-test floor. Rules: liveness
+checks and `start` work identically (the pidfile protocol is local
+anyway); `probe` on localhost just runs locally.
 
 `clients/<name>.toml`:
 
@@ -351,7 +385,9 @@ Two-phase dispatch, at-least-once end to end:
 
 1. Dispatcher (server-side loop, poll interval from `server.toml`)
    scans `spool/` oldest-first.
-2. For each entry bound to client C: `ssh C 'shunt enqueue -' < body`.
+2. For each entry bound to client C, over the row's transport:
+   `shunt enqueue - <slug>-<shortid> --json --root <qroot>` with the
+   body on stdin.
 3. Only on a clean ack (exit 0 + JSON `{ok: true, name: ...}`) does the
    server remove the spool entry. Any failure leaves it for the next
    poll.
@@ -359,16 +395,25 @@ Two-phase dispatch, at-least-once end to end:
    task's guard; the server task id is embedded in the slug
    (`<slug>-<shortid>`) so a re-pushed task is recognizable in logs.
 
-Auto-heal: if SSH connects but the daemon liveness check fails, the
-dispatcher runs `shunt start` on the box once before pushing (this is
-the "power on → claims work" link; box-side autostart remains optional
-sugar). If SSH itself fails (box off), the entry stays in spool.
+Auto-heal: if the box answers but the daemon liveness check fails, the
+dispatcher runs `shunt start --root <qroot>` once before pushing (this
+is the "power on → claims work" link; box-side autostart remains
+optional sugar). If the transport fails entirely (box off), the entry
+stays in spool.
 
 ## 5. Wire protocol
 
 The remote interface is `shunt <subcmd> --json` on the client. Every
 response is a single JSON object with `"protocol": 1`. Errors exit
 nonzero with `{"protocol":1,"ok":false,"error":"..."}`.
+
+Transport is chosen per client row: `ssh` (default) execs over SSH;
+`local` (built-in `localhost`, or `local = true` in a row) spawns the
+same argv via the local `shunt` binary — the wire surface is identical
+and the loopback needs no network, no key. Every wire call appends
+`--root <qroot>` from the client row, so the registry is the single
+source of truth for where the queue lives; ops that read state also
+pass `--json`.
 
 | op                                       | request                        | response sketch                                                                                                                      |
 | ---------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |

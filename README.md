@@ -60,6 +60,15 @@ The agent-facing surface is identical — every command has `--json`, and
 full operational semantics: register, probe, submit, interpret queue
 state, and when to arm idle shutdown.
 
+No box yet? `localhost` is a built-in client — the same wire path runs
+locally, no SSH needed:
+
+```bash
+shunt submit -c localhost -- echo hello from the queue
+shunt dispatch --once          # sweep: starts the daemon, delivers
+shunt status -c localhost --json
+```
+
 ## How it fits together
 
 ```text

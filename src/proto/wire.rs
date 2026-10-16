@@ -56,8 +56,8 @@ pub struct StatusReport {
     pub workers: WorkersState,
     pub running: Vec<String>,
     pub pending: Vec<String>,
-    pub done_recent: Vec<String>,
-    pub failed_recent: Vec<String>,
+    pub done_recent: Vec<ExitRecord>,
+    pub failed_recent: Vec<ExitRecord>,
     pub stop: bool,
     pub shutdown: ShutdownState,
 }
@@ -74,6 +74,14 @@ pub struct WorkersState {
     pub value: u32,
     /// Where it came from: "file" | "env" | "default".
     pub source: String,
+}
+
+/// A finished task as reported by `status`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExitRecord {
+    /// Task filename, e.g. `0103_train-v2.sh`.
+    pub name: String,
+    pub rc: i32,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
