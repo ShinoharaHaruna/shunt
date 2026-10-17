@@ -84,7 +84,10 @@ pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slu
         let p = registry::load_project(pname)?;
         let b = p.bind.iter().find(|b| b.client == client_name).with_context(|| format!("project {pname} is not bound to client {client_name}"))?;
         meta.workdir = Some(b.workdir.clone());
-        meta.env = b.env.clone();
+        // project [defaults].env lays the floor; the binding's env
+        // wins per key.
+        meta.env = p.defaults.env.clone();
+        meta.env.extend(b.env.clone());
     }
 
     let body = if let Some(path) = file {

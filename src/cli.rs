@@ -420,7 +420,15 @@ pub struct ProjectCmd {
 #[derive(Subcommand)]
 pub enum ProjectAction {
     /// Register a project
-    Add { name: String },
+    Add {
+        name: String,
+        /// Canonical checkout on the dev machine (path or git URL)
+        #[arg(long)]
+        repo: Option<String>,
+        /// One-line description — helps agents pick the right project
+        #[arg(long)]
+        desc: Option<String>,
+    },
     /// List registered projects
     Ls,
     /// Show one project row
@@ -602,15 +610,20 @@ pub fn run(cli: Cli) -> Result<()> {
         },
 
         Command::Project(c) => match c.action {
-            ProjectAction::Add { name } => {
-                let e = registry::ProjectEntry { name: name.clone(), bind: Vec::new() };
+            ProjectAction::Add { name, repo, desc } => {
+                let e = registry::ProjectEntry { name: name.clone(), desc: desc.unwrap_or_default(), repo: repo.unwrap_or_default(), defaults: Default::default(), bind: Vec::new() };
                 let p = registry::save_project(&e)?;
                 println!("wrote {}", p.display());
                 Ok(())
             }
             ProjectAction::Ls => {
                 for n in registry::list_names("projects")? {
-                    println!("{n}");
+                    let d = registry::load_project(&n).map(|e| e.desc).unwrap_or_default();
+                    if d.is_empty() {
+                        println!("{n}");
+                    } else {
+                        println!("{n}\t{d}");
+                    }
                 }
                 Ok(())
             }

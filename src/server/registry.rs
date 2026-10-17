@@ -105,11 +105,29 @@ pub struct Billing {
 }
 
 /// One project; many-to-many with clients via `[[bind]]`.
+/// `repo`/`desc` document where the code lives and what it is —
+/// agents read the row to pick the right project; `[defaults]`
+/// merge under every binding at submit time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectEntry {
     pub name: String,
     #[serde(default)]
+    pub desc: String,
+    /// Canonical checkout on the dev machine (path or git URL) —
+    /// where the code lives for edits; a future rsync source.
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default)]
+    pub defaults: ProjectDefaults,
+    #[serde(default)]
     pub bind: Vec<Binding>,
+}
+
+/// Project-wide defaults, merged under each binding (binding wins).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ProjectDefaults {
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 /// A binding supplies workdir + env overlay for tasks on that client.
@@ -193,6 +211,17 @@ fn load<T: for<'de> Deserialize<'de>>(dir: &str, name: &str) -> Result<T> {
 /// Header written at the top of every client row file: documents the
 /// knobs TOML omits when unset (Option fields serialize to nothing),
 /// so a fresh row still shows the full template.
+/// Header comment written above every project row — the files are
+/// meant to be hand-editable, so fields self-document.
+const PROJECT_HEADER: &str = "\
+# shunt project row — edit by hand; `project add`/`bind` write this file.
+#   name       registry key
+#   desc       what this project is (helps agents pick the right one)
+#   repo       canonical checkout on the dev machine (path or git URL)
+#   [defaults].env  merged UNDER every binding's env at submit
+#   [[bind]]   client + remote workdir (repo location on the box) + env
+#\n";
+
 const CLIENT_HEADER: &str = "\
 # shunt client row.
 # Optional knobs, absent until set:
@@ -217,10 +246,6 @@ fn save_with_header<T: Serialize>(dir: &str, name: &str, value: &T, header: &str
     let text = format!("{header}{}", toml::to_string_pretty(value)?);
     fs::write(&path, text)?;
     Ok(path)
-}
-
-fn save<T: Serialize>(dir: &str, name: &str, value: &T) -> Result<PathBuf> {
-    save_with_header(dir, name, value, "")
 }
 
 pub fn load_client(name: &str) -> Result<ClientEntry> {
@@ -288,7 +313,7 @@ pub fn load_project(name: &str) -> Result<ProjectEntry> {
 }
 
 pub fn save_project(entry: &ProjectEntry) -> Result<PathBuf> {
-    save("projects", &entry.name, entry)
+    save_with_header("projects", &entry.name, entry, PROJECT_HEADER)
 }
 
 pub fn load_server_config() -> Result<ServerConfig> {

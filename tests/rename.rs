@@ -23,7 +23,8 @@ fn rename_moves_row_keys_state_and_refs() -> Result<()> {
     registry::save_client(&e)?;
     // A staged submission + a project binding referencing old-box.
     spool::stage(&SpoolEntry { id: "t1".into(), project: "p".into(), client: "old-box".into(), meta: TaskMeta { slug: "s".into(), guard: None, workdir: None, env: Default::default(), cmd: vec!["echo".into()] }, submitted_at: "2026-01-01T00:00:00Z".into() }, "echo s\n")?;
-    registry::save_project(&ProjectEntry { name: "p".into(), bind: vec![Binding { client: "old-box".into(), workdir: "/w".into(), env: Default::default() }] })?;
+    let env_of = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    registry::save_project(&ProjectEntry { name: "p".into(), desc: String::new(), repo: String::new(), defaults: shunt::server::registry::ProjectDefaults { env: env_of(&[("A", "1"), ("B", "2")]) }, bind: vec![Binding { client: "old-box".into(), workdir: "/w".into(), env: env_of(&[("B", "3")]) }] })?;
     // Conn-fail streak file.
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
@@ -41,6 +42,14 @@ fn rename_moves_row_keys_state_and_refs() -> Result<()> {
     assert_eq!(registry::conn_fail_read("old-box"), 0);
     assert_eq!(spool::list()?[0].client, "new-box");
     assert_eq!(registry::load_project("p")?.bind[0].client, "new-box");
+
+    // Submit through the renamed binding: defaults.env merged under
+    // binding env (B comes from the binding, A from defaults).
+    let id = spool::submit("new-box", Some("p"), None, Some("s2"), None, &["echo".into()])?;
+    let staged = spool::list()?.into_iter().find(|e| e.id == id).unwrap();
+    assert_eq!(staged.meta.env.get("A").map(String::as_str), Some("1"));
+    assert_eq!(staged.meta.env.get("B").map(String::as_str), Some("3"));
+    assert_eq!(staged.meta.workdir.as_deref(), Some("/w"));
 
     // Guards: no clobber, no reserved name.
     assert!(client_ops::rename("new-box", "new-box-2").is_ok());

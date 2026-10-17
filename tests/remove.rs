@@ -23,7 +23,7 @@ fn remove_cleans_row_keys_state_spool_and_bindings() -> Result<()> {
     registry::save_client(&e)?;
 
     spool::stage(&SpoolEntry { id: "t1".into(), project: "p".into(), client: "gone".into(), meta: TaskMeta { slug: "s".into(), guard: None, workdir: None, env: Default::default(), cmd: vec!["echo".into()] }, submitted_at: "2026-01-01T00:00:00Z".into() }, "echo s\n")?;
-    registry::save_project(&ProjectEntry { name: "p".into(), bind: vec![Binding { client: "gone".into(), workdir: "/w".into(), env: Default::default() }] })?;
+    registry::save_project(&ProjectEntry { name: "p".into(), desc: String::new(), repo: String::new(), defaults: Default::default(), bind: vec![Binding { client: "gone".into(), workdir: "/w".into(), env: Default::default() }] })?;
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
     std::fs::write(state.join("gone.fail"), "2\n")?;

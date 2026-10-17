@@ -254,14 +254,23 @@ Registry files are human-editable TOML and safe to keep in git (minus key paths)
 
 ```toml
 name = "riboworld"
+desc = "RiboWorld RNA-seq pipeline" # helps agents pick the right project
+repo = "~/Code/RiboWorld" # canonical checkout on the dev machine
+# (path or git URL; a future rsync source)
+
+[defaults]
+env = { TASK_THREADS = "4" } # merged UNDER every binding's env
+
 [[bind]]
 client = "rw-a"
-workdir = "/root/autodl-tmp/RiboWorld"
-env = { PATH_PREPEND = "/root/.local/bin", TASK_THREADS = "4" }
+workdir = "/root/autodl-tmp/RiboWorld" # repo location on the box
+env = { PATH_PREPEND = "/root/.local/bin" }
 [[bind]]
 client = "gerna-b"
 workdir = "/data/RiboWorld"
 ```
+
+`[defaults].env` merges beneath each binding's `env` at submit (binding wins per key). `repo`/`desc` are documentation fields today — `project add --repo --desc` fills them, `project ls` prints the desc column — and `repo` is where a future `shunt sync` would pull task code from. The remote checkout path stays a per-binding `workdir` concern; different boxes mount differently.
 
 ### 4.2 Vendor templates
 

@@ -40,8 +40,10 @@ shunt client add rw-a --template autodl
 #    ("Exceeded MaxStartups"); mux + in-call retries absorb that.
 shunt client bootstrap rw-a
 
-# 3. Register a project and bind it to the box.
-shunt project add riboworld
+# 3. Register a project and bind it to the box. --repo records the
+#    dev-side checkout (agents know where the code lives); --desc a
+#    one-liner. [defaults].env in the row merges under every binding.
+shunt project add riboworld --repo ~/Code/RiboWorld --desc "RNA-seq pipeline"
 shunt project bind riboworld --client rw-a \
     --workdir /root/autodl-tmp/RiboWorld --env TASK_THREADS=4
 ```
