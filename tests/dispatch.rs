@@ -70,6 +70,7 @@ fn fixture() -> Result<(PathBuf, ClientEntry)> {
         local_bin: None,
         timeout_s: None,
         ssh_timeout_s: None,
+        shutdown_cmd: None,
         ssh: SshEndpoint {
             host: "127.0.0.1".into(),
             port: 22,

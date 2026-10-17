@@ -276,6 +276,7 @@ mod tests {
             local_bin: None,
             timeout_s: None,
             ssh_timeout_s: None,
+            shutdown_cmd: None,
             ssh: SshEndpoint::default(),
             qroot: "/tmp/qt".into(),
             deploy_root: "/tmp".into(),
