@@ -25,6 +25,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     /// Spool a task for a client (server)
+    #[command(arg_required_else_help = true)]
     Submit(SubmitArgs),
     /// Queue status: -c one client, --all server aggregate,
     /// --root/$SHUNT_ROOT local queue; bare prints this help
@@ -34,14 +35,18 @@ pub enum Command {
     /// Daemon log only (client convenience)
     Dlog(RootArgs),
     /// Manage the server-side staging queue
+    #[command(arg_required_else_help = true)]
     Spool(SpoolCmd),
     /// Manage registered experiment boxes
+    #[command(arg_required_else_help = true)]
     Client(ClientCmd),
     /// Manage registered projects and their client bindings
+    #[command(arg_required_else_help = true)]
     Project(ProjectCmd),
     /// Run the spool dispatcher loop (server)
     Dispatch(DispatchArgs),
     /// Box-side SOCKS5 tunnel over ssh -R (server)
+    #[command(arg_required_else_help = true)]
     Tunnel(TunnelArgs),
 
     /// Create queue dirs under --root (client)
@@ -53,20 +58,27 @@ pub enum Command {
     /// Stop the daemon (client)
     Stop(RootArgs),
     /// Install a task file (or stdin with `-`) into pending/ (client)
+    #[command(arg_required_else_help = true)]
     Enqueue(EnqueueArgs),
     /// Wrap argv as a guarded task and enqueue it (client)
+    #[command(arg_required_else_help = true)]
     New(NewArgs),
     /// Print the generated task body to stdout (client)
+    #[command(arg_required_else_help = true)]
     Mktask(NewArgs),
     /// Remove a pending task by name/pattern
+    #[command(arg_required_else_help = true)]
     Cancel(PatternArgs),
     /// Renumber a pending task into the priority band 0000-0099
+    #[command(arg_required_else_help = true)]
     Prio(PrioArgs),
     /// Kill a running task's process group
+    #[command(arg_required_else_help = true)]
     Kill(PatternArgs),
     /// Get or set the worker pool size
     Workers(WorkersArgs),
     /// Idle-shutdown control (client) or remote arm via -c (server)
+    #[command(arg_required_else_help = true)]
     Shutdown(ShutdownArgs),
     /// Print machine facts as JSON (client)
     Probe(ProbeArgs),
@@ -472,6 +484,20 @@ fn remote(name: &str, tail: &[&str], stdin: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// No queue context: no --root flag and no SHUNT_ROOT env — the
+/// call has nothing local to act on.
+fn rootless(root: &Option<String>) -> bool {
+    root.is_none() && std::env::var_os("SHUNT_ROOT").is_none()
+}
+
+/// Bare invocations that cannot act print their own -h instead of
+/// dying on 'queue root unknown' — a lost user learns the flags.
+fn print_subhelp(sub: &str) -> Result<()> {
+    use clap::CommandFactory;
+    Cli::command().find_subcommand_mut(sub).expect(sub).print_help()?;
+    Ok(())
+}
+
 pub fn run(cli: Cli) -> Result<()> {
     use crate::server::registry;
     match cli.command {
@@ -487,13 +513,8 @@ pub fn run(cli: Cli) -> Result<()> {
             if a.all {
                 return crate::server::status::run_all(a.json);
             }
-            // Bare `status` has no target: print the help so the
-            // human learns -c / --all / --root instead of hitting a
-            // 'queue root unknown' error.
-            if a.root.is_none() && std::env::var_os("SHUNT_ROOT").is_none() {
-                use clap::CommandFactory;
-                Cli::command().find_subcommand_mut("status").expect("status subcommand").print_help()?;
-                return Ok(());
+            if rootless(&a.root) {
+                return print_subhelp("status");
             }
             agent_status(&a)
         }
@@ -502,9 +523,17 @@ pub fn run(cli: Cli) -> Result<()> {
                 let pat = a.pattern.clone().unwrap_or_default();
                 return remote(name, &["logs", &pat], None);
             }
+            if rootless(&a.root) {
+                return print_subhelp("logs");
+            }
             agent_logs(&a)
         }
-        Command::Dlog(a) => agent_dlog(&a),
+        Command::Dlog(a) => {
+            if rootless(&a.root) {
+                return print_subhelp("dlog");
+            }
+            agent_dlog(&a)
+        }
         Command::Dispatch(a) => crate::server::dispatch::run(a.once),
         Command::Tunnel(a) => {
             use crate::server::tunnel;
@@ -658,6 +687,9 @@ pub fn run(cli: Cli) -> Result<()> {
         },
 
         Command::Init(a) => {
+            if rootless(&a.root) {
+                return print_subhelp("init");
+            }
             let root = agent_root(&a.root)?;
             crate::agent::queue::init(&root)?;
             if a.json {
@@ -668,10 +700,16 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Daemon(a) => {
+            if rootless(&a.root) {
+                return print_subhelp("daemon");
+            }
             let root = agent_root(&a.root)?;
             crate::agent::daemon::run(&root)
         }
         Command::Start(a) => {
+            if rootless(&a.root) {
+                return print_subhelp("start");
+            }
             let root = agent_root(&a.root)?;
             match crate::agent::daemon::start(&root) {
                 Ok(pid) => {
@@ -686,6 +724,9 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         }
         Command::Stop(a) => {
+            if rootless(&a.root) {
+                return print_subhelp("stop");
+            }
             let root = agent_root(&a.root)?;
             crate::agent::daemon::stop(&root)?;
             if a.json {
@@ -695,8 +736,18 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Command::Enqueue(a) => agent_enqueue(&a),
-        Command::New(a) => agent_new(&a),
+        Command::Enqueue(a) => {
+            if rootless(&a.root) {
+                return print_subhelp("enqueue");
+            }
+            agent_enqueue(&a)
+        }
+        Command::New(a) => {
+            if rootless(&a.root) {
+                return print_subhelp("new");
+            }
+            agent_new(&a)
+        }
         Command::Mktask(a) => {
             // mktask can render for real: it is pure output.
             let meta = crate::proto::task::TaskMeta { slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard, workdir: None, env: Default::default(), cmd: a.cmd };
@@ -710,6 +761,9 @@ pub fn run(cli: Cli) -> Result<()> {
             if let Some(name) = &a.client {
                 return remote(name, &["cancel", &a.pattern, "--json"], None);
             }
+            if rootless(&a.root) {
+                return print_subhelp("cancel");
+            }
             agent_cancel(&a)
         }
         Command::Prio(a) => {
@@ -717,11 +771,17 @@ pub fn run(cli: Cli) -> Result<()> {
                 let n = a.n.to_string();
                 return remote(name, &["prio", &a.pattern, &n, "--json"], None);
             }
+            if rootless(&a.root) {
+                return print_subhelp("prio");
+            }
             agent_prio(&a)
         }
         Command::Kill(a) => {
             if let Some(name) = &a.client {
                 return remote(name, &["kill", &a.pattern, "--json"], None);
+            }
+            if rootless(&a.root) {
+                return print_subhelp("kill");
             }
             agent_kill(&a)
         }
@@ -731,6 +791,9 @@ pub fn run(cli: Cli) -> Result<()> {
                     Some(n) => remote(name, &["workers", "set", &n.to_string(), "--json"], None),
                     None => remote(name, &["workers", "get", "--json"], None),
                 };
+            }
+            if rootless(&a.root) {
+                return print_subhelp("workers");
             }
             agent_workers(&a)
         }
@@ -761,6 +824,9 @@ pub fn run(cli: Cli) -> Result<()> {
                     ShutdownAction::Off => remote(name, &["shutdown", "off", "--json"], None),
                     ShutdownAction::Status => remote(name, &["shutdown", "status", "--json"], None),
                 };
+            }
+            if rootless(&a.root) {
+                return print_subhelp("shutdown");
             }
             agent_shutdown(&a)
         }
