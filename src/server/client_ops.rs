@@ -36,6 +36,10 @@ fi
 [ -z "$mem" ] && mem=$(free -b 2>/dev/null | awk '/^Mem:/{print $2}')
 echo "MEM_BYTES=$mem"
 echo "DISK_FREE_GB=$(df --output=avail -BG "$1" 2>/dev/null | tail -n1 | tr -dc '0-9')"
+cr=0
+[ "$(id -u 2>/dev/null)" = "0" ] && cr=1
+if [ "$cr" = "0" ] && sudo -n true 2>/dev/null; then cr=1; fi
+echo "CAN_ROOT=$cr"
 echo "PY=$(python3 --version 2>&1 | awk '{print $2}')"
 "#;
 
@@ -93,6 +97,9 @@ fn parse_probe(out: &str) -> BTreeMap<String, serde_json::Value> {
                 if let Ok(n) = v.parse::<f64>() {
                     m.insert("disk_free_gb".into(), json!(n));
                 }
+            }
+            "CAN_ROOT" => {
+                m.insert("can_root".into(), json!(v == "1"));
             }
             "PY" if !v.is_empty() => {
                 m.insert("python".into(), json!(v));
@@ -171,7 +178,7 @@ mod tests {
 
     #[test]
     fn parse_sample_output() {
-        let out = "GPU=NVIDIA GeForce RTX 4090, 535.54.03\nCUDA=12.2\nCORES=14\nMEM_BYTES=60129583104\nDISK_FREE_GB=118\nPY=3.10.12\n";
+        let out = "GPU=NVIDIA GeForce RTX 4090, 535.54.03\nCUDA=12.2\nCORES=14\nMEM_BYTES=60129583104\nDISK_FREE_GB=118\nCAN_ROOT=1\nPY=3.10.12\n";
         let f = parse_probe(out);
         assert_eq!(f["gpu"], "NVIDIA GeForce RTX 4090");
         assert_eq!(f["driver"], "535.54.03");
@@ -180,6 +187,7 @@ mod tests {
         assert_eq!(f["mem_gb"], 60.1);
         assert_eq!(f["disk_free_gb"], 118.0);
         assert_eq!(f["python"], "3.10.12");
+        assert_eq!(f["can_root"], true);
     }
 
     #[test]

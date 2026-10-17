@@ -103,6 +103,24 @@ fn disk_free_gb(path: &str) -> Option<f64> {
     Some(avail as f64 / 1_073_741_824.0)
 }
 
+/// Can this box do root things: real root (`id -u` = 0) or
+/// passwordless sudo. Feeds the `can_root` fact (design.md §8).
+fn can_root() -> Option<bool> {
+    let uid = run("id", &["-u"])?;
+    if uid.trim() == "0" {
+        return Some(true);
+    }
+    let ok = Command::new("sudo")
+        .args(["-n", "true"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    Some(ok)
+}
+
 fn python_version() -> Option<String> {
     // python3 --version prints to stdout on 3.x
     let out = run("python3", &["--version"])?;
@@ -124,5 +142,6 @@ pub fn collect(deploy_root: &str) -> ProbeReport {
         mem_gb: cgroup_mem_gb().map(|g| (g * 100.0).round() / 100.0),
         disk_free_gb: disk_free_gb(deploy_root).map(|g| (g * 100.0).round() / 100.0),
         python: python_version(),
+        can_root: can_root(),
     }
 }

@@ -13,8 +13,15 @@ filesystem queue (`pending/ running/ done/ failed/` under `qroot`).
 
 Mental model:
 
-- The wire is `ssh <box> 'shunt <cmd> --json'`. No ports, no server-side
+- The wire is `ssh <box> 'shunt <cmd> --json --root <qroot>'`; the
+  registry's `qroot` is authoritative. No ports, no server-side
   daemon besides the dispatcher, no client process besides `shuntd`.
+- `localhost` is a built-in client: same wire surface, but the
+  transport execs the local `shunt` binary directly — no ssh, no key.
+  Its default queue is `~/.config/shunt/queue/`. Use it for dry runs,
+  integration smoke, and dev-loop tasks on the dev machine itself.
+  `shunt client add <name> --local` creates additional loopback
+  queues.
 - Execution is at-least-once. Tasks must guard on the artifact they
   produce so reruns are no-ops.
 - The box powers itself off when the queue drains and
@@ -63,6 +70,15 @@ shunt submit -c rw-a --slug exp2 -- python eval.py
 
 `submit` writes a spool entry (`spool/<id>.json` + `<id>.sh`) and
 returns. Delivery happens when the dispatcher next reaches the box.
+The binding's `workdir`/`env` travel inside the task body itself, as
+comment-head directives the runner parses at spawn:
+
+```bash
+# shunt:workdir=/abs/path     # runner cwd for this task
+# shunt-env:KEY=value         # env overlay; beats the queue env file
+```
+
+A `--file` script can carry its own directives the same way.
 
 The guard contract is REQUIRED for safe at-least-once execution. The
 generated task body begins:
@@ -130,11 +146,21 @@ The client queue is a directory of tracks under `qroot`:
 | `done/`    | task + `.log` + `.exit` (contains `0`)                |
 | `failed/`  | task + `.log` + `.exit` (nonzero rc, or killed)       |
 
+Queue-level runner env lives in the `env` dotenv file under `qroot`
+(`WORKDIR`, `PATH_PREPEND`, `TASK_THREADS`, plus passthrough keys);
+per-task `# shunt-env:` directives override it.
+
 `status --json` returns `{protocol:1, daemon:{alive,pid},
 workers:{value,source}, running[], pending[], done_recent[],
 failed_recent[], stop, shutdown:{armed,grace_s}}`. On the server side,
 `status --all --json` merges per-client rows and adds `facts` and
 `billing` from the registry.
+
+`facts` is probe-collected advisory data: `gpu`, `cuda`, `driver`,
+`cores`, `mem_gb`, `disk_free_gb`, `python`, and `can_root` (the box
+is root or has passwordless sudo — i.e. whether it can install
+packages or power off). Cores and memory are cgroup-aware; `nproc` on
+AutoDL reports the host, not your quota.
 
 `daemon.log` is JSONL, one `{ts, event, ...}` per line:
 

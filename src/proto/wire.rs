@@ -103,4 +103,8 @@ pub struct ProbeReport {
     pub mem_gb: Option<f64>,
     pub disk_free_gb: Option<f64>,
     pub python: Option<String>,
+    /// `id -u == 0` or passwordless `sudo -n` — "can this box do root
+    /// things" (install packages, poweroff). Advisory registry fact.
+    #[serde(default)]
+    pub can_root: Option<bool>,
 }
