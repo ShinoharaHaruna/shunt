@@ -81,26 +81,29 @@ pub trait Transport {
 /// -i KEY USER@HOST '<quoted argv>'`.
 pub struct SshTransport;
 
+/// ControlMaster socket dir: `$SHUNT_HOME/cm/` — shunt-owned mux,
+/// never the user's ~/.ssh/config (design.md §4.1).
+pub fn cm_dir() -> Result<std::path::PathBuf> {
+    Ok(crate::server::registry::shunt_home()?.join("cm"))
+}
+
+fn cm_sock(client: &ClientEntry) -> String {
+    cm_dir().map(|d| d.join(format!("{}.sock", client.name)).display().to_string()).unwrap_or_else(|_| "/dev/null".into())
+}
+
 impl SshTransport {
     /// ssh connection flags (-p, BatchMode, timeouts, TOFU known_hosts,
-    /// key, user@host). Shared by exec, scp, and the tunnel manager.
+    /// key, user@host, mux). Shared by exec, scp, and the tunnel
+    /// manager.
     pub(crate) fn base_args(client: &ClientEntry) -> Vec<String> {
         let kh = crate::server::registry::known_hosts_path().map(|p| p.display().to_string()).unwrap_or_else(|_| "/dev/null".into());
-        let mut v = vec![
-            "-p".into(),
-            client.ssh.port.to_string(),
-            "-o".into(),
-            "BatchMode=yes".into(),
-            "-o".into(),
-            format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)),
-            // TOFU on a shunt-scoped file: new host keys are accepted
-            // without prompting, changed ones still fail loudly — and
-            // the user's own ~/.ssh/known_hosts is never touched.
-            "-o".into(),
-            "StrictHostKeyChecking=accept-new".into(),
-            "-o".into(),
-            format!("UserKnownHostsFile={kh}"),
-        ];
+        // ControlMaster mux: every exec/scp rides one TCP session per
+        // client. Boxes behind startup-limited proxies (`Exceeded
+        // MaxStartups`) reject back-to-back handshakes — muxing is the
+        // fix, not retries. The socket lives under $SHUNT_HOME/cm/ so
+        // nothing touches the user's own ssh config.
+        let _ = std::fs::create_dir_all(cm_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp")));
+        let mut v = vec!["-p".into(), client.ssh.port.to_string(), "-o".into(), "BatchMode=yes".into(), "-o".into(), format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)), "-o".into(), "StrictHostKeyChecking=accept-new".into(), "-o".into(), format!("UserKnownHostsFile={kh}"), "-o".into(), "ControlMaster=auto".into(), "-o".into(), format!("ControlPath={}", cm_sock(client)), "-o".into(), "ControlPersist=60".into()];
         if !client.ssh.key.is_empty() {
             v.push("-i".into());
             v.push(client.ssh.key.clone());
@@ -119,44 +122,53 @@ impl Transport for SshTransport {
         } else {
             cmd.stdin(Stdio::null());
         }
-        let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("spawn ssh")?;
-        if let Some(body) = stdin {
-            child.stdin.as_mut().expect("stdin piped").write_all(body.as_bytes())?;
-        }
-        let out = child.wait_with_output().context("wait ssh")?;
-        if !out.status.success() {
-            let rc = out.status.code().unwrap_or(-1);
-            // 255 = ssh itself failed (connect/auth/refused), i.e. a
-            // connectivity failure — count the streak for endpoint-
-            // drift escalation (design.md §4.1, CONN_FAIL_ESCALATE).
-            // Other codes are remote-command failures, not ours.
-            if rc == 255 {
-                let n = crate::server::registry::conn_fail_bump(&client.name);
-                let hint = if n >= crate::server::registry::CONN_FAIL_ESCALATE {
-                    if client.endpoint_rotates {
-                        format!(" [{n} consecutive connect failures — vendor may have reassigned IP/port on restart; check the console and update ssh.host/ssh.port in the row]")
-                    } else {
-                        format!(" [{n} consecutive connect failures — vendor keeps stable endpoints; box is likely off, asleep, or its sshd is down]")
-                    }
-                } else {
-                    String::new()
-                };
-                anyhow::bail!("ssh {}@{}:{} unreachable rc={}: {}{}", client.ssh.user, client.ssh.host, client.ssh.port, rc, String::from_utf8_lossy(&out.stderr).trim(), hint);
+        // rc 255 = ssh-level failure (connect/refused/`Exceeded
+        // MaxStartups` flap). Retry a few times inside the call so a
+        // single flap never bubbles up; only an exhausted streak
+        // bumps the endpoint-drift counter (design.md §4.1).
+        const RETRY: u32 = 3;
+        for attempt in 1..=RETRY {
+            let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("spawn ssh")?;
+            if let Some(body) = stdin {
+                child.stdin.as_mut().expect("stdin piped").write_all(body.as_bytes())?;
             }
-            anyhow::bail!("ssh {}@{}:{} rc={}: {}", client.ssh.user, client.ssh.host, client.ssh.port, rc, String::from_utf8_lossy(&out.stderr).trim());
+            drop(child.stdin.take());
+            let out = child.wait_with_output().context("wait ssh")?;
+            if out.status.success() {
+                crate::server::registry::conn_fail_reset(&client.name);
+                return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+            }
+            let rc = out.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if rc != 255 || attempt == RETRY {
+                if rc == 255 {
+                    let n = crate::server::registry::conn_fail_bump(&client.name);
+                    let hint = if n >= crate::server::registry::CONN_FAIL_ESCALATE {
+                        if client.endpoint_rotates {
+                            format!(" [{n} consecutive connect failures — vendor may have reassigned IP/port on restart; check the console and update ssh.host/ssh.port in the row]")
+                        } else {
+                            format!(" [{n} consecutive connect failures — vendor keeps stable endpoints; box is likely off, asleep, or its sshd is down]")
+                        }
+                    } else {
+                        String::new()
+                    };
+                    anyhow::bail!("ssh {}@{}:{} unreachable rc={}: {}{}", client.ssh.user, client.ssh.host, client.ssh.port, rc, stderr, hint);
+                }
+                anyhow::bail!("ssh {}@{}:{} rc={}: {}", client.ssh.user, client.ssh.host, client.ssh.port, rc, stderr);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1500));
         }
-        crate::server::registry::conn_fail_reset(&client.name);
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        unreachable!("retry loop always returns");
     }
 
     fn copy_to(&self, client: &ClientEntry, local: &Path, remote_path: &str) -> Result<()> {
-        // scp, matching the ssh flags; -P for port.
-        let kh = crate::server::registry::known_hosts_path().map(|p| p.display().to_string()).unwrap_or_else(|_| "/dev/null".into());
-        let mut args = vec!["-P".into(), client.ssh.port.to_string(), "-o".into(), "BatchMode=yes".into(), "-o".into(), format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)), "-o".into(), "StrictHostKeyChecking=accept-new".into(), "-o".into(), format!("UserKnownHostsFile={kh}")];
-        if !client.ssh.key.is_empty() {
-            args.push("-i".into());
-            args.push(client.ssh.key.clone());
-        }
+        // scp shares the ssh flags — including the ControlMaster mux,
+        // so bulk copies ride the same single connection (design.md
+        // §4.1). -P for port (scp) vs -p (ssh): reuse base_args but
+        // drop its leading `-p PORT` pair.
+        let base = Self::base_args(client);
+        let mut args = vec!["-P".into(), client.ssh.port.to_string()];
+        args.extend(base.into_iter().skip(2));
         args.push(local.display().to_string());
         args.push(format!("{}@{}:{}", client.ssh.user, client.ssh.host, remote_path));
         let out = Command::new("scp").args(&args).stdin(Stdio::null()).output().context("spawn scp")?;

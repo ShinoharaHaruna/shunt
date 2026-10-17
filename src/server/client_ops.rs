@@ -149,22 +149,56 @@ pub fn ensure_key(entry: &mut ClientEntry) -> Result<()> {
     Ok(())
 }
 
-/// Install `<key>.pub` on the box via `sshpass ssh-copy-id` when
-/// `ssh.password` is set (AutoDL default: password auth). Returns
-/// `true` when the key was deployed; `false` when no automatic path
-/// exists (no password, no sshpass) — the `.pub` must then be
-/// installed once via the vendor console or a manual ssh-copy-id.
+/// Install `<key>.pub` on the box when `ssh.password` is set (AutoDL
+/// default: password auth). One connection, password-only auth (no
+/// pubkey offers — boxes with small MaxAuthTries drop the connection
+/// after too many), pubkey appended via stdin with a `grep -qxF`
+/// dedupe. Returns `true` when the key was deployed; `false` when no
+/// password is configured and the `.pub` must be installed once via
+/// the vendor console or a manual ssh-copy-id.
 pub fn deploy_key(entry: &ClientEntry) -> Result<bool> {
     if entry.ssh.password.is_empty() {
         return Ok(false);
     }
     let have_sshpass = std::process::Command::new("sh").args(["-c", "command -v sshpass >/dev/null 2>&1"]).status().map(|s| s.success()).unwrap_or(false);
     if !have_sshpass {
-        anyhow::bail!("ssh.password is set but `sshpass` is not installed");
+        anyhow::bail!("ssh.password is set but `sshpass` is not installed — install it or deploy {}.pub manually", entry.ssh.key);
     }
-    let pub_key = format!("{}.pub", entry.ssh.key);
-    let st = std::process::Command::new("sshpass").args(["-p", &entry.ssh.password, "ssh-copy-id", "-i", &pub_key, "-p", &entry.ssh.port.to_string(), "-o", "StrictHostKeyChecking=accept-new", "-o", &format!("UserKnownHostsFile={}", registry::known_hosts_path()?.display()), &format!("{}@{}", entry.ssh.user, entry.ssh.host)]).stdin(std::process::Stdio::null()).status().context("spawn sshpass ssh-copy-id")?;
+    let pub_key = std::fs::read_to_string(format!("{}.pub", entry.ssh.key)).with_context(|| format!("cannot read {}.pub", entry.ssh.key))?.trim().to_string();
+    let kh = registry::known_hosts_path()?.display().to_string();
+    // ControlPath=none: the password-auth connection must not become
+    // the mux master — later key-based execs would ride a session
+    // authenticated the wrong way.
+    let script = "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; k=$(cat); grep -qxF \"$k\" ~/.ssh/authorized_keys || echo \"$k\" >> ~/.ssh/authorized_keys";
+    let mut child = std::process::Command::new("sshpass").args(["-p", &entry.ssh.password, "ssh", "-p", &entry.ssh.port.to_string(), "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no", "-o", "NumberOfPasswordPrompts=1", "-o", "StrictHostKeyChecking=accept-new", "-o", &format!("UserKnownHostsFile={kh}"), "-o", "ControlPath=none", "-o", &format!("ConnectTimeout={}", entry.ssh_timeout_s.unwrap_or(15)), &format!("{}@{}", entry.ssh.user, entry.ssh.host), script]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().context("spawn sshpass ssh")?;
+    use std::io::Write;
+    child.stdin.as_mut().context("stdin piped")?.write_all(pub_key.as_bytes())?;
+    drop(child.stdin.take());
+    let st = child.wait().context("wait sshpass")?;
     Ok(st.success())
+}
+
+/// `shunt client hostkey <name>`: drop the box's host-key entries
+/// from OUR known_hosts (`ssh-keygen -R` scoped to it) and kill the
+/// live mux master, so the next connect re-TOFUs a rebuilt container.
+/// This is the escape hatch for `REMOTE HOST IDENTIFICATION HAS
+/// CHANGED` — the user's own ~/.ssh/known_hosts is never involved.
+pub fn rekey(entry: &ClientEntry) -> Result<()> {
+    let kh = registry::known_hosts_path()?;
+    if kh.exists() {
+        let spec = if entry.ssh.port == 22 { entry.ssh.host.clone() } else { format!("[{}]:{}", entry.ssh.host, entry.ssh.port) };
+        let st = std::process::Command::new("ssh-keygen").args(["-R", &spec, "-f", &kh.display().to_string()]).stdin(std::process::Stdio::null()).status().context("spawn ssh-keygen -R")?;
+        if !st.success() {
+            anyhow::bail!("ssh-keygen -R {spec} failed");
+        }
+    }
+    // Kill the mux master if one is alive — it still holds a session
+    // verified against the OLD key.
+    let sock = crate::server::transport::cm_dir()?.join(format!("{}.sock", entry.name));
+    if sock.exists() {
+        let _ = std::process::Command::new("ssh").args(["-S", &sock.display().to_string(), "-O", "exit", "x"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    }
+    Ok(())
 }
 
 /// `shunt client env <name>`: push the row's `env_setup`/`shell` to
@@ -195,11 +229,14 @@ fn write_qroot_file(t: &dyn Transport, e: &ClientEntry, fname: &str, content: &s
 /// `start`, push env_setup, merge facts.
 pub fn bootstrap(t: &dyn Transport, name: &str) -> Result<()> {
     let mut entry = registry::load_client(name)?;
+    if !entry.local && entry.qroot.is_empty() {
+        anyhow::bail!("{}: qroot is empty — set it in the row (usually <deploy_root>/queue)", entry.name);
+    }
     ensure_key(&mut entry)?;
     if deploy_key(&entry)? {
         eprintln!("key deployed: {}", entry.ssh.key);
-    } else if !entry.local {
-        eprintln!("note: no password/sshpass path — install {}.pub on the box once\n      (vendor console or: ssh-copy-id -i {}.pub -p {} {}@{})", entry.ssh.key, entry.ssh.key, entry.ssh.port, entry.ssh.user, entry.ssh.host);
+    } else if !entry.local && entry.ssh.password.is_empty() {
+        eprintln!("note: no ssh.password in the row — install {}.pub on the box once\n      (vendor console or: ssh-copy-id -i {}.pub -p {} {}@{})", entry.ssh.key, entry.ssh.key, entry.ssh.port, entry.ssh.user, entry.ssh.host);
     }
     let facts = probe_facts(t, &entry)?;
     entry.facts.extend(facts);

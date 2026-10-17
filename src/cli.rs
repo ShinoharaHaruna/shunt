@@ -329,9 +329,13 @@ pub struct ClientAddArgs {
     /// SSH user (template default: root)
     #[arg(long)]
     pub user: Option<String>,
-    /// SSH private key path
+    /// SSH private key path (empty = generated at keys/<name>)
     #[arg(long)]
     pub key: Option<String>,
+    /// SSH password — enables unattended key deploy on bootstrap
+    /// (AutoDL-style password auth)
+    #[arg(long)]
+    pub password: Option<String>,
     /// Queue dir on the box (template default: deploy_root/queue)
     #[arg(long)]
     pub qroot: Option<String>,
@@ -378,6 +382,11 @@ pub enum ClientAction {
     Bootstrap { name: String },
     /// Push the row's env_setup/shell to <qroot>/env_setup + shell
     Env { name: String },
+    /// List vendor templates visible to `client add --template`
+    Templates,
+    /// Drop the box's host key from shunt's known_hosts + kill the
+    /// mux master (use after a container rebuild changed the key)
+    Hostkey { name: String },
 }
 
 #[derive(Args)]
@@ -499,7 +508,25 @@ pub fn run(cli: Cli) -> Result<()> {
         },
 
         Command::Client(c) => match c.action {
-            ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { host: a.host, port: a.port, user: a.user, key: a.key, qroot: a.qroot, deploy_root: a.deploy_root, local: a.local, expire: a.expire, env_setup: a.env_setup, shell: a.shell, endpoint_rotates: a.endpoint_rotates }),
+            ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { host: a.host, port: a.port, user: a.user, key: a.key, password: a.password, qroot: a.qroot, deploy_root: a.deploy_root, local: a.local, expire: a.expire, env_setup: a.env_setup, shell: a.shell, endpoint_rotates: a.endpoint_rotates }),
+            ClientAction::Hostkey { name } => {
+                let c = registry::load_client(&name)?;
+                crate::server::client_ops::rekey(&c)?;
+                println!("host key dropped: {}", name);
+                Ok(())
+            }
+            ClientAction::Templates => {
+                for d in vendor_template_dirs() {
+                    if let Ok(rd) = std::fs::read_dir(&d) {
+                        for e in rd.flatten() {
+                            if let Some(n) = e.file_name().to_str().and_then(|s| s.strip_suffix(".toml")) {
+                                println!("{n}\t{}", d.display());
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
             ClientAction::Ls => {
                 for n in registry::list_clients()? {
                     println!("{n}");
@@ -712,6 +739,7 @@ struct ClientAddOpts {
     env_setup: Option<String>,
     shell: Option<String>,
     endpoint_rotates: bool,
+    password: Option<String>,
 }
 
 fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result<()> {
@@ -763,8 +791,16 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
     if let Some(v) = opts.shell {
         entry.shell = v;
     }
+    if let Some(v) = opts.password {
+        entry.ssh.password = v;
+    }
     if opts.endpoint_rotates {
         entry.endpoint_rotates = true;
+    }
+    // qroot defaults to <deploy_root>/queue — an empty qroot would
+    // make remote ops land in the box's CWD (silent wrongness).
+    if entry.qroot.is_empty() && !entry.deploy_root.is_empty() {
+        entry.qroot = format!("{}/queue", entry.deploy_root.trim_end_matches('/'));
     }
     // Dedicated keypair per client (design.md §4.1): generated at
     // registration so the row is usable immediately.
