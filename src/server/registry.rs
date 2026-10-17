@@ -105,14 +105,36 @@ fn load<T: for<'de> Deserialize<'de>>(dir: &str, name: &str) -> Result<T> {
     toml::from_str(&text).with_context(|| format!("bad TOML in {}", path.display()))
 }
 
-fn save<T: Serialize>(dir: &str, name: &str, value: &T) -> Result<PathBuf> {
+/// Header written at the top of every client row file: documents the
+/// knobs TOML omits when unset (Option fields serialize to nothing),
+/// so a fresh row still shows the full template.
+const CLIENT_HEADER: &str = "\
+# shunt client row.
+# Optional knobs, absent until set:
+#   local_bin                          loopback transport: binary to exec (default: running shunt)
+#   timeout_s                          loopback transport: exec timeout seconds
+#   ssh_timeout_s                      ssh transport: ConnectTimeout (default 15)
+#   billing.hourly / billing.currency  cost metadata surfaced to the agent
+# Facts (gpu, cores, can_root, ...) fill in via `shunt client probe`.
+";
+
+fn save_with_header<T: Serialize>(
+    dir: &str,
+    name: &str,
+    value: &T,
+    header: &str,
+) -> Result<PathBuf> {
     let path = shunt_home()?.join(dir).join(format!("{name}.toml"));
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let text = toml::to_string_pretty(value)?;
+    let text = format!("{header}{}", toml::to_string_pretty(value)?);
     fs::write(&path, text)?;
     Ok(path)
+}
+
+fn save<T: Serialize>(dir: &str, name: &str, value: &T) -> Result<PathBuf> {
+    save_with_header(dir, name, value, "")
 }
 
 pub fn load_client(name: &str) -> Result<ClientEntry> {
@@ -186,7 +208,7 @@ pub fn list_clients() -> Result<Vec<String>> {
 }
 
 pub fn save_client(entry: &ClientEntry) -> Result<PathBuf> {
-    save("clients", &entry.name, entry)
+    save_with_header("clients", &entry.name, entry, CLIENT_HEADER)
 }
 
 pub fn load_project(name: &str) -> Result<ProjectEntry> {
