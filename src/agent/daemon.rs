@@ -96,15 +96,16 @@ pub fn resolve_workers(root: &Path) -> crate::proto::wire::WorkersState {
     crate::proto::wire::WorkersState { value: queue::DEFAULT_WORKERS, source: "default".into() }
 }
 
-/// Orphan requeue: `running/*.sh` left by a dead daemon go to
-/// `pending/0000_requeued_<clean>`; logs are swept to
-/// `failed/<clean>.interrupted.<ts>.log` (design.md §3.6).
+/// Orphan requeue: entries left in running/ by a dead daemon go to
+/// `pending/0000_requeued_<clean>`; the interrupted log is swept to
+/// `failed/<clean>.interrupted.<ts>.log` (design.md §3.6). Dir and
+/// legacy flat entries are both handled.
 fn requeue_orphans(root: &Path) -> Result<()> {
     let running = root.join("running");
     let pending = root.join("pending");
     let failed = root.join("failed");
     for base in queue::running_list(root)? {
-        let pidf = running.join(format!("{base}.pid"));
+        let pidf = queue::piece_file(root, "running", &base, "pid");
         if let Ok(pgid) = std::fs::read_to_string(&pidf).map(|s| s.trim().parse::<u32>()).and_then(|r| r.map_err(|_| std::io::Error::other("bad pid"))) {
             if exec::pgid_alive(pgid) {
                 dlog(
@@ -119,22 +120,35 @@ fn requeue_orphans(root: &Path) -> Result<()> {
         while let Some(rest) = clean.strip_prefix("0000_requeued_") {
             clean = rest;
         }
-        let _ = std::fs::rename(running.join(&base), pending.join(format!("0000_requeued_{clean}")));
-        let old_log = running.join(format!("{base}.log"));
-        if old_log.exists() {
-            let _ = std::fs::rename(&old_log, failed.join(format!("{clean}.interrupted.{}.log", queue::unix_now())));
+        let interrupted = failed.join(format!("{clean}.interrupted.{}", queue::unix_now()));
+        if queue::is_dir_entry(root, "running", &base) {
+            let dir = running.join(&base);
+            let old_log = dir.join("log");
+            if old_log.exists() {
+                let _ = std::fs::rename(&old_log, interrupted.with_extension("log"));
+            }
+            let _ = std::fs::remove_file(dir.join("pid"));
+            let _ = std::fs::rename(&dir, pending.join(format!("0000_requeued_{clean}")));
+        } else {
+            // Legacy flat entry: stays a flat `NNNN_slug.sh` in
+            // pending so the listing keeps seeing it.
+            let _ = std::fs::rename(running.join(format!("{base}.sh")), pending.join(format!("0000_requeued_{clean}.sh")));
+            let old_log = running.join(format!("{base}.sh.log"));
+            if old_log.exists() {
+                let _ = std::fs::rename(&old_log, failed.join(format!("{clean}.interrupted.{}.log", queue::unix_now())));
+            }
+            let _ = std::fs::remove_file(running.join(format!("{base}.sh.pid")));
         }
-        let _ = std::fs::remove_file(&pidf);
         dlog(root, "requeue_orphan", ev(json!({"from": base, "to": format!("0000_requeued_{clean}")})));
     }
-    // sweep strays: leftover .pid files and .log files with no task
+    // sweep legacy strays: .pid/.sh.log files with no entry left
     if let Ok(rd) = std::fs::read_dir(&running) {
         for ent in rd.flatten() {
             let name = ent.file_name().to_string_lossy().into_owned();
             if name.ends_with(".pid") {
                 let _ = std::fs::remove_file(ent.path());
             } else if name.ends_with(".log") {
-                let clean = name.trim_end_matches(".log");
+                let clean = name.trim_end_matches(".sh.log").to_string();
                 let _ = std::fs::rename(ent.path(), failed.join(format!("{clean}.interrupted.{}.log", queue::unix_now())));
                 dlog(root, "sweep_stray_log", ev(json!({"from": name})));
             }
@@ -216,28 +230,26 @@ impl Daemon {
             dlog(&self.root, "workers_now", ev(json!({"workers": workers})));
             self.last_workers = Some(workers);
         }
-        let running_dir = self.root.join("running");
         while self.runpids.len() < workers as usize {
             let next = match queue::pending_list(&self.root).ok().and_then(|v| v.into_iter().next()) {
                 Some(n) => n,
                 None => break,
             };
             // claim by mv; a concurrent cancel winning the race is the
-            // recheck, not a prior existence test
-            let src = self.root.join("pending").join(&next);
-            let dst = running_dir.join(&next);
-            if std::fs::rename(&src, &dst).is_err() {
+            // recheck, not a prior existence test. Dir entries rename
+            // whole; legacy flat files are normalized into dirs here.
+            if !queue::claim(&self.root, &next) {
                 continue;
             }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755));
+                let _ = std::fs::set_permissions(queue::task_file(&self.root, "running", &next), std::fs::Permissions::from_mode(0o755));
             }
             match exec::spawn_task(&self.root, &next) {
                 Ok(child) => {
                     let pid = child.id();
-                    let _ = std::fs::write(running_dir.join(format!("{next}.pid")), format!("{pid}\n"));
+                    let _ = std::fs::write(queue::piece_file(&self.root, "running", &next, "pid"), format!("{pid}\n"));
                     self.runpids.insert(pid, (next.clone(), child));
                     dlog(
                         &self.root,

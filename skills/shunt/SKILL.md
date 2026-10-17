@@ -127,12 +127,12 @@ Notes:
 
 The client queue is a directory of tracks under `qroot`:
 
-| track      | contents                                              |
-| ---------- | ----------------------------------------------------- |
-| `pending/` | `NNNN_<slug>.sh`, claimed in `LC_ALL=C` filename sort |
-| `running/` | task + `.log` + `.pid` (leader pid = task pgid)       |
-| `done/`    | task + `.log` + `.exit` (contains `0`)                |
-| `failed/`  | task + `.log` + `.exit` (nonzero rc, or killed)       |
+| track      | contents                                                               |
+| ---------- | ---------------------------------------------------------------------- |
+| `pending/` | `NNNN_<slug>/` entry dirs, claimed in `LC_ALL=C` sort                  |
+| `running/` | `NNNN_<slug>/` with `task.sh` + `log` + `pid` (leader pid = task pgid) |
+| `done/`    | `NNNN_<slug>/` with `task.sh` + `log` + `exit` (contains `0`)          |
+| `failed/`  | `NNNN_<slug>/` with `task.sh` + `log` + `exit` (nonzero rc, or killed) |
 
 Queue-level runner env lives in the `env` dotenv file under `qroot` (`WORKDIR`, `PATH_PREPEND`, `TASK_THREADS`, plus passthrough keys); per-task `# shunt-env:` directives override it.
 

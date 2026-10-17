@@ -85,9 +85,20 @@ impl Q {
         v
     }
 
-    /// Task files only (the `.sh` entries) in a track.
+    /// Task entries in a track: dir entries plus legacy `.sh` stems.
     fn tasks(&self, track: &str) -> Vec<String> {
-        self.names(track).into_iter().filter(|n| n.ends_with(".sh")).collect()
+        self.names(track).into_iter().filter_map(|n| if self.root.join(track).join(&n).is_dir() { Some(n) } else { n.strip_suffix(".sh").map(|s| s.to_string()) }).collect()
+    }
+
+    /// Entries carrying an `exit` file: `(name, rc)`.
+    fn exits(&self, track: &str) -> Vec<(String, i32)> {
+        self.tasks(track)
+            .into_iter()
+            .filter_map(|n| {
+                let ef = if self.root.join(track).join(&n).is_dir() { self.root.join(track).join(&n).join("exit") } else { self.root.join(track).join(format!("{n}.sh.exit")) };
+                std::fs::read_to_string(&ef).ok()?.trim().parse::<i32>().ok().map(|rc| (n, rc))
+            })
+            .collect()
     }
 
     fn daemon_pid(&self) -> Option<u32> {
@@ -165,7 +176,7 @@ fn enqueue_numbering_and_mode() {
     assert!(names[0].starts_with("0100_"), "got {names:?}");
     assert!(names[2].starts_with("0102_"), "got {names:?}");
     use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(q.root.join("pending").join(&names[0])).unwrap().permissions().mode();
+    let mode = std::fs::metadata(q.root.join("pending").join(&names[0]).join("task.sh")).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o755);
     // stdin wire form with --json ack
     let o = Command::new(bin())
@@ -206,7 +217,7 @@ fn prio_renumber_and_refuse_existing() {
     q.enqueue_script("one", &sleep_task());
     q.enqueue_script("two", &sleep_task());
     let out = q.run_ok(&["prio", "one", "5"]);
-    assert!(out.contains("0005_one.sh"), "got {out}");
+    assert!(out.contains("0005_one"), "got {out}");
     // refuse to renumber onto an existing name
     std::fs::write(q.root.join("pending/0005_two.sh"), sleep_task()).unwrap();
     let err = q.run_err(&["prio", "0101", "5"]);
@@ -222,9 +233,8 @@ fn kill_term_lands_in_failed() {
     wait_until(|| !q.tasks("running").is_empty(), 10, "task running");
     let out = q.run_ok(&["kill", "victim"]);
     assert!(out.contains("terminated"), "got {out}");
-    wait_until(|| q.names("failed").iter().any(|n| n.ends_with(".exit")), 10, "task finalized to failed/");
-    let exit = q.names("failed").into_iter().find(|n| n.ends_with(".exit")).unwrap();
-    let rc: i32 = std::fs::read_to_string(q.root.join("failed").join(&exit)).unwrap().trim().parse().unwrap();
+    wait_until(|| !q.exits("failed").is_empty(), 10, "task finalized to failed/");
+    let (_, rc) = q.exits("failed").into_iter().next().unwrap();
     assert_eq!(rc, 143, "TERM should record rc 143, got {rc}");
     q.stop();
     let _ = d.wait();
@@ -239,7 +249,7 @@ fn kill_escalates_stubborn_task() {
     wait_until(|| !q.tasks("running").is_empty(), 10, "task running");
     let out = q.run_ok(&["kill", "stubborn"]);
     assert!(out.contains("SIGKILL"), "got {out}");
-    wait_until(|| q.names("failed").iter().any(|n| n.ends_with(".exit")), 15, "killed task finalized");
+    wait_until(|| !q.exits("failed").is_empty(), 15, "killed task finalized");
     q.stop();
     let _ = d.wait();
 }
@@ -255,7 +265,7 @@ fn stop_drains_then_exits() {
     q.stop();
     wait_until(|| q.daemon_pid().is_none(), 15, "daemon exits after drain");
     assert!(marker.exists(), "in-flight task must finish, not be killed");
-    assert!(q.names("done").iter().any(|n| n.ends_with(".exit")));
+    assert!(!q.exits("done").is_empty());
     let status = d.wait().unwrap();
     assert!(status.success());
 }
@@ -339,7 +349,7 @@ fn workers_resize_raise_lower_invalid() {
     // invalid value falls back to last-known (still runs, no crash)
     std::fs::write(q.root.join("workers"), "bogus\n").unwrap();
     std::fs::write(&rel, b"").unwrap();
-    wait_until(|| q.names("done").iter().filter(|n| n.ends_with(".exit")).count() == 2, 15, "both tasks drain");
+    wait_until(|| q.exits("done").len() == 2, 15, "both tasks drain");
     // get reports resolved value + source
     let out = q.run_ok(&["workers"]);
     assert!(out.contains("workers:"), "got {out}");
@@ -375,10 +385,9 @@ fn workdir_unreachable_rc97() {
     std::fs::write(q.root.join("env"), "WORKDIR=/definitely/not/a/dir\n").unwrap();
     q.enqueue_script("nowd", &sleep_task());
     let mut d = q.daemon();
-    wait_until(|| q.names("failed").iter().any(|n| n.ends_with(".exit")), 15, "task finalized");
-    let exit = q.names("failed").into_iter().find(|n| n.ends_with(".exit")).unwrap();
-    let rc = std::fs::read_to_string(q.root.join("failed").join(&exit)).unwrap();
-    assert_eq!(rc.trim(), "97");
+    wait_until(|| !q.exits("failed").is_empty(), 15, "task finalized");
+    let (_, rc) = q.exits("failed").into_iter().next().unwrap();
+    assert_eq!(rc, 97);
     q.stop();
     let _ = d.wait();
 }
@@ -473,7 +482,7 @@ fn mktask_and_new() {
     q.run_ok(&["new", "--slug", "gen", "--", "echo", "hi"]);
     assert_eq!(q.names("pending").len(), 1);
     let name = &q.names("pending")[0];
-    let body = std::fs::read_to_string(q.root.join("pending").join(name)).unwrap();
+    let body = std::fs::read_to_string(q.root.join("pending").join(name).join("task.sh")).unwrap();
     assert!(body.contains("exec echo hi"));
 }
 
@@ -540,7 +549,7 @@ fn env_setup_sourced_before_task() {
     let marker = q.root.join("envsetup.txt");
     q.enqueue_script("probe", &format!("#!/usr/bin/env bash\necho \"$SHUNT_SETUP_RAN\" > {}\n", marker.display()));
     let mut d = q.daemon();
-    wait_until(|| q.names("done").iter().any(|n| n.ends_with(".exit")), 15, "task done");
+    wait_until(|| !q.exits("done").is_empty(), 15, "task done");
     q.stop();
     let _ = d.wait();
     assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "yes-i-am-sourced");
@@ -555,7 +564,7 @@ fn env_setup_failure_never_blocks_task() {
     let marker = q.root.join("envsetup-ok.txt");
     q.enqueue_script("probe", &format!("#!/usr/bin/env bash\ntouch {}\n", marker.display()));
     let mut d = q.daemon();
-    wait_until(|| q.names("done").iter().any(|n| n.ends_with(".exit")), 15, "task done");
+    wait_until(|| !q.exits("done").is_empty(), 15, "task done");
     q.stop();
     let _ = d.wait();
     assert!(marker.exists());

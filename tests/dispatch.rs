@@ -40,8 +40,10 @@ impl Transport for FakeTransport {
                     anyhow::bail!("remote rc=1: disk full");
                 }
                 let body = stdin.unwrap_or("");
-                let name = "0100_task.sh";
-                std::fs::write(self.pending.join(name), body)?;
+                let name = "0100_task";
+                let dir = self.pending.join(name);
+                std::fs::create_dir_all(&dir)?;
+                std::fs::write(dir.join("task.sh"), body)?;
                 Ok(format!(r#"{{"protocol":1,"ok":true,"name":"{name}","client":"{}"}}"#, client.name))
             }
             _ => Ok(r#"{"protocol":1,"ok":true}"#.into()),
@@ -77,7 +79,7 @@ fn dispatch_ack_deletes_failure_retains() -> Result<()> {
     let t = FakeTransport { pending: pending.clone(), fail_enqueue: false, down: false, calls: Mutex::new(Vec::new()) };
     assert_eq!(dispatch::sweep_with(&t)?, 1);
     assert!(spool::list()?.is_empty());
-    assert_eq!(std::fs::read_to_string(pending.join("0100_task.sh"))?, "echo t1\n");
+    assert_eq!(std::fs::read_to_string(pending.join("0100_task/task.sh"))?, "echo t1\n");
 
     // Remote enqueue error: entry stays for the next poll.
     spool::stage(&entry("t2", "a-t2"), "echo t2\n")?;

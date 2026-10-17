@@ -75,17 +75,27 @@ pub fn next_seq(root: &Path) -> Result<u32> {
     Ok(next)
 }
 
-/// Filenames of `dir/*.sh` (or another suffix) in `LC_ALL=C` byte sort
-/// order. For pending this is the FIFO claim order.
-pub fn list_sh(root: &Path, track: &str) -> Result<Vec<String>> {
+/// Entry base names in a track, `LC_ALL=C` byte sort. A queue entry
+/// is a directory `NNNN_slug/` (current layout: `task.sh` plus
+/// sidecars `log`/`pid`/`exit` inside) or a legacy flat file
+/// `NNNN_slug.sh` (sidecars `.sh.log`/`.sh.exit`/`.sh.pid`). Both
+/// forms read identically here — old queues need no migration.
+pub fn list_entries(root: &Path, track: &str) -> Result<Vec<String>> {
     let mut names = Vec::new();
     let dir = root.join(track);
     match std::fs::read_dir(&dir) {
         Ok(rd) => {
-            for ent in rd {
-                let name = ent?.file_name().to_string_lossy().into_owned();
-                if name.ends_with(".sh") {
-                    names.push(name);
+            for ent in rd.flatten() {
+                let name = ent.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') {
+                    continue;
+                }
+                if let Ok(ft) = ent.file_type() {
+                    if ft.is_dir() {
+                        names.push(name);
+                    } else if let Some(stem) = name.strip_suffix(".sh") {
+                        names.push(stem.to_string());
+                    }
                 }
             }
         }
@@ -96,78 +106,126 @@ pub fn list_sh(root: &Path, track: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Pending filenames in claim order.
+/// Pending entry names in claim order.
 pub fn pending_list(root: &Path) -> Result<Vec<String>> {
-    list_sh(root, "pending")
+    list_entries(root, "pending")
 }
 
-/// Running task basenames (running/*.sh), sorted.
+/// Running entry names, sorted.
 pub fn running_list(root: &Path) -> Result<Vec<String>> {
-    list_sh(root, "running")
+    list_entries(root, "running")
 }
 
-/// Pending tasks whose filename contains `pat`, sorted.
+/// True when the entry is the current directory layout.
+pub fn is_dir_entry(root: &Path, track: &str, name: &str) -> bool {
+    root.join(track).join(name).is_dir()
+}
+
+/// The task script inside an entry (`name/task.sh` for dirs,
+/// `name.sh` for legacy flat files).
+pub fn task_file(root: &Path, track: &str, name: &str) -> PathBuf {
+    let d = root.join(track).join(name);
+    if d.is_dir() {
+        d.join("task.sh")
+    } else {
+        root.join(track).join(format!("{name}.sh"))
+    }
+}
+
+/// A sidecar file: `name/<piece>` inside a dir entry,
+/// `name.sh.<piece>` for a legacy flat entry (piece: log, pid, exit).
+pub fn piece_file(root: &Path, track: &str, name: &str, piece: &str) -> PathBuf {
+    let d = root.join(track).join(name);
+    if d.is_dir() {
+        d.join(piece)
+    } else {
+        root.join(track).join(format!("{name}.sh.{piece}"))
+    }
+}
+
+/// Remove a pending entry whatever its shape (dir or legacy file).
+pub fn remove_pending(root: &Path, name: &str) -> Result<()> {
+    let d = root.join("pending").join(name);
+    if d.is_dir() {
+        std::fs::remove_dir_all(&d).with_context(|| format!("cannot remove {}", d.display()))?;
+    } else {
+        std::fs::remove_file(root.join("pending").join(format!("{name}.sh"))).with_context(|| format!("cannot remove {name}.sh"))?;
+    }
+    Ok(())
+}
+
+/// Atomic claim: pending/<name> -> running/<name>. Returns false
+/// when the entry vanished under us (a concurrent cancel/claim) —
+/// the rename itself is the claim, never a prior existence test.
+pub fn claim(root: &Path, name: &str) -> bool {
+    let pending = root.join("pending");
+    let dst = root.join("running").join(name);
+    if pending.join(name).is_dir() {
+        return std::fs::rename(pending.join(name), &dst).is_ok();
+    }
+    // Legacy flat file: normalize into the dir layout on claim.
+    let src = pending.join(format!("{name}.sh"));
+    if !src.exists() || dst.exists() {
+        return false;
+    }
+    std::fs::create_dir_all(&dst).is_ok() && std::fs::rename(&src, dst.join("task.sh")).is_ok()
+}
+
+/// Pending entries whose name contains `pat`, sorted.
 pub fn match_pending(root: &Path, pat: &str) -> Result<Vec<String>> {
     Ok(pending_list(root)?.into_iter().filter(|n| n.contains(pat)).collect())
 }
 
-/// Running task basenames (no `.pid`) whose `<task>.sh.pid` filename
-/// contains `pat`, sorted.
+/// Running entries that have a pid file and whose name contains
+/// `pat`, sorted.
 pub fn match_running(root: &Path, pat: &str) -> Result<Vec<String>> {
     let mut names = Vec::new();
-    let dir = root.join("running");
-    match std::fs::read_dir(&dir) {
-        Ok(rd) => {
-            for ent in rd {
-                let name = ent?.file_name().to_string_lossy().into_owned();
-                if name.ends_with(".sh.pid") && name.contains(pat) {
-                    names.push(name.trim_end_matches(".pid").to_string());
-                }
-            }
+    for name in running_list(root)? {
+        if !name.contains(pat) {
+            continue;
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e).with_context(|| format!("cannot read {}", dir.display())),
+        if piece_file(root, "running", &name, "pid").exists() {
+            names.push(name);
+        }
     }
-    names.sort();
     Ok(names)
 }
 
-/// Install a task body into pending/ as `NNNN_<slug>.sh`, mode 0755,
-/// via write-temp-then-mv inside pending/ (atomic same-fs rename).
-/// Returns the installed filename.
+/// Install a task body into pending/ as `NNNN_<slug>/task.sh`, mode
+/// 0755, via write-temp-dir-then-mv inside pending/ (atomic same-fs
+/// rename). Returns the entry name (`NNNN_<slug>`).
 pub fn enqueue(root: &Path, slug: &str, body: &str) -> Result<String> {
     use std::os::unix::fs::PermissionsExt;
     let n = next_seq(root)?;
-    let name = format!("{n:04}_{slug}.sh");
+    let name = format!("{n:04}_{slug}");
     let pending = root.join("pending");
     std::fs::create_dir_all(&pending)?;
     let tmp = pending.join(format!(".tmp.{}.{}", std::process::id(), n));
-    std::fs::write(&tmp, body)?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::create_dir_all(&tmp)?;
+    let tf = tmp.join("task.sh");
+    std::fs::write(&tf, body)?;
+    std::fs::set_permissions(&tf, std::fs::Permissions::from_mode(0o755))?;
     std::fs::rename(&tmp, pending.join(&name))?;
     Ok(name)
 }
 
-/// Recent finished tasks in a track: `(task name, rc)` newest first.
+/// Recent finished tasks in a track: `(entry name, rc)` newest first.
 pub fn recent_exits(root: &Path, track: &str, n: usize) -> Vec<(String, i32)> {
-    let dir = root.join(track);
     let mut rows: Vec<(SystemTime, String)> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for ent in rd.flatten() {
-            let name = ent.file_name().to_string_lossy().into_owned();
-            if !name.ends_with(".exit") {
-                continue;
-            }
-            let mtime = ent.metadata().and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH);
-            rows.push((mtime, name));
+    for name in list_entries(root, track).unwrap_or_default() {
+        let ef = piece_file(root, track, &name, "exit");
+        if !ef.exists() {
+            continue;
         }
+        let mtime = ef.metadata().and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH);
+        rows.push((mtime, name));
     }
     rows.sort_by_key(|r| std::cmp::Reverse(r.0));
     rows.truncate(n);
     rows.into_iter()
         .map(|(_, f)| {
-            let rc = std::fs::read_to_string(dir.join(&f)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(-1);
-            (f.trim_end_matches(".exit").to_string(), rc)
+            let rc = std::fs::read_to_string(piece_file(root, track, &f, "exit")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(-1);
+            (f, rc)
         })
         .collect()
 }

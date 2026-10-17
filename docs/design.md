@@ -49,10 +49,10 @@ Under `$QROOT` (client-local; resolved as `--root` flag > `$SHUNT_ROOT` env. Eve
 
 | Entry                | Meaning                                                                        |
 | -------------------- | ------------------------------------------------------------------------------ |
-| `pending/`           | `NNNN_<slug>.sh` task files; claimed in filename sort order                    |
-| `running/`           | in-flight `<task>.sh` plus `<task>.sh.log` and `<task>.sh.pid`                 |
-| `done/`              | task + `.log` + `.exit` for rc 0                                               |
-| `failed/`            | task + `.log` + `.exit` for nonzero rc or killed tasks                         |
+| `pending/`           | `NNNN_<slug>/` entry dirs holding `task.sh`; claimed in name sort order        |
+| `running/`           | in-flight `NNNN_<slug>/` with `task.sh`, `log`, `pid`                          |
+| `done/`              | `NNNN_<slug>/` with `task.sh` + `log` + `exit` for rc 0                        |
+| `failed/`            | `NNNN_<slug>/` with `task.sh` + `log` + `exit` for nonzero rc or killed tasks  |
 | `workers`            | pool size file, re-read every poll cycle                                       |
 | `env`                | runner env dotenv: `WORKDIR`, `PATH_PREPEND`, `TASK_THREADS`, passthrough keys |
 | `STOP`               | sentinel file: drain in-flight tasks, then daemon exits                        |
@@ -63,11 +63,13 @@ Under `$QROOT` (client-local; resolved as `--root` flag > `$SHUNT_ROOT` env. Eve
 | `daemon.log`         | structured JSONL event stream (see §3.9)                                       |
 | `.seq` + `.seq.lock` | enqueue counter under flock                                                    |
 
-The daemon only manages tasks it dequeued itself, tracked via `running/*.pid`. Other jobs on the box are never touched. This boundary is a hard safety rule: every signal the daemon or `shunt kill` sends goes to a pgid recorded in a `.pid` file, never to a name match.
+Every queue entry is a directory named `NNNN_<slug>` containing `task.sh` plus the sidecars it accumulates (`log`, `pid`, `exit`). Readers also understand the legacy flat layout (`NNNN_<slug>.sh` with `.sh.log`/`.sh.pid`/`.sh.exit` sidecars) so pre-existing queues need no migration; writers always create dirs, and `finalize` normalizes any legacy entry it touches. A suffixless flat file is NOT an entry — it is ignored entirely.
+
+The daemon only manages tasks it dequeued itself, tracked via `running/*/pid`. Other jobs on the box are never touched. This boundary is a hard safety rule: every signal the daemon or `shunt kill` sends goes to a pgid recorded in a `pid` file, never to a name match.
 
 ### 3.2 Sequence numbers and the priority band
 
-- `pending/` filenames are `NNNN_<slug>.sh`, `NNNN` zero-padded to 4.
+- `pending/` entry names are `NNNN_<slug>`, `NNNN` zero-padded to 4.
 - `.seq` starts at 99, so the first enqueued task is `0100`. Values `0000`–`0099` are the manual priority band: `shunt prio` renumbers into it, and requeued orphans land at `0000_requeued_*`.
 - `.seq` is read/incremented/written under an flock on `.seq.lock` (30 s wait, matching `flock -w 30`). Concurrent enqueues must never produce duplicate numbers.
 - Claim order is `LC_ALL=C` filename sort, so `0000_*` always runs ahead of `0100_*`.
@@ -100,24 +102,24 @@ On TERM/INT/HUP: log, remove `daemon.pid`, send TERM to every tracked task pgid,
 
 ### 3.6 Orphan requeue (at-least-once core)
 
-Any `running/*.sh` present at daemon start means a previous daemon died mid-flight. For each:
+Any `running/` entry present at daemon start means a previous daemon died mid-flight. For each:
 
-1. If its `.pid` file exists and `kill -0 -- -<pgid>` succeeds, the task process group is _still alive_ — log a WARNING and requeue anyway. The task's own guard makes the rerun a no-op. (This happens when the daemon dies but a detached task survives.)
+1. If its `pid` file exists and `kill -0 -- -<pgid>` succeeds, the task process group is _still alive_ — log a WARNING and requeue anyway. The task's own guard makes the rerun a no-op. (This happens when the daemon dies but a detached task survives.)
 2. Strip any stacked `0000_requeued_` prefixes from the basename in a loop — a task requeued twice must not accumulate prefixes.
 3. `mv` the task to `pending/0000_requeued_<clean>` (front of queue).
-4. Its `.log` moves to `failed/<clean>.interrupted.<unixts>.log`.
-5. Remove the `.pid` file.
+4. Its `log` moves to `failed/<clean>.interrupted.<unixts>.log`.
+5. Remove the `pid` file.
 
-Then sweep: any remaining `running/*.pid` files are removed; any remaining `running/*.log` (stray log with no task) moves to `failed/<name>.interrupted.<unixts>.log`.
+Then sweep legacy strays: any remaining `running/*.pid` files are removed; any remaining `running/*.log` moves to `failed/<name>.interrupted.<unixts>.log`. Dir entries carry their sidecars inside, so they cannot stray.
 
 ### 3.7 Dispatch
 
 - Read desired workers (see §3.8). While `len(running) < workers`:
-  1. Pick the first `pending/*.sh` by `LC_ALL=C` filename sort.
+  1. Pick the first `pending/` entry by `LC_ALL=C` name sort.
   2. Claim by `mv pending/<f> running/<f>`. If the `mv` fails (a concurrent `shunt cancel` won the race), skip to next iteration — the `mv` result is the recheck, not a prior existence test.
   3. `chmod +x`, write log header (`=== task`, `=== start <iso>`).
-  4. Spawn via `process_group(0)` (setsid) so the task's pgid equals its leader pid; stdout/stderr append to `<task>.sh.log`.
-  5. Write the leader pid to `<task>.sh.pid`, record pgid → basename.
+  4. Spawn via `process_group(0)` (setsid) so the task's pgid equals its leader pid; stdout/stderr append to `running/<name>/log`.
+  5. Write the leader pid to `running/<name>/pid`, record pgid → entry name.
 - Each task runs in its own process group precisely so `shunt kill` and the daemon's signal forwarding can address the whole task tree by pgid without touching the daemon or sibling tasks.
 
 ### 3.8 Worker pool resolution
@@ -132,11 +134,11 @@ Re-read every cycle. Order: `workers` file > `QUEUE_WORKERS` env (set at daemon 
 ### 3.9 Reap and finalize
 
 - Reap: for each tracked pid, if `kill -0` fails the child is gone; collect its exit status and finalize.
-- Finalize `<base>` with rc:
+- Finalize entry `<name>` with rc:
   - append `=== exit <rc> <iso>` to the log;
-  - remove `<base>.pid`;
-  - `mv` task + log to `done/` if rc 0, else `failed/`;
-  - write `<rc>` to `<base>.exit`;
+  - remove the entry's `pid` file;
+  - `mv` the whole entry dir to `done/` if rc 0, else `failed/` (legacy flat entries are normalized into the dir layout here);
+  - write `<rc>` to `<name>/exit`;
   - log `finish <base> rc=<rc> -> done|failed`.
 
 ### 3.10 STOP sentinel
@@ -148,7 +150,7 @@ If `STOP` exists: no new dispatches. When the running set empties, the daemon re
 When `shutdown_on_idle` exists AND `running/` is empty AND `pending/` is empty:
 
 1. Arm: log `IDLE-SHUTDOWN ARMED` with the grace length.
-2. Count down `shutdown_grace_s` (file > default 60) one second at a time. Each second, re-check: flag removed → cancel; a new `pending/*.sh` → cancel; `STOP` sentinel → cancel. Log every 10 s and for the final 5 s.
+2. Count down `shutdown_grace_s` (file > default 60) one second at a time. Each second, re-check: flag removed → cancel; a new `pending/` entry → cancel; `STOP` sentinel → cancel. Log every 10 s and for the final 5 s.
 3. After the countdown, re-check once more: flag still present, pending still empty, running set empty. Only then exec the shutdown command.
 4. Resolve the command at the last moment: `shutdown_cmd` file > `$SHUTDOWN_CMD` env > `/usr/bin/shutdown`. Last-moment resolution is what lets a test redirect the command to a marker — a test must never reach the real `/usr/bin/shutdown`. The `shutdown_cmd` file is written by `shunt shutdown on --cmd`, and the server-side arm (`shutdown -c <name> on`) pushes the client row's `shutdown_cmd` field every time, so the registry stays the source of truth — copy a row to a test env and its placeholder command comes along. `shutdown status` reports the resolved command before anything fires.
 

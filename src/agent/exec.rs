@@ -38,9 +38,8 @@ pub fn read_env_file(root: &Path) -> BTreeMap<String, String> {
 /// pid), output appended to `running/<name>.log`. The `.pid` file is
 /// written by the daemon right after this returns.
 pub fn spawn_task(root: &Path, task_name: &str) -> Result<Child> {
-    let running = root.join("running");
-    let task = running.join(task_name);
-    let log_path = running.join(format!("{task_name}.log"));
+    let task = queue::task_file(root, "running", task_name);
+    let log_path = queue::piece_file(root, "running", task_name, "log");
 
     {
         let mut log = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&log_path)?;
@@ -137,10 +136,11 @@ pub fn pgid_alive(pgid: u32) -> bool {
 }
 
 /// TERM → 10×1 s → KILL on the task's recorded pgid. The pgid comes
-/// only from `running/<task>.pid`, never from a name match
+/// only from the entry's `pid` file (`running/<name>/pid`, or the
+/// legacy `<name>.sh.pid`), never from a name match
 /// (design.md §3.1). Returns `(pgid, escalated)`.
 pub fn kill_task(root: &Path, task_name: &str) -> Result<(u32, bool)> {
-    let pidf = root.join("running").join(format!("{task_name}.pid"));
+    let pidf = queue::piece_file(root, "running", task_name, "pid");
     let pgid: u32 = std::fs::read_to_string(&pidf).with_context(|| format!("no pid file for {task_name}"))?.trim().parse().context("bad pid file")?;
     signal_pgid(pgid, "TERM");
     for _ in 0..10 {
@@ -153,22 +153,31 @@ pub fn kill_task(root: &Path, task_name: &str) -> Result<(u32, bool)> {
     Ok((pgid, true))
 }
 
-/// Finalize a reaped task: `=== exit` trailer, `.exit` file, mv task +
-/// log to done/ (rc 0) or failed/.
+/// Finalize a reaped task: `=== exit` trailer, `exit` file, move the
+/// entry dir to done/ (rc 0) or failed/. Legacy flat entries are
+/// normalized into the dir layout here, so old queues converge.
 pub fn finalize(root: &Path, base: &str, rc: i32) -> Result<()> {
     let running = root.join("running");
-    let log = running.join(format!("{base}.log"));
-    let dest = root.join(if rc == 0 { "done" } else { "failed" });
-    std::fs::create_dir_all(&dest)?;
-    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log) {
+    let dest_track = root.join(if rc == 0 { "done" } else { "failed" });
+    std::fs::create_dir_all(&dest_track)?;
+    let dest = dest_track.join(base);
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(queue::piece_file(root, "running", base, "log")) {
         let _ = writeln!(f, "=== exit {rc} {}", queue::iso8601_now());
     }
-    let _ = std::fs::remove_file(running.join(format!("{base}.pid")));
-    std::fs::rename(running.join(base), dest.join(base)).with_context(|| format!("cannot move {base} to {}", dest.display()))?;
-    if log.exists() {
-        std::fs::rename(&log, dest.join(format!("{base}.log")))?;
+    if queue::is_dir_entry(root, "running", base) {
+        let _ = std::fs::remove_file(running.join(base).join("pid"));
+        std::fs::rename(running.join(base), &dest).with_context(|| format!("cannot move {base} to {}", dest.display()))?;
+    } else {
+        // Legacy flat entry: mkdir the entry dir and drop the pieces in.
+        std::fs::create_dir_all(&dest)?;
+        std::fs::rename(running.join(format!("{base}.sh")), dest.join("task.sh")).with_context(|| format!("cannot move {base} to {}", dest.display()))?;
+        let log = running.join(format!("{base}.sh.log"));
+        if log.exists() {
+            std::fs::rename(&log, dest.join("log"))?;
+        }
+        let _ = std::fs::remove_file(running.join(format!("{base}.sh.pid")));
     }
-    std::fs::write(dest.join(format!("{base}.exit")), format!("{rc}\n"))?;
+    std::fs::write(dest.join("exit"), format!("{rc}\n"))?;
     Ok(())
 }
 
@@ -208,7 +217,7 @@ pub fn render_task(meta: &crate::proto::task::TaskMeta) -> String {
     out
 }
 
-/// Convenience: the path of a running task's log.
+/// Convenience: the path of a running task's log (`running/<name>/log`).
 pub fn running_log(root: &Path, base: &str) -> PathBuf {
-    root.join("running").join(format!("{base}.log"))
+    queue::piece_file(root, "running", base, "log")
 }

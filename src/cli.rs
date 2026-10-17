@@ -935,7 +935,7 @@ fn agent_cancel(a: &PatternArgs) -> Result<()> {
     match m.len() {
         0 => jfail(a.json, &format!("no pending task matches '{}'", a.pattern)),
         1 => {
-            std::fs::remove_file(root.join("pending").join(&m[0]))?;
+            crate::agent::queue::remove_pending(&root, &m[0])?;
             if a.json {
                 jprint(jobj(jfields(serde_json::json!({"name": m[0]}))));
             } else {
@@ -956,11 +956,14 @@ fn agent_prio(a: &PrioArgs) -> Result<()> {
     let base = &m[0];
     let rest = base.split_once('_').map(|(_, r)| r).unwrap_or(base);
     let new = format!("{:04}_{rest}", a.n);
-    let from = root.join("pending").join(base);
-    let to = root.join("pending").join(&new);
+    // Entry shapes: a dir renames to a dir; a legacy flat file keeps
+    // its `.sh` suffix so it stays visible to the listing.
+    let (from, to) = if crate::agent::queue::is_dir_entry(&root, "pending", base) { (root.join("pending").join(base), root.join("pending").join(&new)) } else { (root.join("pending").join(format!("{base}.sh")), root.join("pending").join(format!("{new}.sh"))) };
     // refuse to clobber an existing pending task (bash `mv -f` defect,
-    // design.md §3.14)
-    if to.exists() && new != *base {
+    // design.md §3.14); check BOTH shapes — a dir would silently
+    // coexist with a legacy `NNNN_slug.sh` of the same name.
+    let occupied = to.exists() || root.join("pending").join(format!("{new}.sh")).exists();
+    if occupied && new != *base {
         return jfail(a.json, &format!("target name exists: {new}"));
     }
     std::fs::rename(&from, &to)?;
@@ -1109,24 +1112,35 @@ fn agent_status(a: &StatusArgs) -> Result<()> {
             println!("  {:<48} rc={}", r.name, r.rc);
         }
     }
-    println!("logs: tail -f {0}/running/<task>.log   (daemon: {0}/daemon.log)", root.display());
+    println!("logs: tail -f {0}/running/<task>/log   (daemon: {0}/daemon.log)", root.display());
     Ok(())
 }
 
-/// Find task logs matching `pat` across running/, done/, failed/.
+/// Find task logs matching `pat` across running/, done/, failed/ —
+/// entry dirs' `log` files plus any flat `*.log` leftovers (legacy
+/// sidecars, `<clean>.interrupted.<ts>.log` sweep products).
 fn find_logs(root: &std::path::Path, pat: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for track in ["running", "done", "failed"] {
+        for name in crate::agent::queue::list_entries(root, track).unwrap_or_default() {
+            if name.contains(pat) {
+                let log = crate::agent::queue::piece_file(root, track, &name, "log");
+                if log.exists() {
+                    out.push(log);
+                }
+            }
+        }
         if let Ok(rd) = std::fs::read_dir(root.join(track)) {
             for ent in rd.flatten() {
                 let name = ent.file_name().to_string_lossy().into_owned();
-                if name.ends_with(".log") && name.contains(pat) {
+                if ent.file_type().map(|t| t.is_file()).unwrap_or(false) && name.ends_with(".log") && name.contains(pat) {
                     out.push(ent.path());
                 }
             }
         }
     }
     out.sort();
+    out.dedup();
     out
 }
 
