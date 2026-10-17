@@ -89,50 +89,92 @@ pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
 
 /// Aggregate every registered client plus the built-in `localhost`.
 /// Transport resolves per client (ssh / loopback). `--json` emits one
-/// object; otherwise a human-readable table.
+/// object; otherwise a table — the server status a human asked for.
 pub fn run_all(json: bool) -> Result<()> {
     let names = registry::list_clients()?;
     let mut out = serde_json::Map::new();
+    let mut rows: Vec<Vec<String>> = Vec::new();
     for name in &names {
         let client = registry::load_client(name)?;
         let t = transport_for(&client);
         let st = query(t.as_ref(), &client);
         if !json {
-            print_human(&client, &st);
+            rows.push(row_for(&client, &st));
         }
         out.insert(name.clone(), serde_json::to_value(&st)?);
     }
     let staged = crate::server::spool::list()?;
     if json {
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "protocol": crate::proto::wire::PROTOCOL_VERSION, "clients": out, "spool_pending": staged.len() }))?);
-    } else if !staged.is_empty() {
+        return Ok(());
+    }
+
+    println!("== clients ==  {} registered", names.len());
+    let headers = ["name", "transport", "daemon", "pending", "running", "expire", "note"];
+    let mut w = headers.map(|h| h.len());
+    for r in &rows {
+        for (i, c) in r.iter().enumerate() {
+            w[i] = w[i].max(c.chars().count());
+        }
+    }
+    let line = |cells: &[String]| {
+        print!("  ");
+        for (i, c) in cells.iter().enumerate() {
+            print!("{c:<width$}  ", width = w[i]);
+        }
+        println!();
+    };
+    line(&headers.map(String::from));
+    for r in &rows {
+        line(r);
+    }
+    println!();
+    if staged.is_empty() {
+        println!("== spool ==  empty");
+    } else {
         println!("== spool ==  {} staged for dispatch", staged.len());
+        for e in &staged {
+            println!("  {}  {} -> {}  {} ({})", e.id, e.project, e.client, e.meta.slug, e.submitted_at);
+        }
     }
     Ok(())
 }
 
-fn print_human(client: &ClientEntry, st: &ClientStatus) {
-    if let Some(rep) = &st.report {
-        let daemon = rep.pointer("/daemon/alive").and_then(|v| v.as_bool()).unwrap_or(false);
-        let pending = rep.pointer("/pending").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
-        let running = rep.pointer("/running").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
-        let rate = client.billing.as_ref().map(|b| format!(" {:.2} {}/h", b.hourly, b.currency)).unwrap_or_default();
-        let exp = match expire_epoch(&client.expire) {
-            Some(e) => {
-                let left = e - now_epoch();
-                if left < 0 {
-                    " EXPIRED".to_string()
-                } else {
-                    format!(" expires_in={}h{}m", left / 3600, left % 3600 / 60)
-                }
+fn row_for(client: &ClientEntry, st: &ClientStatus) -> Vec<String> {
+    let transport = if client.local { "local".to_string() } else { format!("ssh {}@{}:{}", client.ssh.user, client.ssh.host, client.ssh.port) };
+    let expire = match expire_epoch(&client.expire) {
+        Some(e) => {
+            let left = e - now_epoch();
+            if left < 0 {
+                "EXPIRED".into()
+            } else {
+                format!("{}h{}m", left / 3600, left % 3600 / 60)
             }
-            None if client.expire.is_empty() => String::new(),
-            None => format!(" expire={}", client.expire),
-        };
-        let host = if client.local { "local" } else { client.ssh.host.as_str() };
-        println!("{}\t{}\tdaemon={} pending={} running={}{}{}", client.name, host, daemon, pending, running, rate, exp);
-    } else {
-        println!("{}\tunreachable\t{}", client.name, st.error.as_deref().unwrap_or(""));
+        }
+        None => {
+            if client.expire.is_empty() {
+                "-".into()
+            } else {
+                client.expire.clone()
+            }
+        }
+    };
+    match &st.report {
+        Some(rep) => {
+            let daemon = if rep.pointer("/daemon/alive").and_then(|v| v.as_bool()).unwrap_or(false) { "up" } else { "down" }.to_string();
+            let pending = rep.pointer("/pending").and_then(|v| v.as_array()).map(|a| a.len().to_string()).unwrap_or_else(|| "?".into());
+            let running = rep.pointer("/running").and_then(|v| v.as_array()).map(|a| a.len().to_string()).unwrap_or_else(|| "?".into());
+            let mut note = client.billing.as_ref().map(|b| format!("{:.2} {}/h", b.hourly, b.currency)).unwrap_or_default();
+            if let Some(f) = st.connect_failures {
+                note = format!("{note} conn_fail={f}").trim().into();
+            }
+            vec![client.name.clone(), transport, daemon, pending, running, expire, note]
+        }
+        None => {
+            let err = st.error.as_deref().unwrap_or("unreachable").lines().next().unwrap_or("unreachable");
+            let err: String = err.chars().take(60).collect();
+            vec![client.name.clone(), transport, "-".into(), "-".into(), "-".into(), expire, err]
+        }
     }
 }
 
