@@ -21,21 +21,11 @@ pub struct WireResult {
 
 impl WireResult {
     pub fn ok(fields: BTreeMap<String, serde_json::Value>) -> Self {
-        Self {
-            protocol: PROTOCOL_VERSION,
-            ok: true,
-            error: None,
-            fields,
-        }
+        Self { protocol: PROTOCOL_VERSION, ok: true, error: None, fields }
     }
 
     pub fn err(msg: impl Into<String>) -> Self {
-        Self {
-            protocol: PROTOCOL_VERSION,
-            ok: false,
-            error: Some(msg.into()),
-            fields: BTreeMap::new(),
-        }
+        Self { protocol: PROTOCOL_VERSION, ok: false, error: Some(msg.into()), fields: BTreeMap::new() }
     }
 }
 

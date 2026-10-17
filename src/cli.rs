@@ -413,14 +413,7 @@ pub fn run(cli: Cli) -> Result<()> {
     use crate::server::registry;
     match cli.command {
         Command::Submit(a) => {
-            let id = crate::server::spool::submit(
-                &a.client,
-                a.project.as_deref(),
-                a.guard.as_deref(),
-                a.slug.as_deref(),
-                a.file.as_deref(),
-                &a.cmd,
-            )?;
+            let id = crate::server::spool::submit(&a.client, a.project.as_deref(), a.guard.as_deref(), a.slug.as_deref(), a.file.as_deref(), &a.cmd)?;
             println!("spooled {id}");
             Ok(())
         }
@@ -462,11 +455,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 TunnelAction::Status => {
                     let st = tunnel::status(&a.client)?;
                     if st.alive {
-                        println!(
-                            "{}: up (socks5h://127.0.0.1:{})",
-                            a.client,
-                            st.port.map(|p| p.to_string()).unwrap_or_else(|| "?".into())
-                        );
+                        println!("{}: up (socks5h://127.0.0.1:{})", a.client, st.port.map(|p| p.to_string()).unwrap_or_else(|| "?".into()));
                     } else {
                         println!("{}: down", a.client);
                     }
@@ -478,10 +467,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Spool(c) => match c.action {
             SpoolAction::Ls => {
                 for e in crate::server::spool::list()? {
-                    println!(
-                        "{}\t{}\t{}\t{}\t{}",
-                        e.id, e.submitted_at, e.client, e.project, e.meta.slug
-                    );
+                    println!("{}\t{}\t{}\t{}\t{}", e.id, e.submitted_at, e.client, e.project, e.meta.slug);
                 }
                 Ok(())
             }
@@ -489,29 +475,7 @@ pub fn run(cli: Cli) -> Result<()> {
         },
 
         Command::Client(c) => match c.action {
-            ClientAction::Add {
-                name,
-                template,
-                host,
-                port,
-                user,
-                key,
-                qroot,
-                deploy_root,
-                local,
-            } => client_add(
-                &name,
-                template.as_deref(),
-                ClientAddOpts {
-                    host,
-                    port,
-                    user,
-                    key,
-                    qroot,
-                    deploy_root,
-                    local,
-                },
-            ),
+            ClientAction::Add { name, template, host, port, user, key, qroot, deploy_root, local } => client_add(&name, template.as_deref(), ClientAddOpts { host, port, user, key, qroot, deploy_root, local }),
             ClientAction::Ls => {
                 for n in registry::list_clients()? {
                     println!("{n}");
@@ -544,10 +508,7 @@ pub fn run(cli: Cli) -> Result<()> {
 
         Command::Project(c) => match c.action {
             ProjectAction::Add { name } => {
-                let e = registry::ProjectEntry {
-                    name: name.clone(),
-                    bind: Vec::new(),
-                };
+                let e = registry::ProjectEntry { name: name.clone(), bind: Vec::new() };
                 let p = registry::save_project(&e)?;
                 println!("wrote {}", p.display());
                 Ok(())
@@ -564,26 +525,15 @@ pub fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
             ProjectAction::Rm { name } => registry::remove("projects", &name),
-            ProjectAction::Bind {
-                name,
-                client,
-                workdir,
-                env,
-            } => {
+            ProjectAction::Bind { name, client, workdir, env } => {
                 let mut e = registry::load_project(&name)?;
                 let mut map = std::collections::BTreeMap::new();
                 for kv in &env {
-                    let (k, v) = kv
-                        .split_once('=')
-                        .ok_or_else(|| anyhow::anyhow!("--env expects KEY=value, got {kv}"))?;
+                    let (k, v) = kv.split_once('=').ok_or_else(|| anyhow::anyhow!("--env expects KEY=value, got {kv}"))?;
                     map.insert(k.to_string(), v.to_string());
                 }
                 e.bind.retain(|b| b.client != client);
-                e.bind.push(registry::Binding {
-                    client,
-                    workdir,
-                    env: map,
-                });
+                e.bind.push(registry::Binding { client, workdir, env: map });
                 let p = registry::save_project(&e)?;
                 println!("wrote {}", p.display());
                 Ok(())
@@ -631,9 +581,7 @@ pub fn run(cli: Cli) -> Result<()> {
             if a.json {
                 jprint(serde_json::json!({"ok": true}));
             } else {
-                println!(
-                    "STOP placed; daemon exits after the current task, or at the next poll if idle"
-                );
+                println!("STOP placed; daemon exits after the current task, or at the next poll if idle");
             }
             Ok(())
         }
@@ -641,13 +589,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::New(a) => agent_new(&a),
         Command::Mktask(a) => {
             // mktask can render for real: it is pure output.
-            let meta = crate::proto::task::TaskMeta {
-                slug: crate::proto::task::sanitize_slug(&a.slug),
-                guard: a.guard,
-                workdir: None,
-                env: Default::default(),
-                cmd: a.cmd,
-            };
+            let meta = crate::proto::task::TaskMeta { slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard, workdir: None, env: Default::default(), cmd: a.cmd };
             if meta.slug.is_empty() {
                 anyhow::bail!("empty slug after sanitization");
             }
@@ -693,10 +635,7 @@ pub fn run(cli: Cli) -> Result<()> {
                         let g = grace_s.map(|n| n.to_string());
                         // --cmd > row.shutdown_cmd > facts.shutdown_cmd
                         // (the probe guess from §8 detection).
-                        let c = cmd
-                            .as_deref()
-                            .or(client.shutdown_cmd.as_deref())
-                            .or_else(|| client.facts.get("shutdown_cmd").and_then(|v| v.as_str()));
+                        let c = cmd.as_deref().or(client.shutdown_cmd.as_deref()).or_else(|| client.facts.get("shutdown_cmd").and_then(|v| v.as_str()));
                         let mut tail: Vec<String> = vec!["shutdown".into(), "on".into()];
                         if let Some(g) = &g {
                             tail.push(g.clone());
@@ -745,26 +684,7 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
 
     let mut entry = match template {
         Some(t) => load_vendor_template(t)?,
-        None => ClientEntry {
-            name: name.into(),
-            local: false,
-            disabled: false,
-            local_bin: None,
-            timeout_s: None,
-            ssh_timeout_s: None,
-            shutdown_cmd: None,
-            ssh: SshEndpoint {
-                host: String::new(),
-                port: 22,
-                user: "root".into(),
-                key: String::new(),
-                password: String::new(),
-            },
-            qroot: String::new(),
-            deploy_root: String::new(),
-            facts: Default::default(),
-            billing: None,
-        },
+        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: String::new(), deploy_root: String::new(), facts: Default::default(), billing: None },
     };
     entry.name = name.into();
     // Adding a row for the built-in name materializes the loopback
@@ -772,10 +692,7 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
     if name == "localhost" {
         entry.local = true;
         if entry.qroot.is_empty() {
-            entry.qroot = crate::server::registry::shunt_home()?
-                .join("queue")
-                .display()
-                .to_string();
+            entry.qroot = crate::server::registry::shunt_home()?.join("queue").display().to_string();
         }
         if entry.deploy_root.is_empty() {
             entry.deploy_root = std::env::var("HOME").unwrap_or_default();
@@ -809,9 +726,7 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
     }
     let p = crate::server::registry::save_client(&entry)?;
     println!("wrote {}", p.display());
-    if !entry.local
-        && (entry.ssh.host.is_empty() || entry.ssh.key.is_empty() || entry.ssh.port == 0)
-    {
+    if !entry.local && (entry.ssh.host.is_empty() || entry.ssh.key.is_empty() || entry.ssh.port == 0) {
         eprintln!("note: ssh fields still incomplete; edit the row before bootstrap");
     }
     Ok(())
@@ -841,8 +756,7 @@ fn load_vendor_template(name: &str) -> Result<crate::server::registry::ClientEnt
     for dir in &dirs {
         let path = dir.join(format!("{name}.toml"));
         if let Ok(text) = std::fs::read_to_string(&path) {
-            return toml::from_str(&text)
-                .with_context(|| format!("bad vendor template {}", path.display()));
+            return toml::from_str(&text).with_context(|| format!("bad vendor template {}", path.display()));
         }
     }
     let mut have: Vec<String> = Vec::new();
@@ -857,17 +771,7 @@ fn load_vendor_template(name: &str) -> Result<crate::server::registry::ClientEnt
     }
     have.sort();
     have.dedup();
-    let note = if have.is_empty() {
-        format!(
-            "no templates found in any of: {}",
-            dirs.iter()
-                .map(|d| d.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    } else {
-        format!("available templates: {}", have.join(", "))
-    };
+    let note = if have.is_empty() { format!("no templates found in any of: {}", dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")) } else { format!("available templates: {}", have.join(", ")) };
     anyhow::bail!("no vendor template named {name}; {note}")
 }
 
@@ -892,10 +796,7 @@ fn jfields(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
 
 fn jobj(fields: serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
     let mut o = serde_json::Map::new();
-    o.insert(
-        "protocol".into(),
-        serde_json::json!(crate::proto::wire::PROTOCOL_VERSION),
-    );
+    o.insert("protocol".into(), serde_json::json!(crate::proto::wire::PROTOCOL_VERSION));
     o.insert("ok".into(), serde_json::json!(true));
     o.extend(fields);
     serde_json::Value::Object(o)
@@ -905,10 +806,8 @@ fn jobj(fields: serde_json::Map<String, serde_json::Value>) -> serde_json::Value
 /// error for the human-facing path.
 fn jfail(json: bool, msg: &str) -> Result<()> {
     if json {
-        jprint(
-            serde_json::json!({"protocol": crate::proto::wire::PROTOCOL_VERSION,
-                                  "ok": false, "error": msg}),
-        );
+        jprint(serde_json::json!({"protocol": crate::proto::wire::PROTOCOL_VERSION,
+                                  "ok": false, "error": msg}));
         std::process::exit(1);
     }
     anyhow::bail!("{msg}")
@@ -928,10 +827,7 @@ fn agent_enqueue(a: &EnqueueArgs) -> Result<()> {
         let raw_slug = match &a.slug {
             Some(s) => s.clone(),
             None if a.file == "-" => anyhow::bail!("slug required for stdin form"),
-            None => std::path::Path::new(&a.file)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            None => std::path::Path::new(&a.file).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
         };
         let slug = crate::proto::task::sanitize_slug(&raw_slug);
         if slug.is_empty() {
@@ -961,13 +857,7 @@ fn agent_new(a: &NewArgs) -> Result<()> {
         if a.cmd.is_empty() {
             anyhow::bail!("missing command after --");
         }
-        let meta = crate::proto::task::TaskMeta {
-            slug: crate::proto::task::sanitize_slug(&a.slug),
-            guard: a.guard.clone(),
-            workdir: None,
-            env: Default::default(),
-            cmd: a.cmd.clone(),
-        };
+        let meta = crate::proto::task::TaskMeta { slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard.clone(), workdir: None, env: Default::default(), cmd: a.cmd.clone() };
         if meta.slug.is_empty() {
             anyhow::bail!("empty slug after sanitization");
         }
@@ -1006,13 +896,7 @@ fn agent_cancel(a: &PatternArgs) -> Result<()> {
             }
             Ok(())
         }
-        _ => jfail(
-            a.json,
-            &format!(
-                "pattern matches several tasks, refusing:\n  {}",
-                m.join("\n  ")
-            ),
-        ),
+        _ => jfail(a.json, &format!("pattern matches several tasks, refusing:\n  {}", m.join("\n  "))),
     }
 }
 
@@ -1020,14 +904,7 @@ fn agent_prio(a: &PrioArgs) -> Result<()> {
     let root = agent_root(&a.root)?;
     let m = crate::agent::queue::match_pending(&root, &a.pattern)?;
     if m.len() != 1 {
-        return jfail(
-            a.json,
-            &format!(
-                "need exactly one pending match, got {}:\n  {}",
-                m.len(),
-                m.join("\n  ")
-            ),
-        );
+        return jfail(a.json, &format!("need exactly one pending match, got {}:\n  {}", m.len(), m.join("\n  ")));
     }
     let base = &m[0];
     let rest = base.split_once('_').map(|(_, r)| r).unwrap_or(base);
@@ -1056,9 +933,7 @@ fn agent_kill(a: &PatternArgs) -> Result<()> {
         1 => match crate::agent::exec::kill_task(&root, &m[0]) {
             Ok((pgid, escalated)) => {
                 if a.json {
-                    jprint(jobj(jfields(
-                        serde_json::json!({"pgid": pgid, "escalated": escalated}),
-                    )));
+                    jprint(jobj(jfields(serde_json::json!({"pgid": pgid, "escalated": escalated}))));
                 } else {
                     println!("killing {} (pgid {pgid})", m[0]);
                     if escalated {
@@ -1071,13 +946,7 @@ fn agent_kill(a: &PatternArgs) -> Result<()> {
             }
             Err(e) => jfail(a.json, &format!("{e:#}")),
         },
-        _ => jfail(
-            a.json,
-            &format!(
-                "pattern matches several tasks, refusing:\n  {}",
-                m.join("\n  ")
-            ),
-        ),
+        _ => jfail(a.json, &format!("pattern matches several tasks, refusing:\n  {}", m.join("\n  "))),
     }
 }
 
@@ -1093,9 +962,7 @@ fn agent_workers(a: &WorkersArgs) -> Result<()> {
     }
     let w = crate::agent::daemon::resolve_workers(&root);
     if a.json {
-        jprint(jobj(jfields(
-            serde_json::json!({"workers": w.value, "source": w.source}),
-        )));
+        jprint(jobj(jfields(serde_json::json!({"workers": w.value, "source": w.source}))));
     } else {
         println!("workers: {} ({})", w.value, w.source);
     }
@@ -1118,11 +985,8 @@ fn agent_shutdown(a: &ShutdownArgs) -> Result<()> {
             crate::agent::shutdown::arm(&root, grace_s)?;
             let st = crate::agent::shutdown::status(&root)?;
             if a.json {
-                let mut f =
-                    serde_json::json!({"armed": true, "grace_s": st.grace_s, "cmd": st.cmd});
-                f.as_object_mut()
-                    .unwrap()
-                    .extend(counts().as_object().unwrap().clone());
+                let mut f = serde_json::json!({"armed": true, "grace_s": st.grace_s, "cmd": st.cmd});
+                f.as_object_mut().unwrap().extend(counts().as_object().unwrap().clone());
                 jprint(jobj(jfields(f)));
             } else {
                 println!("armed: shutdown_on_idle set; poweroff fires {}s after pending/ AND running/ are both empty (cmd: {})", st.grace_s, st.cmd);
@@ -1132,39 +996,26 @@ fn agent_shutdown(a: &ShutdownArgs) -> Result<()> {
             crate::agent::shutdown::disarm(&root)?;
             if a.json {
                 let mut f = serde_json::json!({"armed": false});
-                f.as_object_mut()
-                    .unwrap()
-                    .extend(counts().as_object().unwrap().clone());
+                f.as_object_mut().unwrap().extend(counts().as_object().unwrap().clone());
                 jprint(jobj(jfields(f)));
             } else {
-                println!(
-                    "disarmed: shutdown_on_idle removed (a running countdown cancels within 1 s)"
-                );
+                println!("disarmed: shutdown_on_idle removed (a running countdown cancels within 1 s)");
             }
         }
         ShutdownAction::Status => {
             let st = crate::agent::shutdown::status(&root)?;
             if a.json {
-                let mut f =
-                    serde_json::json!({"armed": st.armed, "grace_s": st.grace_s, "cmd": st.cmd});
-                f.as_object_mut()
-                    .unwrap()
-                    .extend(counts().as_object().unwrap().clone());
+                let mut f = serde_json::json!({"armed": st.armed, "grace_s": st.grace_s, "cmd": st.cmd});
+                f.as_object_mut().unwrap().extend(counts().as_object().unwrap().clone());
                 jprint(jobj(jfields(f)));
             } else if st.armed {
-                println!(
-                    "shutdown_on_idle: ARMED (grace {}s, cmd: {})",
-                    st.grace_s, st.cmd
-                );
+                println!("shutdown_on_idle: ARMED (grace {}s, cmd: {})", st.grace_s, st.cmd);
             } else {
                 println!("shutdown_on_idle: off   (arm: shunt shutdown on [grace_s])");
             }
             if !a.json {
                 let c = counts();
-                println!(
-                    "queue now: {} running, {} pending",
-                    c["running"], c["pending"]
-                );
+                println!("queue now: {} running, {} pending", c["running"], c["pending"]);
             }
         }
     }
@@ -1175,26 +1026,7 @@ fn agent_status(a: &StatusArgs) -> Result<()> {
     use crate::proto::wire::{DaemonState, ExitRecord};
     let root = agent_root(&a.root)?;
     let alive = crate::agent::daemon::alive(&root)?;
-    let report = crate::proto::wire::StatusReport {
-        protocol: crate::proto::wire::PROTOCOL_VERSION,
-        daemon: DaemonState {
-            alive: alive.is_some(),
-            pid: alive,
-        },
-        workers: crate::agent::daemon::resolve_workers(&root),
-        running: crate::agent::queue::running_list(&root)?,
-        pending: crate::agent::queue::pending_list(&root)?,
-        done_recent: crate::agent::queue::recent_exits(&root, "done", 5)
-            .into_iter()
-            .map(|(name, rc)| ExitRecord { name, rc })
-            .collect(),
-        failed_recent: crate::agent::queue::recent_exits(&root, "failed", 5)
-            .into_iter()
-            .map(|(name, rc)| ExitRecord { name, rc })
-            .collect(),
-        stop: root.join("STOP").exists(),
-        shutdown: crate::agent::shutdown::status(&root)?,
-    };
+    let report = crate::proto::wire::StatusReport { protocol: crate::proto::wire::PROTOCOL_VERSION, daemon: DaemonState { alive: alive.is_some(), pid: alive }, workers: crate::agent::daemon::resolve_workers(&root), running: crate::agent::queue::running_list(&root)?, pending: crate::agent::queue::pending_list(&root)?, done_recent: crate::agent::queue::recent_exits(&root, "done", 5).into_iter().map(|(name, rc)| ExitRecord { name, rc }).collect(), failed_recent: crate::agent::queue::recent_exits(&root, "failed", 5).into_iter().map(|(name, rc)| ExitRecord { name, rc }).collect(), stop: root.join("STOP").exists(), shutdown: crate::agent::shutdown::status(&root)? };
     if a.json {
         jprint(&report);
         return Ok(());
@@ -1204,10 +1036,7 @@ fn agent_status(a: &StatusArgs) -> Result<()> {
         Some(pid) if report.daemon.alive => println!("  running (pid {pid})"),
         _ => println!("  stopped   (start: shunt start)"),
     }
-    println!(
-        "  workers: {} ({})",
-        report.workers.value, report.workers.source
-    );
+    println!("  workers: {} ({})", report.workers.value, report.workers.source);
     if report.stop {
         println!("  STOP sentinel present (draining)");
     }
@@ -1227,19 +1056,13 @@ fn agent_status(a: &StatusArgs) -> Result<()> {
             println!("  {t}");
         }
     }
-    for (label, recs) in [
-        ("done", &report.done_recent),
-        ("failed", &report.failed_recent),
-    ] {
+    for (label, recs) in [("done", &report.done_recent), ("failed", &report.failed_recent)] {
         println!("== {label} (recent) ==");
         for r in recs {
             println!("  {:<48} rc={}", r.name, r.rc);
         }
     }
-    println!(
-        "logs: tail -f {0}/running/<task>.log   (daemon: {0}/daemon.log)",
-        root.display()
-    );
+    println!("logs: tail -f {0}/running/<task>.log   (daemon: {0}/daemon.log)", root.display());
     Ok(())
 }
 
@@ -1290,10 +1113,7 @@ fn follow_file(path: &std::path::Path) -> Result<()> {
 fn agent_logs(a: &LogsArgs) -> Result<()> {
     let root = agent_root(&a.root)?;
     match &a.pattern {
-        None => agent_dlog(&RootArgs {
-            root: a.root.clone(),
-            json: false,
-        }),
+        None => agent_dlog(&RootArgs { root: a.root.clone(), json: false }),
         Some(pat) => {
             let m = find_logs(&root, pat);
             match m.len() {
@@ -1327,15 +1147,7 @@ fn agent_dlog(a: &RootArgs) -> Result<()> {
                 Ok(v) if v.is_object() => {
                     let ts = v.get("ts").and_then(|t| t.as_str()).unwrap_or("");
                     let ev = v.get("event").and_then(|t| t.as_str()).unwrap_or("");
-                    let rest: Vec<String> = v
-                        .as_object()
-                        .map(|o| {
-                            o.iter()
-                                .filter(|(k, _)| k.as_str() != "ts" && k.as_str() != "event")
-                                .map(|(k, v)| format!("{k}={v}"))
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                    let rest: Vec<String> = v.as_object().map(|o| o.iter().filter(|(k, _)| k.as_str() != "ts" && k.as_str() != "event").map(|(k, v)| format!("{k}={v}")).collect()).unwrap_or_default();
                     println!("[{ts}] {ev} {}", rest.join(" "));
                 }
                 _ => println!("{line}"),

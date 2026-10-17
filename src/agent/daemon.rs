@@ -14,21 +14,14 @@ use std::time::Duration;
 
 use crate::agent::{exec, queue, shutdown};
 
-const SIGNALS: [i32; 3] = [
-    signal_hook::consts::SIGTERM,
-    signal_hook::consts::SIGINT,
-    signal_hook::consts::SIGHUP,
-];
+const SIGNALS: [i32; 3] = [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT, signal_hook::consts::SIGHUP];
 
 /// Daemon liveness: pidfile + `/proc/<pid>` + cmdline mentions
 /// `queue::DAEMON_IDENTITY`. Never pgrep (design.md §3.4). Stale
 /// pidfiles are removed.
 pub fn alive(root: &Path) -> Result<Option<u32>> {
     let pidf = root.join("daemon.pid");
-    let pid: u32 = match std::fs::read_to_string(&pidf)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-    {
+    let pid: u32 = match std::fs::read_to_string(&pidf).ok().and_then(|s| s.trim().parse().ok()) {
         Some(p) => p,
         None => return Ok(None),
     };
@@ -59,23 +52,14 @@ fn dlog(root: &Path, event: &str, extra: Map<String, serde_json::Value>) {
     obj.insert("ts".into(), json!(queue::iso8601_now()));
     obj.insert("event".into(), json!(event));
     obj.extend(extra);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(root.join("daemon.log"))
-    {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(root.join("daemon.log")) {
         let _ = writeln!(f, "{}", serde_json::Value::Object(obj));
     }
 }
 
 /// Poll interval: `POLL` env (fractional seconds ok) or 2 s.
 fn poll_interval() -> Duration {
-    std::env::var("POLL")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|p| *p > 0.0)
-        .map(Duration::from_secs_f64)
-        .unwrap_or_else(|| Duration::from_secs(2))
+    std::env::var("POLL").ok().and_then(|s| s.parse::<f64>().ok()).filter(|p| *p > 0.0).map(Duration::from_secs_f64).unwrap_or_else(|| Duration::from_secs(2))
 }
 
 /// Desired pool size: `workers` file > `QUEUE_WORKERS` env >
@@ -101,24 +85,15 @@ fn desired_workers_in(root: &Path, last: Option<u32>) -> u32 {
 pub fn resolve_workers(root: &Path) -> crate::proto::wire::WorkersState {
     if let Ok(s) = std::fs::read_to_string(root.join("workers")) {
         if let Some(v) = queue::digits_only(&s) {
-            return crate::proto::wire::WorkersState {
-                value: v.max(1),
-                source: "file".into(),
-            };
+            return crate::proto::wire::WorkersState { value: v.max(1), source: "file".into() };
         }
     }
     if let Ok(e) = std::env::var("QUEUE_WORKERS") {
         if let Ok(v) = e.trim().parse::<u32>() {
-            return crate::proto::wire::WorkersState {
-                value: v.max(1),
-                source: "env".into(),
-            };
+            return crate::proto::wire::WorkersState { value: v.max(1), source: "env".into() };
         }
     }
-    crate::proto::wire::WorkersState {
-        value: queue::DEFAULT_WORKERS,
-        source: "default".into(),
-    }
+    crate::proto::wire::WorkersState { value: queue::DEFAULT_WORKERS, source: "default".into() }
 }
 
 /// Orphan requeue: `running/*.sh` left by a dead daemon go to
@@ -130,10 +105,7 @@ fn requeue_orphans(root: &Path) -> Result<()> {
     let failed = root.join("failed");
     for base in queue::running_list(root)? {
         let pidf = running.join(format!("{base}.pid"));
-        if let Ok(pgid) = std::fs::read_to_string(&pidf)
-            .map(|s| s.trim().parse::<u32>())
-            .and_then(|r| r.map_err(|_| std::io::Error::other("bad pid")))
-        {
+        if let Ok(pgid) = std::fs::read_to_string(&pidf).map(|s| s.trim().parse::<u32>()).and_then(|r| r.map_err(|_| std::io::Error::other("bad pid"))) {
             if exec::pgid_alive(pgid) {
                 dlog(
                     root,
@@ -147,23 +119,13 @@ fn requeue_orphans(root: &Path) -> Result<()> {
         while let Some(rest) = clean.strip_prefix("0000_requeued_") {
             clean = rest;
         }
-        let _ = std::fs::rename(
-            running.join(&base),
-            pending.join(format!("0000_requeued_{clean}")),
-        );
+        let _ = std::fs::rename(running.join(&base), pending.join(format!("0000_requeued_{clean}")));
         let old_log = running.join(format!("{base}.log"));
         if old_log.exists() {
-            let _ = std::fs::rename(
-                &old_log,
-                failed.join(format!("{clean}.interrupted.{}.log", queue::unix_now())),
-            );
+            let _ = std::fs::rename(&old_log, failed.join(format!("{clean}.interrupted.{}.log", queue::unix_now())));
         }
         let _ = std::fs::remove_file(&pidf);
-        dlog(
-            root,
-            "requeue_orphan",
-            ev(json!({"from": base, "to": format!("0000_requeued_{clean}")})),
-        );
+        dlog(root, "requeue_orphan", ev(json!({"from": base, "to": format!("0000_requeued_{clean}")})));
     }
     // sweep strays: leftover .pid files and .log files with no task
     if let Ok(rd) = std::fs::read_dir(&running) {
@@ -173,10 +135,7 @@ fn requeue_orphans(root: &Path) -> Result<()> {
                 let _ = std::fs::remove_file(ent.path());
             } else if name.ends_with(".log") {
                 let clean = name.trim_end_matches(".log");
-                let _ = std::fs::rename(
-                    ent.path(),
-                    failed.join(format!("{clean}.interrupted.{}.log", queue::unix_now())),
-                );
+                let _ = std::fs::rename(ent.path(), failed.join(format!("{clean}.interrupted.{}.log", queue::unix_now())));
                 dlog(root, "sweep_stray_log", ev(json!({"from": name})));
             }
         }
@@ -194,27 +153,15 @@ fn maybe_shutdown(root: &Path, running_empty: bool) {
     for i in (1..=grace).rev() {
         std::thread::sleep(Duration::from_secs(1));
         if !flag.exists() {
-            dlog(
-                root,
-                "idle_shutdown_cancelled",
-                ev(json!({"why": "flag removed"})),
-            );
+            dlog(root, "idle_shutdown_cancelled", ev(json!({"why": "flag removed"})));
             return;
         }
         if shutdown::pending_nonempty(root) {
-            dlog(
-                root,
-                "idle_shutdown_cancelled",
-                ev(json!({"why": "pending task arrived"})),
-            );
+            dlog(root, "idle_shutdown_cancelled", ev(json!({"why": "pending task arrived"})));
             return;
         }
         if root.join("STOP").exists() {
-            dlog(
-                root,
-                "idle_shutdown_cancelled",
-                ev(json!({"why": "STOP sentinel"})),
-            );
+            dlog(root, "idle_shutdown_cancelled", ev(json!({"why": "STOP sentinel"})));
             return;
         }
         if i % 10 == 0 || i <= 5 {
@@ -227,11 +174,7 @@ fn maybe_shutdown(root: &Path, running_empty: bool) {
         dlog(root, "idle_shutdown_exec", ev(json!({"cmd": cmd})));
         let _ = std::fs::remove_file(root.join("daemon.pid"));
         let err = Command::new("sh").arg("-c").arg(&cmd).exec();
-        dlog(
-            root,
-            "idle_shutdown_exec_failed",
-            ev(json!({"error": err.to_string()})),
-        );
+        dlog(root, "idle_shutdown_exec_failed", ev(json!({"error": err.to_string()})));
     } else {
         dlog(root, "idle_shutdown_aborted", Map::new());
     }
@@ -275,10 +218,7 @@ impl Daemon {
         }
         let running_dir = self.root.join("running");
         while self.runpids.len() < workers as usize {
-            let next = match queue::pending_list(&self.root)
-                .ok()
-                .and_then(|v| v.into_iter().next())
-            {
+            let next = match queue::pending_list(&self.root).ok().and_then(|v| v.into_iter().next()) {
                 Some(n) => n,
                 None => break,
             };
@@ -297,8 +237,7 @@ impl Daemon {
             match exec::spawn_task(&self.root, &next) {
                 Ok(child) => {
                     let pid = child.id();
-                    let _ =
-                        std::fs::write(running_dir.join(format!("{next}.pid")), format!("{pid}\n"));
+                    let _ = std::fs::write(running_dir.join(format!("{next}.pid")), format!("{pid}\n"));
                     self.runpids.insert(pid, (next.clone(), child));
                     dlog(
                         &self.root,
@@ -308,11 +247,7 @@ impl Daemon {
                     );
                 }
                 Err(e) => {
-                    dlog(
-                        &self.root,
-                        "spawn_failed",
-                        ev(json!({"task": next, "error": e.to_string()})),
-                    );
+                    dlog(&self.root, "spawn_failed", ev(json!({"task": next, "error": e.to_string()})));
                     let _ = exec::finalize(&self.root, &next, 1);
                 }
             }
@@ -322,11 +257,7 @@ impl Daemon {
     /// TERM/INT/HUP: drop the pidfile, TERM every tracked pgid, wait
     /// 2 s, KILL survivors, exit 143 (design.md §3.5).
     fn on_term(&self) -> ! {
-        dlog(
-            &self.root,
-            "signal",
-            ev(json!({"forwarded_to": self.runpids.len()})),
-        );
+        dlog(&self.root, "signal", ev(json!({"forwarded_to": self.runpids.len()})));
         let _ = std::fs::remove_file(self.root.join("daemon.pid"));
         for pid in self.runpids.keys() {
             exec::signal_pgid(*pid, "TERM");
@@ -350,8 +281,7 @@ pub fn run(root: &Path) -> Result<()> {
     let got_signal = Arc::new(AtomicBool::new(false));
     {
         let flag = Arc::clone(&got_signal);
-        let mut sigs = signal_hook::iterator::Signals::new(SIGNALS)
-            .context("cannot install signal handlers")?;
+        let mut sigs = signal_hook::iterator::Signals::new(SIGNALS).context("cannot install signal handlers")?;
         std::thread::spawn(move || {
             for _ in sigs.forever() {
                 flag.store(true, Ordering::SeqCst);
@@ -360,19 +290,10 @@ pub fn run(root: &Path) -> Result<()> {
     }
 
     let root = root.to_path_buf();
-    dlog(
-        &root,
-        "daemon_start",
-        ev(json!({"pid": std::process::id()})),
-    );
+    dlog(&root, "daemon_start", ev(json!({"pid": std::process::id()})));
     requeue_orphans(&root)?;
 
-    let mut d = Daemon {
-        root: root.clone(),
-        runpids: HashMap::new(),
-        last_workers: None,
-        got_signal,
-    };
+    let mut d = Daemon { root: root.clone(), runpids: HashMap::new(), last_workers: None, got_signal };
     let poll = poll_interval();
     loop {
         if d.got_signal.load(Ordering::SeqCst) {
@@ -389,10 +310,7 @@ pub fn run(root: &Path) -> Result<()> {
             // STOP set while tasks run: no new dispatches, drain only
         } else {
             d.dispatch();
-            if d.root.join("shutdown_on_idle").exists()
-                && d.runpids.is_empty()
-                && !shutdown::pending_nonempty(&d.root)
-            {
+            if d.root.join("shutdown_on_idle").exists() && d.runpids.is_empty() && !shutdown::pending_nonempty(&d.root) {
                 maybe_shutdown(&d.root, true);
             }
         }
@@ -408,21 +326,11 @@ pub fn start(root: &Path) -> Result<u32> {
         return Ok(pid);
     }
     queue::init(root)?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(root.join("daemon.log"))?;
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(root.join("daemon.log"))?;
     let err = log.try_clone()?;
     let exe = std::env::current_exe()?;
     let mut child = Command::new(exe);
-    child
-        .arg("daemon")
-        .arg("--root")
-        .arg(root)
-        .stdin(Stdio::null())
-        .stdout(log)
-        .stderr(err)
-        .process_group(0);
+    child.arg("daemon").arg("--root").arg(root).stdin(Stdio::null()).stdout(log).stderr(err).process_group(0);
     let mut spawned = child.spawn().context("cannot spawn daemon")?;
     drop(spawned.stdin.take());
     // the daemon writes its own pidfile; wait until liveness confirms
@@ -431,10 +339,7 @@ pub fn start(root: &Path) -> Result<u32> {
             return Ok(pid);
         }
         if let Ok(Some(_)) = spawned.try_wait() {
-            anyhow::bail!(
-                "daemon exited during startup; check {}",
-                root.join("daemon.log").display()
-            );
+            anyhow::bail!("daemon exited during startup; check {}", root.join("daemon.log").display());
         }
         std::thread::sleep(Duration::from_millis(50));
     }

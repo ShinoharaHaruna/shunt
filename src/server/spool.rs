@@ -30,26 +30,15 @@ pub fn render_task_body(meta: &TaskMeta) -> String {
     }
     out.push_str("set -uo pipefail\n");
     if let Some(guard) = &meta.guard {
-        out.push_str(&format!(
-            "if [ -e {} ]; then echo \"guard hit: {guard} exists; skipping\"; exit 0; fi\n",
-            shell_quote(guard)
-        ));
+        out.push_str(&format!("if [ -e {} ]; then echo \"guard hit: {guard} exists; skipping\"; exit 0; fi\n", shell_quote(guard)));
     }
-    let cmd = meta
-        .cmd
-        .iter()
-        .map(|a| shell_quote(a))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let cmd = meta.cmd.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
     out.push_str(&format!("exec {cmd}\n"));
     out
 }
 
 fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 /// Unix seconds → `YYYY-MM-DDTHH:MM:SSZ` (UTC, civil-from-days).
@@ -75,11 +64,7 @@ pub fn iso_utc(secs: u64) -> String {
 fn new_task_id(dir: &std::path::Path) -> String {
     let base = format!("{:x}-{:x}", now_unix(), std::process::id());
     for i in 0..1000 {
-        let id = if i == 0 {
-            base.clone()
-        } else {
-            format!("{base}-{i}")
-        };
+        let id = if i == 0 { base.clone() } else { format!("{base}-{i}") };
         if !dir.join(format!("{id}.json")).exists() {
             return id;
         }
@@ -89,32 +74,15 @@ fn new_task_id(dir: &std::path::Path) -> String {
 
 /// `shunt submit`: resolve client (+ project binding), build the task
 /// body, stage it. Returns the task id.
-pub fn submit(
-    client_name: &str,
-    project: Option<&str>,
-    guard: Option<&str>,
-    slug: Option<&str>,
-    file: Option<&str>,
-    cmd: &[String],
-) -> Result<String> {
+pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slug: Option<&str>, file: Option<&str>, cmd: &[String]) -> Result<String> {
     let client = registry::load_client(client_name)?;
 
     // Project binding supplies workdir + env for the record; the body
     // itself carries no `cd` (the runner places cwd, design.md §3.12).
-    let mut meta = TaskMeta {
-        slug: String::new(),
-        guard: guard.map(str::to_string),
-        workdir: None,
-        env: Default::default(),
-        cmd: Vec::new(),
-    };
+    let mut meta = TaskMeta { slug: String::new(), guard: guard.map(str::to_string), workdir: None, env: Default::default(), cmd: Vec::new() };
     if let Some(pname) = project {
         let p = registry::load_project(pname)?;
-        let b = p
-            .bind
-            .iter()
-            .find(|b| b.client == client_name)
-            .with_context(|| format!("project {pname} is not bound to client {client_name}"))?;
+        let b = p.bind.iter().find(|b| b.client == client_name).with_context(|| format!("project {pname} is not bound to client {client_name}"))?;
         meta.workdir = Some(b.workdir.clone());
         meta.env = b.env.clone();
     }
@@ -129,19 +97,7 @@ pub fn submit(
         String::new() // rendered after slug is known
     };
 
-    let raw_slug = slug.map(str::to_string).unwrap_or_else(|| {
-        if let Some(path) = file {
-            std::path::Path::new(path)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "task".into())
-        } else {
-            std::path::Path::new(&cmd[0])
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "task".into())
-        }
-    });
+    let raw_slug = slug.map(str::to_string).unwrap_or_else(|| if let Some(path) = file { std::path::Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "task".into()) } else { std::path::Path::new(&cmd[0]).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "task".into()) });
     let slug = sanitize_slug(&raw_slug);
     if slug.is_empty() {
         bail!("empty slug after sanitization");
@@ -153,19 +109,9 @@ pub fn submit(
     let shortid: String = id.chars().take(8).collect();
     meta.slug = format!("{slug}-{shortid}");
 
-    let body = if file.is_some() {
-        body
-    } else {
-        render_task_body(&meta)
-    };
+    let body = if file.is_some() { body } else { render_task_body(&meta) };
 
-    let entry = SpoolEntry {
-        id: id.clone(),
-        project: project.unwrap_or("").to_string(),
-        client: client.name.clone(),
-        meta,
-        submitted_at: iso_utc(now_unix()),
-    };
+    let entry = SpoolEntry { id: id.clone(), project: project.unwrap_or("").to_string(), client: client.name.clone(), meta, submitted_at: iso_utc(now_unix()) };
     stage(&entry, &body)?;
     Ok(id)
 }
@@ -176,10 +122,7 @@ pub fn stage(entry: &SpoolEntry, body: &str) -> Result<()> {
     let dir = spool_dir()?;
     fs::create_dir_all(&dir)?;
     let json = serde_json::to_string_pretty(entry)?;
-    for (name, contents) in [
-        (format!("{}.json", entry.id), json),
-        (format!("{}.sh", entry.id), body.to_string()),
-    ] {
+    for (name, contents) in [(format!("{}.json", entry.id), json), (format!("{}.sh", entry.id), body.to_string())] {
         let tmp = dir.join(format!(".{name}.tmp"));
         fs::write(&tmp, contents)?;
         fs::rename(&tmp, dir.join(&name))?;
@@ -200,10 +143,8 @@ pub fn list() -> Result<Vec<SpoolEntry>> {
                     if id.starts_with('.') {
                         continue;
                     }
-                    let text = fs::read_to_string(dir.join(&name))
-                        .with_context(|| format!("cannot read spool entry {name}"))?;
-                    let e: SpoolEntry = serde_json::from_str(&text)
-                        .with_context(|| format!("bad JSON in spool/{name}"))?;
+                    let text = fs::read_to_string(dir.join(&name)).with_context(|| format!("cannot read spool entry {name}"))?;
+                    let e: SpoolEntry = serde_json::from_str(&text).with_context(|| format!("bad JSON in spool/{name}"))?;
                     out.push(e);
                 }
             }
@@ -242,13 +183,7 @@ mod tests {
 
     #[test]
     fn body_matches_task_format() {
-        let meta = TaskMeta {
-            slug: "train-v2-ab12".into(),
-            guard: Some("runs/x.json".into()),
-            workdir: Some("/root/autodl-tmp/P".into()),
-            env: Default::default(),
-            cmd: vec!["uv".into(), "run".into(), "python".into(), "a b.py".into()],
-        };
+        let meta = TaskMeta { slug: "train-v2-ab12".into(), guard: Some("runs/x.json".into()), workdir: Some("/root/autodl-tmp/P".into()), env: Default::default(), cmd: vec!["uv".into(), "run".into(), "python".into(), "a b.py".into()] };
         let body = render_task_body(&meta);
         assert!(body.starts_with("#!/usr/bin/env bash\n"));
         assert!(body.contains("set -uo pipefail\n"));

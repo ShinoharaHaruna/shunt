@@ -23,12 +23,8 @@ enum Reach {
 fn probe_client(t: &dyn Transport, client: &registry::ClientEntry) -> Reach {
     match t.exec(client, &wire_argv(client, &["status", "--json"]), None) {
         Ok(out) => match serde_json::from_str::<StatusReport>(out.trim()) {
-            Ok(rep) => Reach::Up {
-                daemon_alive: rep.daemon.alive,
-            },
-            Err(_) => Reach::Up {
-                daemon_alive: false,
-            },
+            Ok(rep) => Reach::Up { daemon_alive: rep.daemon.alive },
+            Err(_) => Reach::Up { daemon_alive: false },
         },
         Err(_) => Reach::Down,
     }
@@ -37,28 +33,13 @@ fn probe_client(t: &dyn Transport, client: &registry::ClientEntry) -> Reach {
 /// Push one staged body to the client; returns Ok on a clean ack.
 /// `entry.meta.slug` is already the collision-mangled `<slug>-<id>`
 /// (spool::submit); the remote uses it for the pending filename.
-fn push(
-    t: &dyn Transport,
-    client: &registry::ClientEntry,
-    entry: &crate::proto::task::SpoolEntry,
-    body: &str,
-) -> Result<String> {
-    let out = t.exec(
-        client,
-        &wire_argv(client, &["enqueue", "-", &entry.meta.slug, "--json"]),
-        Some(body),
-    )?;
+fn push(t: &dyn Transport, client: &registry::ClientEntry, entry: &crate::proto::task::SpoolEntry, body: &str) -> Result<String> {
+    let out = t.exec(client, &wire_argv(client, &["enqueue", "-", &entry.meta.slug, "--json"]), Some(body))?;
     let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap_or(serde_json::Value::Null);
     if v.get("ok").and_then(|o| o.as_bool()) == Some(true) {
-        Ok(v.get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("")
-            .to_string())
+        Ok(v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string())
     } else {
-        let msg = v
-            .get("error")
-            .and_then(|e| e.as_str())
-            .unwrap_or("enqueue rejected");
+        let msg = v.get("error").and_then(|e| e.as_str()).unwrap_or("enqueue rejected");
         anyhow::bail!("enqueue on {} failed: {msg}", client.name)
     }
 }
@@ -84,15 +65,13 @@ fn sweep_inner(forced: Option<&dyn Transport>) -> Result<usize> {
     for entry in entries {
         let client = match clients.entry(entry.client.clone()) {
             std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::btree_map::Entry::Vacant(v) => {
-                match registry::load_client(&entry.client) {
-                    Ok(c) => v.insert(c),
-                    Err(e) => {
-                        eprintln!("dispatch: {} -> {}: {e:#}", entry.id, entry.client);
-                        continue;
-                    }
+            std::collections::btree_map::Entry::Vacant(v) => match registry::load_client(&entry.client) {
+                Ok(c) => v.insert(c),
+                Err(e) => {
+                    eprintln!("dispatch: {} -> {}: {e:#}", entry.id, entry.client);
+                    continue;
                 }
-            }
+            },
         };
 
         let owned = crate::server::transport::transport_for(client);
@@ -100,10 +79,7 @@ fn sweep_inner(forced: Option<&dyn Transport>) -> Result<usize> {
 
         if let std::collections::btree_map::Entry::Vacant(v) = reach.entry(entry.client.clone()) {
             let r = probe_client(t, client);
-            if let Reach::Up {
-                daemon_alive: false,
-            } = r
-            {
+            if let Reach::Up { daemon_alive: false } = r {
                 // Auto-heal: ssh works but shuntd is dead; start it once.
                 match t.exec(client, &wire_argv(client, &["start"]), None) {
                     Ok(_) => eprintln!("dispatch: {} daemon restarted", client.name),

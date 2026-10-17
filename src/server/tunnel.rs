@@ -36,12 +36,7 @@ fn port_path(name: &str) -> Result<PathBuf> {
 
 /// Upsert or remove one KEY=value line in `<qroot>/env` on the box,
 /// over the client's transport (works for ssh and loopback alike).
-fn env_write(
-    t: &dyn Transport,
-    client: &ClientEntry,
-    key: &str,
-    value: Option<&str>,
-) -> Result<()> {
+fn env_write(t: &dyn Transport, client: &ClientEntry, key: &str, value: Option<&str>) -> Result<()> {
     const SCRIPT: &str = r#"
 f="$1/env"; k="$2"; v="$3"
 mkdir -p "$1"; touch "$f"
@@ -49,15 +44,7 @@ grep -v "^$k=" "$f" > "$f.tmp" 2>/dev/null || true
 [ -n "$v" ] && echo "$k=$v" >> "$f.tmp"
 mv "$f.tmp" "$f"
 "#;
-    let argv = [
-        "sh".to_string(),
-        "-c".to_string(),
-        SCRIPT.to_string(),
-        "sh".to_string(),
-        client.qroot.clone(),
-        key.to_string(),
-        value.unwrap_or("").to_string(),
-    ];
+    let argv = ["sh".to_string(), "-c".to_string(), SCRIPT.to_string(), "sh".to_string(), client.qroot.clone(), key.to_string(), value.unwrap_or("").to_string()];
     t.exec(client, &argv, None)?;
     Ok(())
 }
@@ -82,11 +69,7 @@ fn pid_alive(pid: u32) -> bool {
 
 /// Current tunnel state for a client (no network needed).
 pub fn status(name: &str) -> Result<TunnelState> {
-    let port = port_path(name)?
-        .exists()
-        .then(|| std::fs::read_to_string(port_path(name).unwrap()))
-        .and_then(|r| r.ok())
-        .and_then(|s| s.trim().parse::<u16>().ok());
+    let port = port_path(name)?.exists().then(|| std::fs::read_to_string(port_path(name).unwrap())).and_then(|r| r.ok()).and_then(|s| s.trim().parse::<u16>().ok());
     Ok(match read_pid(name)? {
         Some(pid) if pid_alive(pid) => TunnelState { alive: true, port },
         _ => TunnelState { alive: false, port },
@@ -116,10 +99,7 @@ pub fn list() -> Result<Vec<String>> {
 /// Returns the pid. Idempotent: an already-live tunnel is reported.
 pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<u32> {
     if client.local {
-        anyhow::bail!(
-            "{} uses the loopback transport — no tunnel needed",
-            client.name
-        );
+        anyhow::bail!("{} uses the loopback transport — no tunnel needed", client.name);
     }
     if let Some(pid) = read_pid(&client.name)? {
         if pid_alive(pid) {
@@ -129,40 +109,17 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
     let port = port.unwrap_or(DEFAULT_SOCKS_PORT);
     let dir = tunnels_dir()?;
     std::fs::create_dir_all(&dir)?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join(format!("{}.log", client.name)))?;
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("{}.log", client.name)))?;
     let err = log.try_clone()?;
 
     let mut args = vec!["ssh".to_string()];
     args.extend(ssh_conn_args(client));
-    args.extend([
-        "-N".into(),
-        "-R".into(),
-        port.to_string(),
-        "-o".into(),
-        "ExitOnForwardFailure=yes".into(),
-        "-o".into(),
-        "ServerAliveInterval=30".into(),
-        "-o".into(),
-        "ServerAliveCountMax=3".into(),
-    ]);
-    let mut child = Command::new("ssh")
-        .args(&args[1..])
-        .stdin(Stdio::null())
-        .stdout(log)
-        .stderr(err)
-        .process_group(0)
-        .spawn()
-        .context("spawn ssh tunnel")?;
+    args.extend(["-N".into(), "-R".into(), port.to_string(), "-o".into(), "ExitOnForwardFailure=yes".into(), "-o".into(), "ServerAliveInterval=30".into(), "-o".into(), "ServerAliveCountMax=3".into()]);
+    let mut child = Command::new("ssh").args(&args[1..]).stdin(Stdio::null()).stdout(log).stderr(err).process_group(0).spawn().context("spawn ssh tunnel")?;
     // ExitOnForwardFailure makes a bad bind exit fast; give it a beat.
     std::thread::sleep(std::time::Duration::from_millis(500));
     if let Ok(Some(_)) = child.try_wait() {
-        anyhow::bail!(
-            "ssh tunnel exited during setup; see {}",
-            dir.join(format!("{}.log", client.name)).display()
-        );
+        anyhow::bail!("ssh tunnel exited during setup; see {}", dir.join(format!("{}.log", client.name)).display());
     }
     let pid = child.id();
     std::fs::write(pid_path(&client.name)?, format!("{pid}\n"))?;
@@ -171,10 +128,7 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
     // Wire the queue env so tasks see the proxy without any task edits.
     let proxy = format!("socks5h://127.0.0.1:{port}");
     match env_write(t, client, "ALL_PROXY", Some(&proxy)) {
-        Ok(()) => eprintln!(
-            "tunnel: {} socks5 -> 127.0.0.1:{port} (ALL_PROXY written to env)",
-            client.name
-        ),
+        Ok(()) => eprintln!("tunnel: {} socks5 -> 127.0.0.1:{port} (ALL_PROXY written to env)", client.name),
         Err(e) => {
             eprintln!("tunnel: up, but env write failed ({e:#}); set ALL_PROXY={proxy} manually")
         }
@@ -207,20 +161,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn entry(root: &Path) -> ClientEntry {
-        ClientEntry {
-            name: "tun-test".into(),
-            local: true,
-            disabled: false,
-            local_bin: None,
-            timeout_s: None,
-            ssh_timeout_s: None,
-            shutdown_cmd: None,
-            ssh: SshEndpoint::default(),
-            qroot: root.display().to_string(),
-            deploy_root: "/".into(),
-            facts: BTreeMap::new(),
-            billing: None,
-        }
+        ClientEntry { name: "tun-test".into(), local: true, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, ssh: SshEndpoint::default(), qroot: root.display().to_string(), deploy_root: "/".into(), facts: BTreeMap::new(), billing: None }
     }
 
     #[test]
@@ -228,10 +169,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("shunt-tun-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let client = entry(&root);
-        let t = LocalTransport {
-            bin: PathBuf::from("/bin/sh"),
-            timeout_s: Some(10),
-        };
+        let t = LocalTransport { bin: PathBuf::from("/bin/sh"), timeout_s: Some(10) };
         let f = root.join("env");
         env_write(&t, &client, "ALL_PROXY", Some("socks5h://127.0.0.1:1080")).unwrap();
         env_write(&t, &client, "WORKDIR", Some("/work")).unwrap();

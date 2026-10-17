@@ -39,15 +39,7 @@ pub struct SpoolEntry {
 /// Sanitize a slug to `[A-Za-z0-9_.-]`; anything else becomes `-`.
 /// An empty result is an error upstream (design.md §3.3).
 pub fn sanitize_slug(raw: &str) -> String {
-    raw.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
+    raw.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') { c } else { '-' }).collect()
 }
 
 #[cfg(test)]

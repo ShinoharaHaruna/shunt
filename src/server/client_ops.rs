@@ -53,23 +53,9 @@ echo "PY=$(python3 --version 2>&1 | awk '{print $2}')"
 "#;
 
 /// Run the raw-shell probe and parse KEY=value output into facts.
-pub fn probe_facts(
-    t: &dyn Transport,
-    client: &ClientEntry,
-) -> Result<BTreeMap<String, serde_json::Value>> {
-    let root = if client.deploy_root.is_empty() {
-        "/"
-    } else {
-        client.deploy_root.as_str()
-    };
-    let out = t.exec(
-        client,
-        &["sh", "-c", PROBE_SCRIPT, "sh", root]
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>(),
-        None,
-    )?;
+pub fn probe_facts(t: &dyn Transport, client: &ClientEntry) -> Result<BTreeMap<String, serde_json::Value>> {
+    let root = if client.deploy_root.is_empty() { "/" } else { client.deploy_root.as_str() };
+    let out = t.exec(client, &["sh", "-c", PROBE_SCRIPT, "sh", root].iter().map(|s| s.to_string()).collect::<Vec<_>>(), None)?;
     Ok(parse_probe(&out))
 }
 
@@ -147,30 +133,14 @@ pub fn ensure_key(entry: &mut ClientEntry) -> Result<()> {
     if !entry.ssh.key.is_empty() {
         // A set-but-missing path is a user error; surface it instead
         // of silently swapping in a fresh key.
-        anyhow::bail!(
-            "ssh.key points at {} but the file is missing",
-            entry.ssh.key
-        );
+        anyhow::bail!("ssh.key points at {} but the file is missing", entry.ssh.key);
     }
     let path = registry::client_key_path(&entry.name)?;
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
     }
     if !path.exists() {
-        let st = std::process::Command::new("ssh-keygen")
-            .args([
-                "-t",
-                "ed25519",
-                "-N",
-                "",
-                "-f",
-                &path.display().to_string(),
-                "-C",
-                &format!("shunt-{}", entry.name),
-            ])
-            .stdin(std::process::Stdio::null())
-            .status()
-            .context("spawn ssh-keygen")?;
+        let st = std::process::Command::new("ssh-keygen").args(["-t", "ed25519", "-N", "", "-f", &path.display().to_string(), "-C", &format!("shunt-{}", entry.name)]).stdin(std::process::Stdio::null()).status().context("spawn ssh-keygen")?;
         if !st.success() {
             anyhow::bail!("ssh-keygen failed for {}", path.display());
         }
@@ -188,36 +158,12 @@ pub fn deploy_key(entry: &ClientEntry) -> Result<bool> {
     if entry.ssh.password.is_empty() {
         return Ok(false);
     }
-    let have_sshpass = std::process::Command::new("sh")
-        .args(["-c", "command -v sshpass >/dev/null 2>&1"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let have_sshpass = std::process::Command::new("sh").args(["-c", "command -v sshpass >/dev/null 2>&1"]).status().map(|s| s.success()).unwrap_or(false);
     if !have_sshpass {
         anyhow::bail!("ssh.password is set but `sshpass` is not installed");
     }
     let pub_key = format!("{}.pub", entry.ssh.key);
-    let st = std::process::Command::new("sshpass")
-        .args([
-            "-p",
-            &entry.ssh.password,
-            "ssh-copy-id",
-            "-i",
-            &pub_key,
-            "-p",
-            &entry.ssh.port.to_string(),
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            &format!(
-                "UserKnownHostsFile={}",
-                registry::known_hosts_path()?.display()
-            ),
-            &format!("{}@{}", entry.ssh.user, entry.ssh.host),
-        ])
-        .stdin(std::process::Stdio::null())
-        .status()
-        .context("spawn sshpass ssh-copy-id")?;
+    let st = std::process::Command::new("sshpass").args(["-p", &entry.ssh.password, "ssh-copy-id", "-i", &pub_key, "-p", &entry.ssh.port.to_string(), "-o", "StrictHostKeyChecking=accept-new", "-o", &format!("UserKnownHostsFile={}", registry::known_hosts_path()?.display()), &format!("{}@{}", entry.ssh.user, entry.ssh.host)]).stdin(std::process::Stdio::null()).status().context("spawn sshpass ssh-copy-id")?;
     Ok(st.success())
 }
 
@@ -230,50 +176,20 @@ pub fn bootstrap(t: &dyn Transport, name: &str) -> Result<()> {
     if deploy_key(&entry)? {
         eprintln!("key deployed: {}", entry.ssh.key);
     } else if !entry.local {
-        eprintln!(
-            "note: no password/sshpass path — install {}.pub on the box once\n      (vendor console or: ssh-copy-id -i {}.pub -p {} {}@{})",
-            entry.ssh.key, entry.ssh.key, entry.ssh.port, entry.ssh.user, entry.ssh.host
-        );
+        eprintln!("note: no password/sshpass path — install {}.pub on the box once\n      (vendor console or: ssh-copy-id -i {}.pub -p {} {}@{})", entry.ssh.key, entry.ssh.key, entry.ssh.port, entry.ssh.user, entry.ssh.host);
     }
     let facts = probe_facts(t, &entry)?;
     entry.facts.extend(facts);
 
     let bin = shunt_bin(&entry);
-    let bindir = bin
-        .rsplit_once('/')
-        .map(|(d, _)| d)
-        .unwrap_or("")
-        .to_string();
-    t.exec(&entry, &["mkdir".into(), "-p".into(), bindir.clone()], None)
-        .context("mkdir remote bin dir")?;
+    let bindir = bin.rsplit_once('/').map(|(d, _)| d).unwrap_or("").to_string();
+    t.exec(&entry, &["mkdir".into(), "-p".into(), bindir.clone()], None).context("mkdir remote bin dir")?;
     let local = std::env::current_exe().context("current_exe")?;
-    t.copy_to(&entry, &local, &bin)
-        .context("copy shunt binary")?;
+    t.copy_to(&entry, &local, &bin).context("copy shunt binary")?;
     t.exec(&entry, &["chmod".into(), "+x".into(), bin.clone()], None)?;
 
-    t.exec(
-        &entry,
-        &[
-            bin.clone(),
-            "init".into(),
-            "--root".into(),
-            entry.qroot.clone(),
-            "--json".into(),
-        ],
-        None,
-    )
-    .context("remote shunt init")?;
-    t.exec(
-        &entry,
-        &[
-            bin.clone(),
-            "start".into(),
-            "--root".into(),
-            entry.qroot.clone(),
-        ],
-        None,
-    )
-    .context("remote shunt start")?;
+    t.exec(&entry, &[bin.clone(), "init".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt init")?;
+    t.exec(&entry, &[bin.clone(), "start".into(), "--root".into(), entry.qroot.clone()], None).context("remote shunt start")?;
 
     let p = registry::save_client(&entry)?;
     println!("bootstrapped {} ({})", entry.name, bin);

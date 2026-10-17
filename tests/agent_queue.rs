@@ -21,8 +21,7 @@ struct Q {
 impl Q {
     fn new(tag: &str) -> Self {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
-        let root =
-            std::env::temp_dir().join(format!("shunt-test-{tag}-{}-{n}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("shunt-test-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let q = Q { root };
         q.run_ok(&["init"]);
@@ -31,11 +30,7 @@ impl Q {
 
     fn run(&self, args: &[&str]) -> Output {
         let mut c = Command::new(bin());
-        let mut argv: Vec<String> = vec![
-            args[0].to_string(),
-            "--root".into(),
-            self.root.to_string_lossy().into_owned(),
-        ];
+        let mut argv: Vec<String> = vec![args[0].to_string(), "--root".into(), self.root.to_string_lossy().into_owned()];
         argv.extend(args[1..].iter().map(|s| s.to_string()));
         c.args(&argv);
         c.output().expect("shunt run failed")
@@ -43,11 +38,7 @@ impl Q {
 
     fn run_ok(&self, args: &[&str]) -> String {
         let o = self.run(args);
-        assert!(
-            o.status.success(),
-            "shunt {args:?} failed: {}",
-            String::from_utf8_lossy(&o.stderr)
-        );
+        assert!(o.status.success(), "shunt {args:?} failed: {}", String::from_utf8_lossy(&o.stderr));
         String::from_utf8_lossy(&o.stdout).into_owned()
     }
 
@@ -62,27 +53,16 @@ impl Q {
     /// the pidfile if a test panics before joining it.
     fn daemon(&self) -> Child {
         let mut c = Command::new(bin());
-        c.args(["daemon", "--root"])
-            .arg(&self.root)
-            .env("POLL", "0.1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        c.args(["daemon", "--root"]).arg(&self.root).env("POLL", "0.1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         c.spawn().expect("spawn daemon")
     }
 
     /// `shunt start` (self-daemonizing path).
     fn start(&self) -> String {
         let mut c = Command::new(bin());
-        c.args(["start", "--root"])
-            .arg(&self.root)
-            .env("POLL", "0.1");
+        c.args(["start", "--root"]).arg(&self.root).env("POLL", "0.1");
         let o = c.output().expect("shunt start failed");
-        assert!(
-            o.status.success(),
-            "start failed: {}",
-            String::from_utf8_lossy(&o.stderr)
-        );
+        assert!(o.status.success(), "start failed: {}", String::from_utf8_lossy(&o.stderr));
         String::from_utf8_lossy(&o.stdout).into_owned()
     }
 
@@ -94,40 +74,24 @@ impl Q {
         let f = self.root.join(format!("task-{slug}.sh.src"));
         std::fs::write(&f, body).unwrap();
         self.run_ok(&["enqueue", f.to_str().unwrap(), slug]);
-        let mut names: Vec<String> = std::fs::read_dir(self.root.join("pending"))
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.contains(slug))
-            .collect();
+        let mut names: Vec<String> = std::fs::read_dir(self.root.join("pending")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains(slug)).collect();
         names.sort();
         names.pop().expect("task not enqueued")
     }
 
     fn names(&self, track: &str) -> Vec<String> {
-        let mut v: Vec<String> = std::fs::read_dir(self.root.join(track))
-            .map(|rd| {
-                rd.flatten()
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut v: Vec<String> = std::fs::read_dir(self.root.join(track)).map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
         v.sort();
         v
     }
 
     /// Task files only (the `.sh` entries) in a track.
     fn tasks(&self, track: &str) -> Vec<String> {
-        self.names(track)
-            .into_iter()
-            .filter(|n| n.ends_with(".sh"))
-            .collect()
+        self.names(track).into_iter().filter(|n| n.ends_with(".sh")).collect()
     }
 
     fn daemon_pid(&self) -> Option<u32> {
-        std::fs::read_to_string(self.root.join("daemon.pid"))
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
+        std::fs::read_to_string(self.root.join("daemon.pid")).ok().and_then(|s| s.trim().parse().ok())
     }
 
     fn dlog(&self) -> String {
@@ -183,20 +147,8 @@ fn dispatch_order_priority_band_first() {
     // priority-band entry installed directly (0000-0099 runs first)
     std::fs::write(q.root.join("pending/0005_p0.sh"), body("p0")).unwrap();
     let mut d = q.daemon();
-    wait_until(
-        || {
-            std::fs::read_to_string(&order)
-                .map(|s| s.lines().count() == 3)
-                .unwrap_or(false)
-        },
-        15,
-        "all three tasks to run",
-    );
-    let lines: Vec<String> = std::fs::read_to_string(&order)
-        .unwrap()
-        .lines()
-        .map(|s| s.to_string())
-        .collect();
+    wait_until(|| std::fs::read_to_string(&order).map(|s| s.lines().count() == 3).unwrap_or(false), 15, "all three tasks to run");
+    let lines: Vec<String> = std::fs::read_to_string(&order).unwrap().lines().map(|s| s.to_string()).collect();
     assert_eq!(lines, ["p0", "n1", "n2"]);
     q.stop();
     let _ = d.wait();
@@ -213,10 +165,7 @@ fn enqueue_numbering_and_mode() {
     assert!(names[0].starts_with("0100_"), "got {names:?}");
     assert!(names[2].starts_with("0102_"), "got {names:?}");
     use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(q.root.join("pending").join(&names[0]))
-        .unwrap()
-        .permissions()
-        .mode();
+    let mode = std::fs::metadata(q.root.join("pending").join(&names[0])).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o755);
     // stdin wire form with --json ack
     let o = Command::new(bin())
@@ -227,10 +176,7 @@ fn enqueue_numbering_and_mode() {
         .spawn()
         .and_then(|mut c| {
             use std::io::Write;
-            c.stdin
-                .as_mut()
-                .unwrap()
-                .write_all(b"#!/usr/bin/env bash\nexit 0\n")?;
+            c.stdin.as_mut().unwrap().write_all(b"#!/usr/bin/env bash\nexit 0\n")?;
             c.wait_with_output()
         })
         .unwrap();
@@ -276,21 +222,9 @@ fn kill_term_lands_in_failed() {
     wait_until(|| !q.tasks("running").is_empty(), 10, "task running");
     let out = q.run_ok(&["kill", "victim"]);
     assert!(out.contains("terminated"), "got {out}");
-    wait_until(
-        || q.names("failed").iter().any(|n| n.ends_with(".exit")),
-        10,
-        "task finalized to failed/",
-    );
-    let exit = q
-        .names("failed")
-        .into_iter()
-        .find(|n| n.ends_with(".exit"))
-        .unwrap();
-    let rc: i32 = std::fs::read_to_string(q.root.join("failed").join(&exit))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    wait_until(|| q.names("failed").iter().any(|n| n.ends_with(".exit")), 10, "task finalized to failed/");
+    let exit = q.names("failed").into_iter().find(|n| n.ends_with(".exit")).unwrap();
+    let rc: i32 = std::fs::read_to_string(q.root.join("failed").join(&exit)).unwrap().trim().parse().unwrap();
     assert_eq!(rc, 143, "TERM should record rc 143, got {rc}");
     q.stop();
     let _ = d.wait();
@@ -300,19 +234,12 @@ fn kill_term_lands_in_failed() {
 fn kill_escalates_stubborn_task() {
     let q = Q::new("kill9");
     // ignores TERM entirely -> forces the KILL escalation path
-    q.enqueue_script(
-        "stubborn",
-        "#!/usr/bin/env bash\ntrap '' TERM\nexec sleep 60\n",
-    );
+    q.enqueue_script("stubborn", "#!/usr/bin/env bash\ntrap '' TERM\nexec sleep 60\n");
     let mut d = q.daemon();
     wait_until(|| !q.tasks("running").is_empty(), 10, "task running");
     let out = q.run_ok(&["kill", "stubborn"]);
     assert!(out.contains("SIGKILL"), "got {out}");
-    wait_until(
-        || q.names("failed").iter().any(|n| n.ends_with(".exit")),
-        15,
-        "killed task finalized",
-    );
+    wait_until(|| q.names("failed").iter().any(|n| n.ends_with(".exit")), 15, "killed task finalized");
     q.stop();
     let _ = d.wait();
 }
@@ -322,10 +249,7 @@ fn stop_drains_then_exits() {
     let q = Q::new("stop");
     let marker = q.root.join("done-marker");
     // task finishes on its own after ~1 s
-    q.enqueue_script(
-        "short",
-        &format!("#!/usr/bin/env bash\nsleep 1\ntouch {}\n", marker.display()),
-    );
+    q.enqueue_script("short", &format!("#!/usr/bin/env bash\nsleep 1\ntouch {}\n", marker.display()));
     let mut d = q.daemon();
     wait_until(|| !q.tasks("running").is_empty(), 10, "task running");
     q.stop();
@@ -342,13 +266,7 @@ fn orphan_requeue_front_of_queue() {
     let m_orphan = q.root.join("orphan-ran");
     let m_normal = q.root.join("normal-ran");
     let order = q.root.join("order.txt");
-    let mk = |tag: &str, marker: &Path| {
-        format!(
-            "#!/usr/bin/env bash\necho {tag} >> {}\ntouch {}\n",
-            order.display(),
-            marker.display()
-        )
-    };
+    let mk = |tag: &str, marker: &Path| format!("#!/usr/bin/env bash\necho {tag} >> {}\ntouch {}\n", order.display(), marker.display());
     q.enqueue_script("old", &mk("old", &m_orphan));
     {
         let mut d = q.daemon();
@@ -362,35 +280,18 @@ fn orphan_requeue_front_of_queue() {
     // queue a normal task before restart
     q.enqueue_script("new", &mk("new", &m_normal));
     let mut d = q.daemon();
-    wait_until(
-        || m_orphan.exists() && m_normal.exists(),
-        15,
-        "both tasks ran",
-    );
-    let lines: Vec<String> = std::fs::read_to_string(&order)
-        .unwrap()
-        .lines()
-        .map(|s| s.to_string())
-        .collect();
+    wait_until(|| m_orphan.exists() && m_normal.exists(), 15, "both tasks ran");
+    let lines: Vec<String> = std::fs::read_to_string(&order).unwrap().lines().map(|s| s.to_string()).collect();
     // at-least-once: the unguarded orphan may have already run once
     // before the daemon died, so "old" can appear twice; the point is
     // the requeued copy precedes the normally-numbered task.
     assert_eq!(lines.first().map(String::as_str), Some("old"), "{lines:?}");
     assert_eq!(lines.last().map(String::as_str), Some("new"), "{lines:?}");
     // interrupted log swept to failed/
-    assert!(
-        q.names("failed").iter().any(|n| n.contains("interrupted")),
-        "expected interrupted log in failed/: {:?}",
-        q.names("failed")
-    );
+    assert!(q.names("failed").iter().any(|n| n.contains("interrupted")), "expected interrupted log in failed/: {:?}", q.names("failed"));
     // double-requeue must not stack prefixes
     let requeued = q.names("done");
-    assert!(
-        !requeued
-            .iter()
-            .any(|n| n.contains("requeued_0000_requeued")),
-        "prefix stacked: {requeued:?}"
-    );
+    assert!(!requeued.iter().any(|n| n.contains("requeued_0000_requeued")), "prefix stacked: {requeued:?}");
     q.stop();
     let _ = d.wait();
 }
@@ -401,33 +302,17 @@ fn orphan_live_pgid_warns_and_requeues() {
     // craft a running/ entry by hand: dead-daemon leftover whose pgid
     // is still alive (a detached sleeper)
     use std::os::unix::process::CommandExt;
-    let mut sleeper = Command::new("sleep")
-        .arg("30")
-        .process_group(0)
-        .spawn()
-        .unwrap();
+    let mut sleeper = Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
     let pgid = sleeper.id();
     let running = q.root.join("running");
-    std::fs::write(
-        running.join("0001_ghost.sh"),
-        marker_task(&q.root.join("ghost")),
-    )
-    .unwrap();
+    std::fs::write(running.join("0001_ghost.sh"), marker_task(&q.root.join("ghost"))).unwrap();
     std::fs::write(running.join("0001_ghost.sh.log"), b"partial\n").unwrap();
     std::fs::write(running.join("0001_ghost.sh.pid"), format!("{pgid}\n")).unwrap();
 
     let mut d = q.daemon();
-    wait_until(
-        || q.dlog().contains("orphan_live_pgid"),
-        10,
-        "WARNING about live pgid",
-    );
+    wait_until(|| q.dlog().contains("orphan_live_pgid"), 10, "WARNING about live pgid");
     assert!(q.dlog().contains("\"warning\""), "{}", q.dlog());
-    wait_until(
-        || q.root.join("ghost").exists(),
-        15,
-        "requeued ghost task runs",
-    );
+    wait_until(|| q.root.join("ghost").exists(), 15, "requeued ghost task runs");
     q.stop();
     let _ = d.wait();
     let _ = sleeper.kill();
@@ -439,45 +324,22 @@ fn workers_resize_raise_lower_invalid() {
     let q = Q::new("workers");
     std::fs::write(q.root.join("workers"), "1\n").unwrap();
     let rel = q.root.join("release"); // tasks wait on this marker
-    let mk = || -> String {
-        format!(
-            "#!/usr/bin/env bash\nwhile [ ! -e {} ]; do sleep 0.1; done\n",
-            rel.display()
-        )
-    };
+    let mk = || -> String { format!("#!/usr/bin/env bash\nwhile [ ! -e {} ]; do sleep 0.1; done\n", rel.display()) };
     q.enqueue_script("w1", &mk());
     q.enqueue_script("w2", &mk());
     let mut d = q.daemon();
     wait_until(|| q.tasks("running").len() == 1, 10, "one running");
     // raise -> second task dispatches immediately
     q.run_ok(&["workers", "2"]);
-    wait_until(
-        || q.tasks("running").len() == 2,
-        10,
-        "two running after raise",
-    );
+    wait_until(|| q.tasks("running").len() == 2, 10, "two running after raise");
     // lower while both run -> drain only, no kill
     q.run_ok(&["workers", "1"]);
     std::thread::sleep(Duration::from_millis(400));
-    assert_eq!(
-        q.tasks("running").len(),
-        2,
-        "lower must not kill running tasks"
-    );
+    assert_eq!(q.tasks("running").len(), 2, "lower must not kill running tasks");
     // invalid value falls back to last-known (still runs, no crash)
     std::fs::write(q.root.join("workers"), "bogus\n").unwrap();
     std::fs::write(&rel, b"").unwrap();
-    wait_until(
-        || {
-            q.names("done")
-                .iter()
-                .filter(|n| n.ends_with(".exit"))
-                .count()
-                == 2
-        },
-        15,
-        "both tasks drain",
-    );
+    wait_until(|| q.names("done").iter().filter(|n| n.ends_with(".exit")).count() == 2, 15, "both tasks drain");
     // get reports resolved value + source
     let out = q.run_ok(&["workers"]);
     assert!(out.contains("workers:"), "got {out}");
@@ -491,36 +353,14 @@ fn env_overlay_workdir_threads_proxy() {
     let workdir = q.root.join("wd");
     std::fs::create_dir_all(&workdir).unwrap();
     let out = q.root.join("env-out.txt");
-    std::fs::write(
-        q.root.join("env"),
-        format!(
-            "WORKDIR={}\nTASK_THREADS=2\nFOO=bar\nPATH_PREPEND=/nonexistent-prepend\n",
-            workdir.display()
-        ),
-    )
-    .unwrap();
-    q.enqueue_script(
-        "envcheck",
-        &format!(
-            "#!/usr/bin/env bash\n{{ echo \"pwd=$PWD\"; echo \"omp=$OMP_NUM_THREADS\"; echo \"foo=$FOO\"; echo \"proxies=$(env | grep -cE '^(ALL_PROXY|all_proxy|http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY)=')\"; echo \"path=$PATH\"; }} > {}\n",
-            out.display()
-        ),
-    );
+    std::fs::write(q.root.join("env"), format!("WORKDIR={}\nTASK_THREADS=2\nFOO=bar\nPATH_PREPEND=/nonexistent-prepend\n", workdir.display())).unwrap();
+    q.enqueue_script("envcheck", &format!("#!/usr/bin/env bash\n{{ echo \"pwd=$PWD\"; echo \"omp=$OMP_NUM_THREADS\"; echo \"foo=$FOO\"; echo \"proxies=$(env | grep -cE '^(ALL_PROXY|all_proxy|http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY)=')\"; echo \"path=$PATH\"; }} > {}\n", out.display()));
     let mut c = Command::new(bin());
-    c.args(["daemon", "--root"])
-        .arg(&q.root)
-        .env("POLL", "0.1")
-        .env("http_proxy", "http://should-be-unset:1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    c.args(["daemon", "--root"]).arg(&q.root).env("POLL", "0.1").env("http_proxy", "http://should-be-unset:1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     let mut d = c.spawn().unwrap();
     wait_until(|| out.exists(), 15, "env task ran");
     let text = std::fs::read_to_string(&out).unwrap();
-    assert!(
-        text.contains(&format!("pwd={}", workdir.display())),
-        "{text}"
-    );
+    assert!(text.contains(&format!("pwd={}", workdir.display())), "{text}");
     assert!(text.contains("omp=2"), "{text}");
     assert!(text.contains("foo=bar"), "{text}");
     assert!(text.contains("proxies=0"), "{text}");
@@ -535,16 +375,8 @@ fn workdir_unreachable_rc97() {
     std::fs::write(q.root.join("env"), "WORKDIR=/definitely/not/a/dir\n").unwrap();
     q.enqueue_script("nowd", &sleep_task());
     let mut d = q.daemon();
-    wait_until(
-        || q.names("failed").iter().any(|n| n.ends_with(".exit")),
-        15,
-        "task finalized",
-    );
-    let exit = q
-        .names("failed")
-        .into_iter()
-        .find(|n| n.ends_with(".exit"))
-        .unwrap();
+    wait_until(|| q.names("failed").iter().any(|n| n.ends_with(".exit")), 15, "task finalized");
+    let exit = q.names("failed").into_iter().find(|n| n.ends_with(".exit")).unwrap();
     let rc = std::fs::read_to_string(q.root.join("failed").join(&exit)).unwrap();
     assert_eq!(rc.trim(), "97");
     q.stop();
@@ -555,11 +387,7 @@ fn workdir_unreachable_rc97() {
 fn idle_shutdown_fires_marker() {
     let q = Q::new("shutfire");
     let fired = q.root.join("FIRED");
-    std::fs::write(
-        q.root.join("shutdown_cmd"),
-        format!("touch {}", fired.display()),
-    )
-    .unwrap();
+    std::fs::write(q.root.join("shutdown_cmd"), format!("touch {}", fired.display())).unwrap();
     q.run_ok(&["shutdown", "on", "2"]);
     let mut d = q.daemon();
     wait_until(|| q.dlog().contains("idle_shutdown_armed"), 10, "armed");
@@ -574,20 +402,12 @@ fn idle_shutdown_fires_marker() {
 fn idle_shutdown_cancel_flag_removed() {
     let q = Q::new("shutflag");
     let fired = q.root.join("FIRED");
-    std::fs::write(
-        q.root.join("shutdown_cmd"),
-        format!("touch {}", fired.display()),
-    )
-    .unwrap();
+    std::fs::write(q.root.join("shutdown_cmd"), format!("touch {}", fired.display())).unwrap();
     q.run_ok(&["shutdown", "on", "4"]);
     let mut d = q.daemon();
     wait_until(|| q.dlog().contains("idle_shutdown_armed"), 10, "armed");
     q.run_ok(&["shutdown", "off"]);
-    wait_until(
-        || q.dlog().contains("idle_shutdown_cancelled"),
-        10,
-        "cancelled",
-    );
+    wait_until(|| q.dlog().contains("idle_shutdown_cancelled"), 10, "cancelled");
     assert!(!fired.exists());
     assert!(q.daemon_pid().is_some(), "daemon still alive after cancel");
     q.stop();
@@ -599,20 +419,12 @@ fn idle_shutdown_cancel_new_pending() {
     let q = Q::new("shutpend");
     let fired = q.root.join("FIRED");
     let ran = q.root.join("ran");
-    std::fs::write(
-        q.root.join("shutdown_cmd"),
-        format!("touch {}", fired.display()),
-    )
-    .unwrap();
+    std::fs::write(q.root.join("shutdown_cmd"), format!("touch {}", fired.display())).unwrap();
     q.run_ok(&["shutdown", "on", "4"]);
     let mut d = q.daemon();
     wait_until(|| q.dlog().contains("idle_shutdown_armed"), 10, "armed");
     q.enqueue_script("late", &marker_task(&ran));
-    wait_until(
-        || q.dlog().contains("idle_shutdown_cancelled"),
-        10,
-        "cancelled by pending",
-    );
+    wait_until(|| q.dlog().contains("idle_shutdown_cancelled"), 10, "cancelled by pending");
     wait_until(|| ran.exists(), 15, "late task dispatched after cancel");
     assert!(!fired.exists());
     q.stop();
@@ -623,11 +435,7 @@ fn idle_shutdown_cancel_new_pending() {
 fn idle_shutdown_cancel_stop() {
     let q = Q::new("shutstop");
     let fired = q.root.join("FIRED");
-    std::fs::write(
-        q.root.join("shutdown_cmd"),
-        format!("touch {}", fired.display()),
-    )
-    .unwrap();
+    std::fs::write(q.root.join("shutdown_cmd"), format!("touch {}", fired.display())).unwrap();
     q.run_ok(&["shutdown", "on", "4"]);
     let mut d = q.daemon();
     wait_until(|| q.dlog().contains("idle_shutdown_armed"), 10, "armed");
@@ -642,11 +450,7 @@ fn idle_shutdown_cancel_stop() {
 fn status_json_shape() {
     let q = Q::new("status");
     q.enqueue_script("s1", &sleep_task());
-    let o = Command::new(bin())
-        .args(["status", "--json", "--root"])
-        .arg(&q.root)
-        .output()
-        .unwrap();
+    let o = Command::new(bin()).args(["status", "--json", "--root"]).arg(&q.root).output().unwrap();
     assert!(o.status.success());
     let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(v["protocol"], 1);
@@ -661,16 +465,7 @@ fn status_json_shape() {
 #[test]
 fn mktask_and_new() {
     let q = Q::new("mktask");
-    let out = q.run_ok(&[
-        "mktask",
-        "--slug",
-        "gen",
-        "--guard",
-        "runs/x.json",
-        "--",
-        "echo",
-        "a b",
-    ]);
+    let out = q.run_ok(&["mktask", "--slug", "gen", "--guard", "runs/x.json", "--", "echo", "a b"]);
     assert!(out.contains("set -uo pipefail"), "{out}");
     assert!(out.contains("[ -e runs/x.json ]"), "{out}");
     assert!(out.contains("exec echo 'a b'"), "{out}");
@@ -687,20 +482,10 @@ fn task_threads_auto_uses_cgroup() {
     let q = Q::new("threadsauto");
     let out = q.root.join("threads.txt");
     std::fs::write(q.root.join("env"), "TASK_THREADS=auto\n").unwrap();
-    q.enqueue_script(
-        "tcap",
-        &format!(
-            "#!/usr/bin/env bash\necho \"$OMP_NUM_THREADS\" > {}\n",
-            out.display()
-        ),
-    );
+    q.enqueue_script("tcap", &format!("#!/usr/bin/env bash\necho \"$OMP_NUM_THREADS\" > {}\n", out.display()));
     let mut d = q.daemon();
     wait_until(|| out.exists(), 15, "task ran");
-    let n: u32 = std::fs::read_to_string(&out)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let n: u32 = std::fs::read_to_string(&out).unwrap().trim().parse().unwrap();
     assert!(n >= 1);
     q.stop();
     let _ = d.wait();
@@ -732,13 +517,7 @@ fn enqueue_concurrent_no_duplicate_seq() {
     for i in 0..8 {
         let root = q.root.clone();
         let f = f.clone();
-        handles.push(std::thread::spawn(move || {
-            Command::new(bin())
-                .args(["enqueue", f.to_str().unwrap(), &format!("c{i}"), "--root"])
-                .arg(&root)
-                .output()
-                .unwrap()
-        }));
+        handles.push(std::thread::spawn(move || Command::new(bin()).args(["enqueue", f.to_str().unwrap(), &format!("c{i}"), "--root"]).arg(&root).output().unwrap()));
     }
     for h in handles {
         let o = h.join().unwrap();
@@ -746,10 +525,7 @@ fn enqueue_concurrent_no_duplicate_seq() {
     }
     let names = q.tasks("pending");
     assert_eq!(names.len(), 8);
-    let mut seqs: Vec<String> = names
-        .iter()
-        .map(|n| n.split('_').next().unwrap().to_string())
-        .collect();
+    let mut seqs: Vec<String> = names.iter().map(|n| n.split('_').next().unwrap().to_string()).collect();
     seqs.sort();
     seqs.dedup();
     assert_eq!(seqs.len(), 8, "duplicate seq numbers: {names:?}");

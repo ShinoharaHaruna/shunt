@@ -48,11 +48,7 @@ pub fn grace(root: &Path) -> u64 {
 
 /// Armed state + grace + the command that would fire.
 pub fn status(root: &Path) -> Result<crate::proto::wire::ShutdownState> {
-    Ok(crate::proto::wire::ShutdownState {
-        armed: root.join("shutdown_on_idle").exists(),
-        grace_s: grace(root),
-        cmd: resolve_cmd(root),
-    })
+    Ok(crate::proto::wire::ShutdownState { armed: root.join("shutdown_on_idle").exists(), grace_s: grace(root), cmd: resolve_cmd(root) })
 }
 
 /// Resolve the poweroff command at the last moment: `shutdown_cmd`
@@ -65,15 +61,10 @@ pub fn resolve_cmd(root: &Path) -> String {
             return c.to_string();
         }
     }
-    std::env::var("SHUTDOWN_CMD")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/usr/bin/shutdown".to_string())
+    std::env::var("SHUTDOWN_CMD").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/usr/bin/shutdown".to_string())
 }
 
 /// True when pending/ has at least one `.sh` file.
 pub fn pending_nonempty(root: &Path) -> bool {
-    queue::pending_list(root)
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
+    queue::pending_list(root).map(|v| !v.is_empty()).unwrap_or(false)
 }

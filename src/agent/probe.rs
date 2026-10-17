@@ -15,9 +15,7 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
 }
 
 fn read(path: &str) -> Option<String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|s| s.trim().to_string())
+    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
 
 /// Cgroup-aware CPU count: `cpu.max` (v2) or cfs quota/period (v1);
@@ -54,42 +52,23 @@ fn cgroup_mem_gb() -> Option<f64> {
             return Some(b as f64 / GIB);
         }
     }
-    if let Some(b) =
-        read("/sys/fs/cgroup/memory/memory.limit_in_bytes").and_then(|s| s.parse::<u64>().ok())
-    {
+    if let Some(b) = read("/sys/fs/cgroup/memory/memory.limit_in_bytes").and_then(|s| s.parse::<u64>().ok()) {
         // v1 reports ~i64::MAX when unbounded
         if b < (1u64 << 60) {
             return Some(b as f64 / GIB);
         }
     }
-    read("/proc/meminfo").and_then(|s| {
-        s.lines()
-            .find(|l| l.starts_with("MemTotal:"))
-            .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
-            .map(|kb| kb as f64 * 1024.0 / GIB)
-    })
+    read("/proc/meminfo").and_then(|s| s.lines().find(|l| l.starts_with("MemTotal:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()).map(|kb| kb as f64 * 1024.0 / GIB))
 }
 
 fn nvidia_smi() -> Option<(Option<String>, Option<String>, Option<String>)> {
-    let q = run(
-        "nvidia-smi",
-        &["--query-gpu=name,driver_version", "--format=csv,noheader"],
-    );
-    let (gpu, driver) = q
-        .as_deref()
-        .and_then(|s| s.lines().next())
-        .and_then(|l| l.split_once(','))
-        .map(|(g, d)| (g.trim().to_string(), d.trim().to_string()))
-        .map(|(g, d)| (Some(g), Some(d)))
-        .unwrap_or((None, None));
+    let q = run("nvidia-smi", &["--query-gpu=name,driver_version", "--format=csv,noheader"]);
+    let (gpu, driver) = q.as_deref().and_then(|s| s.lines().next()).and_then(|l| l.split_once(',')).map(|(g, d)| (g.trim().to_string(), d.trim().to_string())).map(|(g, d)| (Some(g), Some(d))).unwrap_or((None, None));
     // CUDA version only appears in the header output
     let cuda = run("nvidia-smi", &[]).and_then(|s| {
         let marker = "CUDA Version:";
         let pos = s.find(marker)?;
-        s[pos + marker.len()..]
-            .split_whitespace()
-            .next()
-            .map(|v| v.trim_end_matches('|').to_string())
+        s[pos + marker.len()..].split_whitespace().next().map(|v| v.trim_end_matches('|').to_string())
     });
     if gpu.is_none() && cuda.is_none() {
         return None;
@@ -110,14 +89,7 @@ fn can_root() -> Option<bool> {
     if uid.trim() == "0" {
         return Some(true);
     }
-    let ok = Command::new("sudo")
-        .args(["-n", "true"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let ok = Command::new("sudo").args(["-n", "true"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
     Some(ok)
 }
 
@@ -126,13 +98,7 @@ fn can_root() -> Option<bool> {
 /// else `poweroff`, else none. Advisory — a container may have the
 /// binary but lack CAP_SYS_BOOT; the row's `shutdown_cmd` overrides.
 fn shutdown_cmd() -> Option<String> {
-    let have = |name: &str| {
-        Command::new("sh")
-            .args(["-c", &format!("command -v {name} >/dev/null 2>&1")])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    };
+    let have = |name: &str| Command::new("sh").args(["-c", &format!("command -v {name} >/dev/null 2>&1")]).status().map(|s| s.success()).unwrap_or(false);
     if std::path::Path::new("/run/systemd/system").is_dir() && have("systemctl") {
         Some("systemctl poweroff".into())
     } else if have("shutdown") {
@@ -147,25 +113,11 @@ fn shutdown_cmd() -> Option<String> {
 fn python_version() -> Option<String> {
     // python3 --version prints to stdout on 3.x
     let out = run("python3", &["--version"])?;
-    out.trim()
-        .strip_prefix("Python ")
-        .map(|s| s.to_string())
-        .or_else(|| Some(out.trim().to_string()))
+    out.trim().strip_prefix("Python ").map(|s| s.to_string()).or_else(|| Some(out.trim().to_string()))
 }
 
 /// Collect facts about this box (design.md §8).
 pub fn collect(deploy_root: &str) -> ProbeReport {
     let (gpu, driver, cuda) = nvidia_smi().unwrap_or((None, None, None));
-    ProbeReport {
-        protocol: crate::proto::wire::PROTOCOL_VERSION,
-        gpu,
-        driver,
-        cuda,
-        cores: cgroup_cores(),
-        mem_gb: cgroup_mem_gb().map(|g| (g * 100.0).round() / 100.0),
-        disk_free_gb: disk_free_gb(deploy_root).map(|g| (g * 100.0).round() / 100.0),
-        python: python_version(),
-        can_root: can_root(),
-        shutdown_cmd: shutdown_cmd(),
-    }
+    ProbeReport { protocol: crate::proto::wire::PROTOCOL_VERSION, gpu, driver, cuda, cores: cgroup_cores(), mem_gb: cgroup_mem_gb().map(|g| (g * 100.0).round() / 100.0), disk_free_gb: disk_free_gb(deploy_root).map(|g| (g * 100.0).round() / 100.0), python: python_version(), can_root: can_root(), shutdown_cmd: shutdown_cmd() }
 }

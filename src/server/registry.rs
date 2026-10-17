@@ -126,8 +126,7 @@ pub fn shunt_home() -> Result<PathBuf> {
 
 fn load<T: for<'de> Deserialize<'de>>(dir: &str, name: &str) -> Result<T> {
     let path = shunt_home()?.join(dir).join(format!("{name}.toml"));
-    let text =
-        fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
+    let text = fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
     toml::from_str(&text).with_context(|| format!("bad TOML in {}", path.display()))
 }
 
@@ -146,12 +145,7 @@ const CLIENT_HEADER: &str = "\
 # Facts (gpu, cores, can_root, shutdown_cmd guess, ...) fill in via `shunt client probe`.
 ";
 
-fn save_with_header<T: Serialize>(
-    dir: &str,
-    name: &str,
-    value: &T,
-    header: &str,
-) -> Result<PathBuf> {
+fn save_with_header<T: Serialize>(dir: &str, name: &str, value: &T, header: &str) -> Result<PathBuf> {
     let path = shunt_home()?.join(dir).join(format!("{name}.toml"));
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -196,20 +190,7 @@ fn usable(entry: ClientEntry) -> Result<ClientEntry> {
 
 fn localhost_default() -> Result<ClientEntry> {
     let home = std::env::var("HOME").context("HOME not set")?;
-    Ok(ClientEntry {
-        name: "localhost".into(),
-        local: true,
-        disabled: false,
-        local_bin: None,
-        timeout_s: None,
-        ssh_timeout_s: None,
-        shutdown_cmd: None,
-        ssh: SshEndpoint::default(),
-        qroot: shunt_home()?.join("queue").display().to_string(),
-        deploy_root: home,
-        facts: BTreeMap::new(),
-        billing: None,
-    })
+    Ok(ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, ssh: SshEndpoint::default(), qroot: shunt_home()?.join("queue").display().to_string(), deploy_root: home, facts: BTreeMap::new(), billing: None })
 }
 
 /// Client names including the pre-registered `localhost`. Disabled
@@ -227,9 +208,7 @@ pub fn list_clients() -> Result<Vec<String>> {
         }
     }
     // localhost absent on disk still lists (it materializes on use).
-    if !out.iter().any(|n| n == "localhost")
-        && !shunt_home()?.join("clients/localhost.toml").exists()
-    {
+    if !out.iter().any(|n| n == "localhost") && !shunt_home()?.join("clients/localhost.toml").exists() {
         out.push("localhost".into());
         out.sort();
     }
@@ -251,9 +230,7 @@ pub fn save_project(entry: &ProjectEntry) -> Result<PathBuf> {
 pub fn load_server_config() -> Result<ServerConfig> {
     let path = shunt_home()?.join("server.toml");
     match fs::read_to_string(&path) {
-        Ok(text) => {
-            toml::from_str(&text).with_context(|| format!("bad TOML in {}", path.display()))
-        }
+        Ok(text) => toml::from_str(&text).with_context(|| format!("bad TOML in {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ServerConfig::default()),
         Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
     }
@@ -299,29 +276,7 @@ mod tests {
     fn client_roundtrip() {
         let tmp = std::env::temp_dir().join(format!("shunt-test-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &tmp);
-        let entry = ClientEntry {
-            name: "box-1".into(),
-            local: false,
-            disabled: false,
-            local_bin: None,
-            timeout_s: None,
-            ssh_timeout_s: None,
-            shutdown_cmd: None,
-            ssh: SshEndpoint {
-                host: "example.invalid".into(),
-                port: 22,
-                user: "root".into(),
-                key: "/path/to/key".into(),
-                password: String::new(),
-            },
-            qroot: "/root/autodl-tmp/queue".into(),
-            deploy_root: "/root/autodl-tmp".into(),
-            facts: BTreeMap::new(),
-            billing: Some(Billing {
-                hourly: 2.6,
-                currency: "cny".into(),
-            }),
-        };
+        let entry = ClientEntry { name: "box-1".into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: "/path/to/key".into(), password: String::new() }, qroot: "/root/autodl-tmp/queue".into(), deploy_root: "/root/autodl-tmp".into(), facts: BTreeMap::new(), billing: Some(Billing { hourly: 2.6, currency: "cny".into() }) };
         save_client(&entry).unwrap();
         let back = load_client("box-1").unwrap();
         assert_eq!(back.ssh.port, 22);
@@ -339,12 +294,7 @@ mod tests {
 
         // disabled=true opts out of being a client: load_client rejects
         // and list_clients skips, but the row stays on disk.
-        save_client(&ClientEntry {
-            name: "gone".into(),
-            disabled: true,
-            ..entry.clone()
-        })
-        .unwrap();
+        save_client(&ClientEntry { name: "gone".into(), disabled: true, ..entry.clone() }).unwrap();
         assert!(load_client("gone").is_err());
         let mut lo_disabled = lo.clone();
         lo_disabled.disabled = true;

@@ -13,10 +13,7 @@ use std::process::{Command, Stdio};
 
 /// Quote one arg for the remote shell (`%q` equivalent).
 pub fn shell_quote(arg: &str) -> String {
-    if arg.chars().all(|c| {
-        c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '/' | ':' | '=' | '+' | ',')
-    }) && !arg.is_empty()
-    {
+    if arg.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '/' | ':' | '=' | '+' | ',')) && !arg.is_empty() {
         return arg.to_string();
     }
     format!("'{}'", arg.replace('\'', "'\\''"))
@@ -30,10 +27,7 @@ pub fn ssh_conn_args(client: &ClientEntry) -> Vec<String> {
 
 /// Join argv into one remote shell command string.
 pub fn join_argv(argv: &[String]) -> String {
-    argv.iter()
-        .map(|a| shell_quote(a))
-        .collect::<Vec<_>>()
-        .join(" ")
+    argv.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ")
 }
 
 /// Path of the remote `shunt` binary on a client. The dispatcher and
@@ -91,9 +85,7 @@ impl SshTransport {
     /// ssh connection flags (-p, BatchMode, timeouts, TOFU known_hosts,
     /// key, user@host). Shared by exec, scp, and the tunnel manager.
     pub(crate) fn base_args(client: &ClientEntry) -> Vec<String> {
-        let kh = crate::server::registry::known_hosts_path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "/dev/null".into());
+        let kh = crate::server::registry::known_hosts_path().map(|p| p.display().to_string()).unwrap_or_else(|_| "/dev/null".into());
         let mut v = vec![
             "-p".into(),
             client.ssh.port.to_string(),
@@ -127,69 +119,30 @@ impl Transport for SshTransport {
         } else {
             cmd.stdin(Stdio::null());
         }
-        let mut child = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("spawn ssh")?;
+        let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("spawn ssh")?;
         if let Some(body) = stdin {
-            child
-                .stdin
-                .as_mut()
-                .expect("stdin piped")
-                .write_all(body.as_bytes())?;
+            child.stdin.as_mut().expect("stdin piped").write_all(body.as_bytes())?;
         }
         let out = child.wait_with_output().context("wait ssh")?;
         if !out.status.success() {
-            anyhow::bail!(
-                "ssh {}@{}:{} rc={}: {}",
-                client.ssh.user,
-                client.ssh.host,
-                client.ssh.port,
-                out.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+            anyhow::bail!("ssh {}@{}:{} rc={}: {}", client.ssh.user, client.ssh.host, client.ssh.port, out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).trim());
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     fn copy_to(&self, client: &ClientEntry, local: &Path, remote_path: &str) -> Result<()> {
         // scp, matching the ssh flags; -P for port.
-        let kh = crate::server::registry::known_hosts_path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "/dev/null".into());
-        let mut args = vec![
-            "-P".into(),
-            client.ssh.port.to_string(),
-            "-o".into(),
-            "BatchMode=yes".into(),
-            "-o".into(),
-            format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)),
-            "-o".into(),
-            "StrictHostKeyChecking=accept-new".into(),
-            "-o".into(),
-            format!("UserKnownHostsFile={kh}"),
-        ];
+        let kh = crate::server::registry::known_hosts_path().map(|p| p.display().to_string()).unwrap_or_else(|_| "/dev/null".into());
+        let mut args = vec!["-P".into(), client.ssh.port.to_string(), "-o".into(), "BatchMode=yes".into(), "-o".into(), format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)), "-o".into(), "StrictHostKeyChecking=accept-new".into(), "-o".into(), format!("UserKnownHostsFile={kh}")];
         if !client.ssh.key.is_empty() {
             args.push("-i".into());
             args.push(client.ssh.key.clone());
         }
         args.push(local.display().to_string());
-        args.push(format!(
-            "{}@{}:{}",
-            client.ssh.user, client.ssh.host, remote_path
-        ));
-        let out = Command::new("scp")
-            .args(&args)
-            .stdin(Stdio::null())
-            .output()
-            .context("spawn scp")?;
+        args.push(format!("{}@{}:{}", client.ssh.user, client.ssh.host, remote_path));
+        let out = Command::new("scp").args(&args).stdin(Stdio::null()).output().context("spawn scp")?;
         if !out.status.success() {
-            anyhow::bail!(
-                "scp to {} failed: {}",
-                client.name,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+            anyhow::bail!("scp to {} failed: {}", client.name, String::from_utf8_lossy(&out.stderr).trim());
         }
         Ok(())
     }
@@ -212,10 +165,7 @@ pub struct LocalTransport {
 
 impl Default for LocalTransport {
     fn default() -> Self {
-        Self {
-            bin: std::env::current_exe().unwrap_or_else(|_| Path::new("shunt").to_path_buf()),
-            timeout_s: None,
-        }
+        Self { bin: std::env::current_exe().unwrap_or_else(|_| Path::new("shunt").to_path_buf()), timeout_s: None }
     }
 }
 
@@ -224,11 +174,7 @@ impl Transport for LocalTransport {
         let Some(first) = argv.first() else {
             anyhow::bail!("local exec: empty argv");
         };
-        let (prog, rest) = if *first == shunt_bin(client) {
-            (self.bin.clone(), &argv[1..])
-        } else {
-            (std::path::PathBuf::from(first), &argv[1..])
-        };
+        let (prog, rest) = if *first == shunt_bin(client) { (self.bin.clone(), &argv[1..]) } else { (std::path::PathBuf::from(first), &argv[1..]) };
         let mut cmd = Command::new(&prog);
         cmd.args(rest);
         if stdin.is_some() {
@@ -236,17 +182,9 @@ impl Transport for LocalTransport {
         } else {
             cmd.stdin(Stdio::null());
         }
-        let mut child = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("spawn {}", prog.display()))?;
+        let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().with_context(|| format!("spawn {}", prog.display()))?;
         if let Some(body) = stdin {
-            child
-                .stdin
-                .as_mut()
-                .expect("stdin piped")
-                .write_all(body.as_bytes())?;
+            child.stdin.as_mut().expect("stdin piped").write_all(body.as_bytes())?;
         }
         // Close stdin so `enqueue -` sees EOF; the timeout path polls
         // try_wait and never drops the pipe otherwise.
@@ -269,19 +207,13 @@ impl Transport for LocalTransport {
             None => child.wait_with_output().context("wait local exec")?,
         };
         if !out.status.success() {
-            anyhow::bail!(
-                "local exec {} rc={}: {}",
-                prog.display(),
-                out.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+            anyhow::bail!("local exec {} rc={}: {}", prog.display(), out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).trim());
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     fn copy_to(&self, _client: &ClientEntry, local: &Path, remote_path: &str) -> Result<()> {
-        std::fs::copy(local, remote_path)
-            .with_context(|| format!("copy {} -> {}", local.display(), remote_path))?;
+        std::fs::copy(local, remote_path).with_context(|| format!("copy {} -> {}", local.display(), remote_path))?;
         Ok(())
     }
 }
@@ -294,20 +226,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn local_client() -> ClientEntry {
-        ClientEntry {
-            name: "localhost".into(),
-            local: true,
-            disabled: false,
-            local_bin: None,
-            timeout_s: None,
-            ssh_timeout_s: None,
-            shutdown_cmd: None,
-            ssh: SshEndpoint::default(),
-            qroot: "/tmp/qt".into(),
-            deploy_root: "/tmp".into(),
-            facts: BTreeMap::new(),
-            billing: None,
-        }
+        ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, ssh: SshEndpoint::default(), qroot: "/tmp/qt".into(), deploy_root: "/tmp".into(), facts: BTreeMap::new(), billing: None }
     }
 
     #[test]
@@ -326,10 +245,7 @@ mod tests {
     fn wire_argv_appends_root_once() {
         let c = local_client();
         let v = wire_argv(&c, &["status", "--json"]);
-        assert_eq!(
-            v,
-            vec!["/tmp/qt/bin/shunt", "status", "--json", "--root", "/tmp/qt"]
-        );
+        assert_eq!(v, vec!["/tmp/qt/bin/shunt", "status", "--json", "--root", "/tmp/qt"]);
         let v2 = wire_argv(&c, &["init", "--root", "/other"]);
         assert_eq!(v2.iter().filter(|a| *a == "--root").count(), 1);
     }
@@ -340,10 +256,7 @@ mod tests {
         // injected bin is /bin/cat with NO args, so it echoes stdin
         // back — proving substitution + stdin piping in one shot.
         let c = local_client();
-        let t = LocalTransport {
-            bin: PathBuf::from("/bin/cat"),
-            timeout_s: None,
-        };
+        let t = LocalTransport { bin: PathBuf::from("/bin/cat"), timeout_s: None };
         let out = t.exec(&c, &[shunt_bin(&c)], Some("hello-wire")).unwrap();
         assert_eq!(out, "hello-wire");
     }
@@ -352,13 +265,8 @@ mod tests {
     fn local_exec_raw_argv_passthrough() {
         // bootstrap/probe call raw tools (sh/mkdir), not the wire bin.
         let c = local_client();
-        let t = LocalTransport {
-            bin: PathBuf::from("/nonexistent-shunt"),
-            timeout_s: None,
-        };
-        let out = t
-            .exec(&c, &["sh".into(), "-c".into(), "echo raw-ok".into()], None)
-            .unwrap();
+        let t = LocalTransport { bin: PathBuf::from("/nonexistent-shunt"), timeout_s: None };
+        let out = t.exec(&c, &["sh".into(), "-c".into(), "echo raw-ok".into()], None).unwrap();
         assert_eq!(out.trim(), "raw-ok");
     }
 
@@ -367,10 +275,7 @@ mod tests {
         // timeout_s=0 fires immediately; the child must be killed,
         // not orphaned.
         let c = local_client();
-        let t = LocalTransport {
-            bin: PathBuf::from("/bin/sleep"),
-            timeout_s: Some(0),
-        };
+        let t = LocalTransport { bin: PathBuf::from("/bin/sleep"), timeout_s: Some(0) };
         let err = t.exec(&c, &[shunt_bin(&c), "30".into()], None).unwrap_err();
         assert!(err.to_string().contains("timed out"), "{err}");
     }

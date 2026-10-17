@@ -1,0 +1,7 @@
+# No width-driven wrapping: keep one construct per source line.
+# `use_small_heuristics = "Max"` pushes every construct's width budget
+# (fn_call_width, chain_width, struct_lit_width, ...) up to max_width,
+# so rustfmt only breaks where the source already does — matching
+# dprint's `textWrap: "never"` stance for markdown.
+max_width = 9999
+use_small_heuristics = "Max"

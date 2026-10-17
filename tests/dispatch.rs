@@ -25,10 +25,7 @@ struct FakeTransport {
 
 impl Transport for FakeTransport {
     fn exec(&self, client: &ClientEntry, argv: &[String], stdin: Option<&str>) -> Result<String> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(argv.get(1).cloned().unwrap_or_default());
+        self.calls.lock().unwrap().push(argv.get(1).cloned().unwrap_or_default());
         if self.down {
             anyhow::bail!("ssh connect timeout");
         }
@@ -45,10 +42,7 @@ impl Transport for FakeTransport {
                 let body = stdin.unwrap_or("");
                 let name = "0100_task.sh";
                 std::fs::write(self.pending.join(name), body)?;
-                Ok(format!(
-                    r#"{{"protocol":1,"ok":true,"name":"{name}","client":"{}"}}"#,
-                    client.name
-                ))
+                Ok(format!(r#"{{"protocol":1,"ok":true,"name":"{name}","client":"{}"}}"#, client.name))
             }
             _ => Ok(r#"{"protocol":1,"ok":true}"#.into()),
         }
@@ -63,44 +57,13 @@ fn fixture() -> Result<(PathBuf, ClientEntry)> {
     let home = std::env::temp_dir().join(format!("shunt-itest-{}", std::process::id()));
     std::fs::create_dir_all(&home)?;
     std::env::set_var("SHUNT_HOME", &home);
-    let client = ClientEntry {
-        name: "fake-a".into(),
-        local: false,
-        disabled: false,
-        local_bin: None,
-        timeout_s: None,
-        ssh_timeout_s: None,
-        shutdown_cmd: None,
-        ssh: SshEndpoint {
-            host: "127.0.0.1".into(),
-            port: 22,
-            user: "root".into(),
-            key: String::new(),
-            password: String::new(),
-        },
-        qroot: "/root/queue".into(),
-        deploy_root: "/root".into(),
-        facts: BTreeMap::new(),
-        billing: None,
-    };
+    let client = ClientEntry { name: "fake-a".into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: "/root/queue".into(), deploy_root: "/root".into(), facts: BTreeMap::new(), billing: None };
     registry::save_client(&client)?;
     Ok((home, client))
 }
 
 fn entry(id: &str, slug: &str) -> SpoolEntry {
-    SpoolEntry {
-        id: id.into(),
-        project: "p".into(),
-        client: "fake-a".into(),
-        meta: TaskMeta {
-            slug: slug.into(),
-            guard: None,
-            workdir: None,
-            env: BTreeMap::new(),
-            cmd: vec!["echo".into(), "hi".into()],
-        },
-        submitted_at: "2024-01-01T00:00:00Z".into(),
-    }
+    SpoolEntry { id: id.into(), project: "p".into(), client: "fake-a".into(), meta: TaskMeta { slug: slug.into(), guard: None, workdir: None, env: BTreeMap::new(), cmd: vec!["echo".into(), "hi".into()] }, submitted_at: "2024-01-01T00:00:00Z".into() }
 }
 
 #[test]
@@ -111,38 +74,20 @@ fn dispatch_ack_deletes_failure_retains() -> Result<()> {
 
     // Clean ack: pushed and removed from spool.
     spool::stage(&entry("t1", "a-t1"), "echo t1\n")?;
-    let t = FakeTransport {
-        pending: pending.clone(),
-        fail_enqueue: false,
-        down: false,
-        calls: Mutex::new(Vec::new()),
-    };
+    let t = FakeTransport { pending: pending.clone(), fail_enqueue: false, down: false, calls: Mutex::new(Vec::new()) };
     assert_eq!(dispatch::sweep_with(&t)?, 1);
     assert!(spool::list()?.is_empty());
-    assert_eq!(
-        std::fs::read_to_string(pending.join("0100_task.sh"))?,
-        "echo t1\n"
-    );
+    assert_eq!(std::fs::read_to_string(pending.join("0100_task.sh"))?, "echo t1\n");
 
     // Remote enqueue error: entry stays for the next poll.
     spool::stage(&entry("t2", "a-t2"), "echo t2\n")?;
-    let t_fail = FakeTransport {
-        pending: pending.clone(),
-        fail_enqueue: true,
-        down: false,
-        calls: Mutex::new(Vec::new()),
-    };
+    let t_fail = FakeTransport { pending: pending.clone(), fail_enqueue: true, down: false, calls: Mutex::new(Vec::new()) };
     assert_eq!(dispatch::sweep_with(&t_fail)?, 0);
     assert_eq!(spool::list()?.len(), 1);
 
     // Unreachable box: entry stays, no error.
     spool::stage(&entry("t3", "a-t3"), "echo t3\n")?;
-    let t_down = FakeTransport {
-        pending: pending.clone(),
-        fail_enqueue: false,
-        down: true,
-        calls: Mutex::new(Vec::new()),
-    };
+    let t_down = FakeTransport { pending: pending.clone(), fail_enqueue: false, down: true, calls: Mutex::new(Vec::new()) };
     assert_eq!(dispatch::sweep_with(&t_down)?, 0);
     assert_eq!(spool::list()?.len(), 2);
 

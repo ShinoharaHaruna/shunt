@@ -18,9 +18,7 @@ impl Drop for DaemonGuard {
         if let Ok(s) = std::fs::read_to_string(&pidfile) {
             if let Ok(pid) = s.trim().parse::<i32>() {
                 // No libc dep: SIGKILL via `kill -9` is fine for cleanup.
-                let _ = std::process::Command::new("kill")
-                    .args(["-9", &pid.to_string()])
-                    .status();
+                let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
             }
         }
         std::fs::remove_dir_all(&self.0).ok();
@@ -53,14 +51,7 @@ fn localhost_submit_dispatch_execute_done() -> Result<()> {
 
     // Server side: stage a task for localhost, then one dispatch sweep.
     // The sweep auto-heals (starts) the real daemon, then enqueues.
-    spool::submit(
-        "localhost",
-        None,
-        None,
-        Some("e2e"),
-        None,
-        &["touch".into(), "e2e.done".into()],
-    )?;
+    spool::submit("localhost", None, None, Some("e2e"), None, &["touch".into(), "e2e.done".into()])?;
     assert!(dispatch::sweep_with(&t)? >= 1);
     assert!(spool::list()?.is_empty(), "spool should drain on ack");
 
@@ -69,11 +60,7 @@ fn localhost_submit_dispatch_execute_done() -> Result<()> {
     // on the done/ entry itself.
     let deadline = Instant::now() + Duration::from_secs(30);
     while qroot.join("done").read_dir()?.next().is_none() {
-        anyhow::ensure!(
-            Instant::now() < deadline,
-            "task did not finish within 30s (see {})",
-            qroot.join("daemon.log").display()
-        );
+        anyhow::ensure!(Instant::now() < deadline, "task did not finish within 30s (see {})", qroot.join("daemon.log").display());
         std::thread::sleep(Duration::from_millis(200));
     }
     // workdir defaults to the queue root, so `touch e2e.done` landed
@@ -86,29 +73,12 @@ fn localhost_submit_dispatch_execute_done() -> Result<()> {
     std::fs::create_dir_all(&workdir)?;
     let mut env = std::collections::BTreeMap::new();
     env.insert("E2E_HELLO".to_string(), "world".to_string());
-    registry::save_project(&registry::ProjectEntry {
-        name: "proj".into(),
-        bind: vec![registry::Binding {
-            client: "localhost".into(),
-            workdir: workdir.display().to_string(),
-            env,
-        }],
-    })?;
-    spool::submit(
-        "localhost",
-        Some("proj"),
-        None,
-        Some("e2e2"),
-        None,
-        &["sh".into(), "-c".into(), "touch proj-$E2E_HELLO".into()],
-    )?;
+    registry::save_project(&registry::ProjectEntry { name: "proj".into(), bind: vec![registry::Binding { client: "localhost".into(), workdir: workdir.display().to_string(), env }] })?;
+    spool::submit("localhost", Some("proj"), None, Some("e2e2"), None, &["sh".into(), "-c".into(), "touch proj-$E2E_HELLO".into()])?;
     assert!(dispatch::sweep_with(&t)? >= 1);
     let deadline = Instant::now() + Duration::from_secs(30);
     while !workdir.join("proj-world").exists() {
-        anyhow::ensure!(
-            Instant::now() < deadline,
-            "bound task did not finish within 30s"
-        );
+        anyhow::ensure!(Instant::now() < deadline, "bound task did not finish within 30s");
         std::thread::sleep(Duration::from_millis(200));
     }
 

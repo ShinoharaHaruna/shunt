@@ -36,8 +36,7 @@ pub fn resolve_root(flag: Option<&str>) -> Result<PathBuf> {
 /// Create the four track dirs and seed `workers` / `.seq`.
 pub fn init(root: &Path) -> Result<()> {
     for d in ["pending", "running", "done", "failed"] {
-        std::fs::create_dir_all(root.join(d))
-            .with_context(|| format!("cannot create {}", root.join(d).display()))?;
+        std::fs::create_dir_all(root.join(d)).with_context(|| format!("cannot create {}", root.join(d).display()))?;
     }
     let workers = root.join("workers");
     if !workers.exists() {
@@ -54,11 +53,7 @@ pub fn init(root: &Path) -> Result<()> {
 /// for up to 30 s (matching `flock -w 30`).
 pub fn next_seq(root: &Path) -> Result<u32> {
     let lock_path = root.join(".seq.lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&lock_path)
-        .with_context(|| format!("cannot open {}", lock_path.display()))?;
+    let lock = std::fs::OpenOptions::new().create(true).append(true).open(&lock_path).with_context(|| format!("cannot open {}", lock_path.display()))?;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match lock.try_lock_exclusive() {
@@ -73,10 +68,7 @@ pub fn next_seq(root: &Path) -> Result<u32> {
         }
     }
     let seq_path = root.join(".seq");
-    let cur: u32 = std::fs::read_to_string(&seq_path)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(SEQ_INIT);
+    let cur: u32 = std::fs::read_to_string(&seq_path).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(SEQ_INIT);
     let next = cur + 1;
     std::fs::write(&seq_path, format!("{next}\n"))?;
     lock.unlock()?;
@@ -116,10 +108,7 @@ pub fn running_list(root: &Path) -> Result<Vec<String>> {
 
 /// Pending tasks whose filename contains `pat`, sorted.
 pub fn match_pending(root: &Path, pat: &str) -> Result<Vec<String>> {
-    Ok(pending_list(root)?
-        .into_iter()
-        .filter(|n| n.contains(pat))
-        .collect())
+    Ok(pending_list(root)?.into_iter().filter(|n| n.contains(pat)).collect())
 }
 
 /// Running task basenames (no `.pid`) whose `<task>.sh.pid` filename
@@ -169,10 +158,7 @@ pub fn recent_exits(root: &Path, track: &str, n: usize) -> Vec<(String, i32)> {
             if !name.ends_with(".exit") {
                 continue;
             }
-            let mtime = ent
-                .metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(UNIX_EPOCH);
+            let mtime = ent.metadata().and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH);
             rows.push((mtime, name));
         }
     }
@@ -180,10 +166,7 @@ pub fn recent_exits(root: &Path, track: &str, n: usize) -> Vec<(String, i32)> {
     rows.truncate(n);
     rows.into_iter()
         .map(|(_, f)| {
-            let rc = std::fs::read_to_string(dir.join(&f))
-                .ok()
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(-1);
+            let rc = std::fs::read_to_string(dir.join(&f)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(-1);
             (f.trim_end_matches(".exit").to_string(), rc)
         })
         .collect()
@@ -191,10 +174,7 @@ pub fn recent_exits(root: &Path, track: &str, n: usize) -> Vec<(String, i32)> {
 
 /// RFC 3339 UTC timestamp (`date -Is` equivalent).
 pub fn iso8601_now() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
     let days = secs.div_euclid(86400);
     let sod = secs.rem_euclid(86400);
     // civil-from-days (Howard Hinnant's algorithm)
@@ -208,20 +188,12 @@ pub fn iso8601_now() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}+00:00",
-        sod / 3600,
-        (sod % 3600) / 60,
-        sod % 60
-    )
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}+00:00", sod / 3600, (sod % 3600) / 60, sod % 60)
 }
 
 /// Seconds since the unix epoch.
 pub fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 /// Extract digits from a string (`tr -cd '0-9'` semantics); `None`
