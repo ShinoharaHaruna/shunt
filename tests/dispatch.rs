@@ -66,6 +66,10 @@ fn fixture() -> Result<(PathBuf, ClientEntry)> {
     let client = ClientEntry {
         name: "fake-a".into(),
         local: false,
+        disabled: false,
+        local_bin: None,
+        timeout_s: None,
+        ssh_timeout_s: None,
         ssh: SshEndpoint {
             host: "127.0.0.1".into(),
             port: 22,

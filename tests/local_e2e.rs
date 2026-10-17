@@ -44,6 +44,7 @@ fn localhost_submit_dispatch_execute_done() -> Result<()> {
     // Loopback transport execs the built binary, not the registry path.
     let t = LocalTransport {
         bin: PathBuf::from(env!("CARGO_BIN_EXE_shunt")),
+        timeout_s: Some(60), // a stuck wire call fails instead of hanging
     };
 
     // init over the wire surface.

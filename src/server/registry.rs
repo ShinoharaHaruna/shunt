@@ -16,6 +16,22 @@ pub struct ClientEntry {
     /// instead of SSH. Always true for the built-in `localhost` row.
     #[serde(default)]
     pub local: bool,
+    /// Opt-out: a disabled row stays on disk but is skipped by
+    /// `list_clients`/`status --all` and rejected by `load_client`.
+    /// This is how a user drops the pre-registered `localhost` — `rm`
+    /// only resets it to factory defaults (the row regenerates).
+    #[serde(default)]
+    pub disabled: bool,
+    /// Local transport: binary to exec for wire ops (default: the
+    /// running `shunt` binary).
+    #[serde(default)]
+    pub local_bin: Option<String>,
+    /// Local transport: exec timeout in seconds.
+    #[serde(default)]
+    pub timeout_s: Option<u64>,
+    /// SSH transport: connect timeout override in seconds (default 10).
+    #[serde(default)]
+    pub ssh_timeout_s: Option<u64>,
     #[serde(default)]
     pub ssh: SshEndpoint,
     /// Queue dir on the box.
@@ -100,20 +116,32 @@ fn save<T: Serialize>(dir: &str, name: &str, value: &T) -> Result<PathBuf> {
 }
 
 pub fn load_client(name: &str) -> Result<ClientEntry> {
-    // `localhost` is built-in (design.md §4.1): when no row exists the
-    // loopback client is synthesized with qroot=$SHUNT_HOME/queue and
-    // deploy_root=$HOME. A real row overrides the defaults but the
-    // local flag always stands.
+    // `localhost` is a peer client (design.md §4.1): the first access
+    // materializes clients/localhost.toml with the defaults
+    // (qroot=$SHUNT_HOME/queue, deploy_root=$HOME), so it sits on disk
+    // editable like any other row. The write is best-effort — an
+    // unwritable HOME still yields the synthesized defaults. `local`
+    // always stands for this name regardless of file contents.
     if name == "localhost" {
         let path = shunt_home()?.join("clients").join("localhost.toml");
         if !path.exists() {
-            return localhost_default();
+            let entry = localhost_default()?;
+            let _ = save_client(&entry); // materialize; best-effort
+            return Ok(entry);
         }
         let mut entry: ClientEntry = load("clients", name)?;
         entry.local = true;
-        return Ok(entry);
+        return usable(entry);
     }
-    load("clients", name)
+    usable(load("clients", name)?)
+}
+
+/// Disabled rows are visible on disk but unusable as clients.
+fn usable(entry: ClientEntry) -> Result<ClientEntry> {
+    if entry.disabled {
+        anyhow::bail!("client {} is disabled", entry.name);
+    }
+    Ok(entry)
 }
 
 fn localhost_default() -> Result<ClientEntry> {
@@ -121,6 +149,10 @@ fn localhost_default() -> Result<ClientEntry> {
     Ok(ClientEntry {
         name: "localhost".into(),
         local: true,
+        disabled: false,
+        local_bin: None,
+        timeout_s: None,
+        ssh_timeout_s: None,
         ssh: SshEndpoint::default(),
         qroot: shunt_home()?.join("queue").display().to_string(),
         deploy_root: home,
@@ -129,14 +161,28 @@ fn localhost_default() -> Result<ClientEntry> {
     })
 }
 
-/// Client names including the built-in `localhost` loopback.
+/// Client names including the pre-registered `localhost`. Disabled
+/// rows are skipped (they load, but are not usable clients).
 pub fn list_clients() -> Result<Vec<String>> {
-    let mut names = list_names("clients")?;
-    if !names.iter().any(|n| n == "localhost") {
-        names.push("localhost".into());
-        names.sort();
+    let mut out = Vec::new();
+    for n in list_names("clients")? {
+        // load() not load_client(): disabled rows error out of
+        // load_client, which would land in the Err arm and list anyway.
+        let row: Result<ClientEntry> = load("clients", &n);
+        match row {
+            Ok(c) if !c.disabled => out.push(n),
+            Ok(_) => {}            // disabled: stays off the list
+            Err(_) => out.push(n), // unparseable row still lists
+        }
     }
-    Ok(names)
+    // localhost absent on disk still lists (it materializes on use).
+    if !out.iter().any(|n| n == "localhost")
+        && !shunt_home()?.join("clients/localhost.toml").exists()
+    {
+        out.push("localhost".into());
+        out.sort();
+    }
+    Ok(out)
 }
 
 pub fn save_client(entry: &ClientEntry) -> Result<PathBuf> {
@@ -204,13 +250,17 @@ mod tests {
         std::env::set_var("SHUNT_HOME", &tmp);
         let entry = ClientEntry {
             name: "box-1".into(),
+            local: false,
+            disabled: false,
+            local_bin: None,
+            timeout_s: None,
+            ssh_timeout_s: None,
             ssh: SshEndpoint {
                 host: "example.invalid".into(),
                 port: 22,
                 user: "root".into(),
                 key: "/path/to/key".into(),
             },
-            local: false,
             qroot: "/root/autodl-tmp/queue".into(),
             deploy_root: "/root/autodl-tmp".into(),
             facts: BTreeMap::new(),
@@ -224,12 +274,37 @@ mod tests {
         assert_eq!(back.ssh.port, 22);
         assert_eq!(list_names("clients").unwrap(), vec!["box-1"]);
 
-        // Built-in loopback: synthesized row, local transport flag,
-        // and present in the client listing even with no file on disk.
+        // localhost is a peer: first access materializes its row file
+        // with the defaults, and it lists like any other client.
         let lo = load_client("localhost").unwrap();
         assert!(lo.local);
         assert_eq!(lo.qroot, tmp.join("queue").display().to_string());
+        assert!(tmp.join("clients/localhost.toml").exists());
+        let lo2 = load_client("localhost").unwrap(); // second load: from disk
+        assert_eq!(lo2.qroot, lo.qroot);
         assert_eq!(list_clients().unwrap(), vec!["box-1", "localhost"]);
+
+        // disabled=true opts out of being a client: load_client rejects
+        // and list_clients skips, but the row stays on disk.
+        save_client(&ClientEntry {
+            name: "gone".into(),
+            disabled: true,
+            ..entry.clone()
+        })
+        .unwrap();
+        assert!(load_client("gone").is_err());
+        let mut lo_disabled = lo.clone();
+        lo_disabled.disabled = true;
+        save_client(&lo_disabled).unwrap();
+        assert!(load_client("localhost").is_err());
+        assert_eq!(list_clients().unwrap(), vec!["box-1"]);
+
+        // rm = reset to factory: delete the row, next load regenerates
+        // the defaults (also how a disabled localhost comes back).
+        remove("clients", "localhost").unwrap();
+        let lo3 = load_client("localhost").unwrap();
+        assert!(lo3.local && !lo3.disabled);
+        assert!(tmp.join("clients/localhost.toml").exists());
         std::fs::remove_dir_all(&tmp).ok();
     }
 }

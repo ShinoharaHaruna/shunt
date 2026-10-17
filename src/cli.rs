@@ -461,7 +461,13 @@ pub fn run(cli: Cli) -> Result<()> {
                 println!("{}", toml::to_string_pretty(&e)?);
                 Ok(())
             }
-            ClientAction::Rm { name } => registry::remove("clients", &name),
+            ClientAction::Rm { name } => {
+                // Materialize `localhost` first so `rm` resets it to
+                // factory defaults even on a pristine registry — and
+                // undeletes a disabled row (it regenerates on next use).
+                let _ = registry::load_client(&name);
+                registry::remove("clients", &name)
+            }
             ClientAction::Probe { name } => {
                 let c = registry::load_client(&name)?;
                 let t = crate::server::transport::transport_for(&c);
@@ -665,6 +671,10 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
         None => ClientEntry {
             name: name.into(),
             local: false,
+            disabled: false,
+            local_bin: None,
+            timeout_s: None,
+            ssh_timeout_s: None,
             ssh: SshEndpoint {
                 host: String::new(),
                 port: 22,

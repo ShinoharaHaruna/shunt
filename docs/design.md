@@ -213,18 +213,23 @@ spool/                 # server-side staging queue
 
 Registry files are human-editable TOML and safe to keep in git (minus key paths). "Registration" is server-local bookkeeping: `shunt client add` writes the row with zero network traffic. A client never needs to reach the server.
 
-**`localhost` is a pre-registered peer client, not a special case.** The dev machine is a real execution target (light tasks, tests, CPU-only work): it binds in projects, takes submissions, runs the daemon, and answers every wire op exactly like a remote box — the only difference is the transport. `local = true` in a client row selects the loopback transport (exec the local `shunt` binary instead of ssh); `localhost` is simply that transport's conventional reserved name, and `client add <name> --local` can mint more local queues. The row file is optional: when `clients/localhost.toml` is absent the defaults `qroot=$SHUNT_HOME/queue`, `deploy_root=$HOME` are synthesized, so a fresh install runs the whole submit → dispatch → execute → finalize path with zero setup (this is also the integration-test floor). `client add localhost` materializes the row when you want to edit it.
+**`localhost` is a pre-registered peer client, not a special case.** The dev machine is a real execution target (light tasks, tests, CPU-only work): it binds in projects, takes submissions, runs the daemon, and answers every wire op exactly like a remote box — the only difference is the transport. `local = true` in a client row selects the loopback transport (exec the local `shunt` binary instead of ssh); `localhost` is simply that transport's conventional reserved name, and `client add <name> --local` can mint more local queues. The first access materializes `clients/localhost.toml` with the defaults (`qroot=$SHUNT_HOME/queue`, `deploy_root=$HOME`), so a fresh install still runs the whole submit → dispatch → execute → finalize path with zero setup — and afterwards the row sits on disk, editable like any other: `local_bin`, `timeout_s` and friends override the loopback transport. The write is best-effort: an unwritable HOME still yields working defaults. `client rm localhost` resets to factory — the row regenerates on next use; a user who truly wants it gone writes `disabled = true` into the row (that file is never auto-rewritten, so the opt-out sticks).
 
 `clients/<name>.toml`:
 
-| field                                         | meaning                                                                                                   |
-| --------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `name`                                        | registry key                                                                                              |
-| `ssh.host`, `ssh.port`, `ssh.user`, `ssh.key` | exec endpoint                                                                                             |
-| `qroot`                                       | queue dir on the box                                                                                      |
-| `deploy_root`                                 | vendor work root (AutoDL: `/root/autodl-tmp`)                                                             |
-| `facts`                                       | table filled by `probe`/`bootstrap`: `gpu`, `cuda`, `driver`, `cores`, `mem_gb`, `disk_free_gb`, `python` |
-| `billing.hourly`, `billing.currency`          | cost metadata surfaced to the agent                                                                       |
+| field                                         | meaning                                                                                                               |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `name`                                        | registry key                                                                                                          |
+| `local`                                       | loopback transport instead of ssh (localhost and any `client add --local` row)                                        |
+| `local_bin`                                   | local transport: binary to exec (default: the running `shunt`)                                                        |
+| `timeout_s`                                   | local transport: exec timeout; on expiry the child is killed                                                          |
+| `ssh_timeout_s`                               | ssh transport: ConnectTimeout override (default 15)                                                                   |
+| `disabled`                                    | opt-out: row stays on disk but is not a usable client (skipped by listings, rejected by load)                         |
+| `ssh.host`, `ssh.port`, `ssh.user`, `ssh.key` | exec endpoint                                                                                                         |
+| `qroot`                                       | queue dir on the box                                                                                                  |
+| `deploy_root`                                 | vendor work root (AutoDL: `/root/autodl-tmp`)                                                                         |
+| `facts`                                       | table filled by `probe`/`bootstrap`: `gpu`, `cuda`, `driver`, `cores`, `mem_gb`, `disk_free_gb`, `python`, `can_root` |
+| `billing.hourly`, `billing.currency`          | cost metadata surfaced to the agent                                                                                   |
 
 `projects/<name>.toml`:
 

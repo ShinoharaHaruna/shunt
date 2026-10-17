@@ -10,7 +10,7 @@ shunt is a FIFO + priority-band + at-least-once experiment queue for hourly-bill
 Mental model:
 
 - The wire is `ssh <box> 'shunt <cmd> --json --root <qroot>'`; the registry's `qroot` is authoritative. No ports, no server-side daemon besides the dispatcher, no client process besides `shuntd`.
-- `localhost` is a built-in client: same wire surface, but the transport execs the local `shunt` binary directly — no ssh, no key. Its default queue is `~/.config/shunt/queue/`. Use it for dry runs, integration smoke, and dev-loop tasks on the dev machine itself. `shunt client add <name> --local` creates additional loopback queues.
+- `localhost` is a peer client using the local transport (execs the `shunt` binary directly — no ssh, no key). Its row `clients/localhost.toml` is written on first use (default queue `~/.config/shunt/queue/`); edit it like any client row — `local_bin`/`timeout_s` tune the loopback transport. `shunt client rm localhost` resets the row to factory defaults (the name is reserved); to actually opt out, write `disabled = true` into the row. Use it for dry runs, integration smoke, and dev-loop tasks on the dev machine itself. `shunt client add <name> --local` creates additional loopback queues.
 - Execution is at-least-once. Tasks must guard on the artifact they produce so reruns are no-ops.
 - The box powers itself off when the queue drains and `shutdown_on_idle` is armed. Powering on is a human click in the vendor console; shunt never powers a box on.
 - Submitting while the box is off is normal: tasks wait in the server-side spool until the dispatcher can deliver.

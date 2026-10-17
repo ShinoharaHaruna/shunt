@@ -53,7 +53,12 @@ pub fn wire_argv(client: &ClientEntry, tail: &[&str]) -> Vec<String> {
 /// for `local = true` rows (incl. the built-in `localhost`), SSH else.
 pub fn transport_for(client: &ClientEntry) -> Box<dyn Transport> {
     if client.local || client.name == "localhost" {
-        Box::new(LocalTransport::default())
+        let mut t = LocalTransport::default();
+        if let Some(b) = &client.local_bin {
+            t.bin = std::path::PathBuf::from(b);
+        }
+        t.timeout_s = client.timeout_s;
+        Box::new(t)
     } else {
         Box::new(SshTransport)
     }
@@ -84,7 +89,7 @@ impl SshTransport {
             "-o".into(),
             "BatchMode=yes".into(),
             "-o".into(),
-            "ConnectTimeout=15".into(),
+            format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)),
         ];
         if !client.ssh.key.is_empty() {
             v.push("-i".into());
@@ -131,7 +136,6 @@ impl Transport for SshTransport {
     }
 
     fn copy_to(&self, client: &ClientEntry, local: &Path, remote_path: &str) -> Result<()> {
-        // keep
         // scp, matching the ssh flags; -P for port.
         let mut args = vec![
             "-P".into(),
@@ -139,7 +143,7 @@ impl Transport for SshTransport {
             "-o".into(),
             "BatchMode=yes".into(),
             "-o".into(),
-            "ConnectTimeout=15".into(),
+            format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)),
         ];
         if !client.ssh.key.is_empty() {
             args.push("-i".into());
@@ -173,14 +177,19 @@ impl Transport for SshTransport {
 /// runs as-is. No network, no key, no remote daemon required.
 pub struct LocalTransport {
     /// Binary to exec for wire ops. Default: the running `shunt`;
-    /// tests inject `env!("CARGO_BIN_EXE_shunt")` or any path.
+    /// client rows override via `local_bin`; tests inject
+    /// `env!("CARGO_BIN_EXE_shunt")` or any path.
     pub bin: std::path::PathBuf,
+    /// Exec timeout (client row `timeout_s`); on expiry the child is
+    /// killed and the call errors. None = wait indefinitely.
+    pub timeout_s: Option<u64>,
 }
 
 impl Default for LocalTransport {
     fn default() -> Self {
         Self {
             bin: std::env::current_exe().unwrap_or_else(|_| Path::new("shunt").to_path_buf()),
+            timeout_s: None,
         }
     }
 }
@@ -214,7 +223,26 @@ impl Transport for LocalTransport {
                 .expect("stdin piped")
                 .write_all(body.as_bytes())?;
         }
-        let out = child.wait_with_output().context("wait local exec")?;
+        // Close stdin so `enqueue -` sees EOF; the timeout path polls
+        // try_wait and never drops the pipe otherwise.
+        drop(child.stdin.take());
+        let out = match self.timeout_s {
+            Some(t) => {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(t);
+                loop {
+                    match child.try_wait()? {
+                        Some(_) => break child.wait_with_output().context("wait local exec")?,
+                        None if std::time::Instant::now() >= deadline => {
+                            let _ = child.kill();
+                            let _ = child.wait_with_output();
+                            anyhow::bail!("local exec {} timed out after {}s", prog.display(), t);
+                        }
+                        None => std::thread::sleep(std::time::Duration::from_millis(50)),
+                    }
+                }
+            }
+            None => child.wait_with_output().context("wait local exec")?,
+        };
         if !out.status.success() {
             anyhow::bail!(
                 "local exec {} rc={}: {}",
@@ -244,6 +272,10 @@ mod tests {
         ClientEntry {
             name: "localhost".into(),
             local: true,
+            disabled: false,
+            local_bin: None,
+            timeout_s: None,
+            ssh_timeout_s: None,
             ssh: SshEndpoint::default(),
             qroot: "/tmp/qt".into(),
             deploy_root: "/tmp".into(),
@@ -284,6 +316,7 @@ mod tests {
         let c = local_client();
         let t = LocalTransport {
             bin: PathBuf::from("/bin/cat"),
+            timeout_s: None,
         };
         let out = t.exec(&c, &[shunt_bin(&c)], Some("hello-wire")).unwrap();
         assert_eq!(out, "hello-wire");
@@ -295,10 +328,24 @@ mod tests {
         let c = local_client();
         let t = LocalTransport {
             bin: PathBuf::from("/nonexistent-shunt"),
+            timeout_s: None,
         };
         let out = t
             .exec(&c, &["sh".into(), "-c".into(), "echo raw-ok".into()], None)
             .unwrap();
         assert_eq!(out.trim(), "raw-ok");
+    }
+
+    #[test]
+    fn local_exec_timeout_kills() {
+        // timeout_s=0 fires immediately; the child must be killed,
+        // not orphaned.
+        let c = local_client();
+        let t = LocalTransport {
+            bin: PathBuf::from("/bin/sleep"),
+            timeout_s: Some(0),
+        };
+        let err = t.exec(&c, &[shunt_bin(&c), "30".into()], None).unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
     }
 }
