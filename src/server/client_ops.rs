@@ -3,7 +3,7 @@
 //! have a shunt binary yet, so the probe cannot use the wire protocol.
 
 use crate::server::registry::{self, ClientEntry};
-use crate::server::transport::{shunt_bin, Transport};
+use crate::server::transport::{self, shunt_bin, Transport};
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -246,6 +246,93 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
         }
     }
     println!("renamed {old} -> {new} ({})", written.display());
+    Ok(())
+}
+
+/// `shunt client rm <name> [--purge]` — deregister a box.
+///
+/// Remote side (best-effort, skipped for local/unreachable boxes):
+/// stop the daemon, pull our pubkey from authorized_keys — matched
+/// by the key blob, not the comment, so a renamed client still
+/// revokes correctly — and with --purge, `rm -rf <qroot>` wipes the
+/// queue state, env files, and the deployed binary. Bound workdirs
+/// are printed for the human to decide; we never rm task data.
+///
+/// Local side (always): kill tunnel + mux master, then row file,
+/// managed keypair, known_hosts entries, conn-fail streak, tunnel
+/// state, queued spool entries, and every project [[bind]] ref.
+/// An unreachable box warns but never wedges the deregistration.
+pub fn remove(name: &str, purge: bool) -> Result<()> {
+    anyhow::ensure!(name != "localhost", "localhost is the reserved loopback name");
+    let home = registry::shunt_home()?;
+    let row = home.join("clients").join(format!("{name}.toml"));
+    let text = std::fs::read_to_string(&row).with_context(|| format!("no client row {}", row.display()))?;
+    let e: ClientEntry = toml::from_str(&text).with_context(|| format!("bad TOML in {}", row.display()))?;
+
+    // --- remote decommission (best-effort) ---
+    if !e.local && !e.ssh.host.is_empty() {
+        let t = transport::transport_for(&e);
+        let _ = crate::server::tunnel::down(t.as_ref(), &e); // kill the -R forward if it is up
+        if !e.qroot.is_empty() {
+            let bin = format!("{}/bin/shunt", e.qroot);
+            if let Err(err) = t.exec(&e, &[bin, "stop".into(), "--root".into(), e.qroot.clone()], None) {
+                eprintln!("warn: remote stop failed ({err}); continuing deregistration");
+            }
+        }
+        // Revoke our key by blob match — comments track the name at
+        // keygen time, which a `client rename` leaves behind.
+        let pub_path = std::path::PathBuf::from(&e.ssh.key).with_extension("pub");
+        if let Ok(pubkey) = std::fs::read_to_string(&pub_path) {
+            if let Some(blob) = pubkey.split_whitespace().nth(1) {
+                let script = format!("sed -i '/{blob}/d' ~/.ssh/authorized_keys");
+                if let Err(err) = t.exec(&e, &["sh".into(), "-c".into(), script], None) {
+                    eprintln!("warn: could not revoke authorized_keys ({err})");
+                }
+            }
+        }
+        if purge && !e.qroot.is_empty() {
+            let script = format!("rm -rf {}", crate::server::transport::join_argv(std::slice::from_ref(&e.qroot)));
+            if let Err(err) = t.exec(&e, &["sh".into(), "-c".into(), script], None) {
+                eprintln!("warn: purge of {} failed ({err})", e.qroot);
+            }
+        }
+        // Task data lives in bind workdirs — report, never delete.
+        for pname in registry::list_names("projects")? {
+            let pj = registry::load_project(&pname)?;
+            for b in pj.bind.iter().filter(|b| b.client == name) {
+                eprintln!("note: project {pname} bound workdir {} on {name} — task files left in place", b.workdir);
+            }
+        }
+    }
+
+    // --- local teardown ---
+    if !e.local {
+        rekey(&e)?; // drops OUR known_hosts entries + kills the mux master
+    }
+    std::fs::remove_file(&row)?;
+    let default_key = registry::client_key_path(name)?;
+    if e.ssh.key == default_key.display().to_string() {
+        let _ = std::fs::remove_file(&default_key);
+        let _ = std::fs::remove_file(default_key.with_extension("pub"));
+    }
+    for (dir, ext) in [("state", "fail"), ("tunnels", "pid"), ("tunnels", "port"), ("tunnels", "log")] {
+        let _ = std::fs::remove_file(home.join(dir).join(format!("{name}.{ext}")));
+    }
+    for se in crate::server::spool::list()? {
+        if se.client == name {
+            let _ = crate::server::spool::remove(&se.id);
+        }
+    }
+    for pname in registry::list_names("projects")? {
+        let mut pj = registry::load_project(&pname)?;
+        let before = pj.bind.len();
+        pj.bind.retain(|b| b.client != name);
+        if pj.bind.len() != before {
+            registry::save_project(&pj)?;
+            eprintln!("project {pname}: unbound {name}");
+        }
+    }
+    println!("removed {name}");
     Ok(())
 }
 

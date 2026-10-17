@@ -1,0 +1,29 @@
+# Vendor template: generic SSH box (no vendor-specific defaults).
+# Use when the vendor has no template — seeds only the root-user and
+# /root paths most cloud containers share; VERIFY qroot/deploy_root
+# with the user or console, and fill ssh.host/port/password.
+
+name = "" # overwritten by `client add <name>`
+qroot = "/root/queue" # queue dir on the box — check it fits the box
+deploy_root = "/root" # work root; vendor-specific, verify before binding
+endpoint_rotates = false # vendor may reassign IP/port — set true if so
+
+[ssh]
+host = "" # FILL
+port = 0 # FILL
+user = "root"
+key = "" # empty = generated at ~/.config/shunt/keys/<name>
+password = "" # optional: enables unattended sshpass key deploy
+
+# expire = "unlimited"      # owned box / lab GPU
+# expire = "metered"        # pay-as-you-go (burns until balance dies)
+# expire = "2026-02-01T00:00:00+08:00"  # subscription end
+
+# env_setup = ""            # sourced before every task (conda, exports)
+# shell = "bash"            # shell for task wrappers + env_setup
+
+[facts]
+# Optional: cost metadata surfaced to the agent (design.md §9).
+# [billing]
+# hourly = 2.6
+# currency = "cny"

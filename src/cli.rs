@@ -390,6 +390,24 @@ pub enum ClientAction {
     /// Rename a client: row + name field + keypair + mux socket +
     /// state + spool refs + project bindings move together
     Rename { old: String, new: String },
+    /// Run an ad-hoc command on the box through the managed ssh
+    /// (mux + retries + our key/known_hosts — no flag soup)
+    Exec {
+        name: String,
+        /// Command + args, e.g. `-- ls -la /root`
+        #[arg(trailing_var_arg = true, required = true)]
+        cmd: Vec<String>,
+    },
+    /// Deregister a box: remote stop + key revocation (best-effort),
+    /// then row/keys/mux/state/spool/binding removal locally
+    #[command(visible_alias = "rm")]
+    Remove {
+        name: String,
+        /// Also `rm -rf <qroot>` on the box (queue, env, binary).
+        /// Bind workdirs are reported, never deleted.
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 #[derive(Args)]
@@ -513,6 +531,14 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Client(c) => match c.action {
             ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { host: a.host, port: a.port, user: a.user, key: a.key, password: a.password, qroot: a.qroot, deploy_root: a.deploy_root, local: a.local, expire: a.expire, env_setup: a.env_setup, shell: a.shell, endpoint_rotates: a.endpoint_rotates }),
             ClientAction::Rename { old, new } => crate::server::client_ops::rename(&old, &new),
+            ClientAction::Exec { name, cmd } => {
+                let c = registry::load_client(&name)?;
+                let t = crate::server::transport::transport_for(&c);
+                let out = t.exec(&c, &cmd, None)?;
+                print!("{out}");
+                Ok(())
+            }
+            ClientAction::Remove { name, purge } => crate::server::client_ops::remove(&name, purge),
             ClientAction::Hostkey { name } => {
                 let c = registry::load_client(&name)?;
                 crate::server::client_ops::rekey(&c)?;
