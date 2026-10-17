@@ -74,6 +74,18 @@ exec uv run python train.py --config exp1.yaml
 
 Guard on the artifact the task produces, relative to the binding's `workdir` (tasks run with `cwd = workdir`, no `cd` needed). If the artifact is only written on success, a rerun after a mid-flight kill recomputes. If the artifact lands early, a rerun exits 0 fast. Never submit an unguarded task that is not naturally idempotent (pure appends, side-effect-free reruns are the exceptions).
 
+### tunnel (outbound proxy)
+
+```bash
+shunt tunnel -c rw-a up              # box-side SOCKS5 on 127.0.0.1:1080,
+                                    # exiting via the dev machine's network
+shunt tunnel -c rw-a up --port 2080  # custom port
+shunt tunnel -c rw-a status
+shunt tunnel -c rw-a down
+```
+
+For boxes behind a hostile/poisoned network (mainland China vendors): `tunnel up` opens `ssh -N -R` remote dynamic forwarding, then writes `ALL_PROXY=socks5h://127.0.0.1:<port>` into the box's `<qroot>/env` — every task after that picks the proxy up transparently (git clone, cargo fetch, curl). `tunnel down` removes both. Tasks keep running through it as long as the tunnel ssh stays alive; check `status` if tasks start failing on network.
+
 ### status and logs
 
 ```bash

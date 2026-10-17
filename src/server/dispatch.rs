@@ -1,4 +1,4 @@
-//! Dispatcher: drains spool/ into clients over SSH (design.md §4.3).
+//! Dispatcher: drains spool/ into clients over SSH (design.md §4.5).
 //! Two-phase, at-least-once end to end: push, ack, delete. Auto-heal
 //! restarts a dead client daemon before pushing. An unreachable box
 //! (powered off) is normal operation, never an error.

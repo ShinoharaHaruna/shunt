@@ -1,4 +1,4 @@
-//! Server-side staging queue (design.md §4.3). Entries persist under
+//! Server-side staging queue (design.md §4.5). Entries persist under
 //! `<SHUNT_HOME>/spool/` as `<task-id>.json` + `<task-id>.sh` so a
 //! submission survives while the box is powered off.
 

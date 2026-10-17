@@ -6,3 +6,4 @@ pub mod registry;
 pub mod spool;
 pub mod status;
 pub mod transport;
+pub mod tunnel;

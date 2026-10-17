@@ -253,7 +253,11 @@ workdir = "/data/RiboWorld"
 
 `etc/vendors/<vendor>.toml` ships pre-filled client rows. `shunt client add --template autodl` seeds `ssh.user=root`, `deploy_root=/root/autodl-tmp`, `qroot=/root/autodl-tmp/queue`, leaving only `ssh.host`, `ssh.port`, `ssh.key` (and optionally `billing`) to fill. Templates are defaults for the row file, nothing more — after `add`, the client row stands alone.
 
-### 4.3 Spool and dispatcher
+### 4.4 Box-side SOCKS5 tunnel
+
+Boxes with poor international connectivity (mainland-China GPU vendors) get their work done through a reverse dynamic forward: `ssh -N -R <port>` opens `127.0.0.1:<port>` as a SOCKS5 listener **on the box**, tunneled back to exit via the dev machine's network. `shunt tunnel up -c <name> [--port 1080]` spawns that ssh detached (pidfile + log under `tunnels/`), then upserts `ALL_PROXY=socks5h://127.0.0.1:<port>` into the box's `<qroot>/env` — tasks pick the proxy up with zero task-level edits, because the runner strips ambient proxy vars and then injects the env file. `tunnel down` kills the ssh and removes the env line; `tunnel status` reports liveness and the port. The `h` in `socks5h` makes DNS resolve remotely too, which is the point — a poisoned resolver stays unused. ssh-side prerequisites: OpenSSH ≥7.6 client and `AllowTcpForwarding` on the box's sshd (on by default).
+
+### 4.5 Spool and dispatcher
 
 `submit` lands a task in `spool/` as `spool/<task-id>.json` (metadata: project, client, slug, guard, argv, submitted_at) + `<task-id>.sh` (rendered task body). Persisted before returning, so submitting while the box is off is normal operation.
 

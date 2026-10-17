@@ -22,6 +22,12 @@ pub fn shell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
+/// ssh connection args for ad-hoc uses (tunnel manager): the same
+/// flags exec/scp use, without a remote command appended.
+pub fn ssh_conn_args(client: &ClientEntry) -> Vec<String> {
+    SshTransport::base_args(client)
+}
+
 /// Join argv into one remote shell command string.
 pub fn join_argv(argv: &[String]) -> String {
     argv.iter()
@@ -82,7 +88,9 @@ pub trait Transport {
 pub struct SshTransport;
 
 impl SshTransport {
-    fn base_args(client: &ClientEntry) -> Vec<String> {
+    /// ssh connection flags (-p, BatchMode, timeouts, TOFU known_hosts,
+    /// key, user@host). Shared by exec, scp, and the tunnel manager.
+    pub(crate) fn base_args(client: &ClientEntry) -> Vec<String> {
         let kh = crate::server::registry::known_hosts_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "/dev/null".into());

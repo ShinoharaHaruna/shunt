@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Metadata for one task, as carried in the server spool entry and
-/// used to render the task body (design.md §3.13, §4.3).
+/// used to render the task body (design.md §3.13, §4.5).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskMeta {
     /// Human label; sanitized to `[A-Za-z0-9_.-]` before use.

@@ -40,6 +40,8 @@ pub enum Command {
     Project(ProjectCmd),
     /// Run the spool dispatcher loop (server)
     Dispatch(DispatchArgs),
+    /// Box-side SOCKS5 tunnel over ssh -R (server)
+    Tunnel(TunnelArgs),
 
     /// Create queue dirs under --root (client)
     Init(RootArgs),
@@ -266,6 +268,30 @@ pub struct DispatchArgs {
 }
 
 #[derive(Args)]
+pub struct TunnelArgs {
+    #[command(subcommand)]
+    pub action: TunnelAction,
+    /// Client name
+    #[arg(short, long)]
+    pub client: String,
+}
+
+#[derive(Subcommand)]
+pub enum TunnelAction {
+    /// Open the reverse tunnel: box-side SOCKS5 on 127.0.0.1:<port>,
+    /// exiting via the dev machine's network
+    Up {
+        /// SOCKS5 listen port on the box (default 1080)
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Tear the tunnel down and clean the proxy from the box's env
+    Down,
+    /// Report liveness and port
+    Status,
+}
+
+#[derive(Args)]
 pub struct SpoolCmd {
     #[command(subcommand)]
     pub action: SpoolAction,
@@ -416,6 +442,38 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Command::Dlog(a) => agent_dlog(&a),
         Command::Dispatch(a) => crate::server::dispatch::run(a.once),
+        Command::Tunnel(a) => {
+            use crate::server::tunnel;
+            match &a.action {
+                TunnelAction::Up { port } => {
+                    let c = registry::load_client(&a.client)?;
+                    let t = crate::server::transport::transport_for(&c);
+                    let pid = tunnel::up(t.as_ref(), &c, *port)?;
+                    println!("tunnel up: {} pid {pid}", c.name);
+                    Ok(())
+                }
+                TunnelAction::Down => {
+                    let c = registry::load_client(&a.client)?;
+                    let t = crate::server::transport::transport_for(&c);
+                    tunnel::down(t.as_ref(), &c)?;
+                    println!("tunnel down: {}", c.name);
+                    Ok(())
+                }
+                TunnelAction::Status => {
+                    let st = tunnel::status(&a.client)?;
+                    if st.alive {
+                        println!(
+                            "{}: up (socks5h://127.0.0.1:{})",
+                            a.client,
+                            st.port.map(|p| p.to_string()).unwrap_or_else(|| "?".into())
+                        );
+                    } else {
+                        println!("{}: down", a.client);
+                    }
+                    Ok(())
+                }
+            }
+        }
 
         Command::Spool(c) => match c.action {
             SpoolAction::Ls => {

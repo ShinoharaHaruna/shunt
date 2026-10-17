@@ -27,7 +27,7 @@ Raw cargo equivalents work too (`cargo build/test/clippy`).
 
 - `src/cli.rs` — full clap command tree; server vs client subcommands
 - `src/agent/` — client side: daemon loop, FS queue ops, exec, probe, shutdown
-- `src/server/` — server side: registry CRUD (real), spool, dispatcher, ssh transport
+- `src/server/` — server side: registry CRUD (real), spool, dispatcher, ssh transport, SOCKS5 tunnel manager
 - `src/proto/` — shared types: task format, wire JSON (protocol version 1)
 - `docs/design.md` — **authoritative behavioral spec**; when ambiguous, this file wins
 - `etc/vendors/` — client templates (`autodl.toml` seeds AutoDL defaults)

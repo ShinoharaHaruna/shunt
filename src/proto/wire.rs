@@ -39,7 +39,7 @@ impl WireResult {
     }
 }
 
-/// `shunt enqueue -` ack (design.md §4.3 step 3).
+/// `shunt enqueue -` ack (design.md §4.5 step 3).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EnqueueResult {
     pub protocol: u32,
