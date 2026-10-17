@@ -26,7 +26,8 @@ pub struct Cli {
 pub enum Command {
     /// Spool a task for a client (server)
     Submit(SubmitArgs),
-    /// Queue status: aggregate (server) or local (client)
+    /// Queue status: bare = server aggregate (dev machine),
+    /// --root/$SHUNT_ROOT = local queue (box side)
     Status(StatusArgs),
     /// Task or daemon logs
     Logs(LogsArgs),
@@ -476,6 +477,12 @@ pub fn run(cli: Cli) -> Result<()> {
                 return remote(name, &["status", "--json"], None);
             }
             if a.all {
+                return crate::server::status::run_all(a.json);
+            }
+            // No --root and no SHUNT_ROOT: this is a dev machine,
+            // and `status` means the installation's status — the
+            // server aggregate. The box side always has a root set.
+            if a.root.is_none() && std::env::var_os("SHUNT_ROOT").is_none() {
                 return crate::server::status::run_all(a.json);
             }
             agent_status(&a)

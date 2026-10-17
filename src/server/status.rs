@@ -102,14 +102,11 @@ pub fn run_all(json: bool) -> Result<()> {
         }
         out.insert(name.clone(), serde_json::to_value(&st)?);
     }
+    let staged = crate::server::spool::list()?;
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "protocol": crate::proto::wire::PROTOCOL_VERSION,
-                "clients": out,
-            }))?
-        );
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "protocol": crate::proto::wire::PROTOCOL_VERSION, "clients": out, "spool_pending": staged.len() }))?);
+    } else if !staged.is_empty() {
+        println!("== spool ==  {} staged for dispatch", staged.len());
     }
     Ok(())
 }
