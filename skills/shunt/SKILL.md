@@ -153,6 +153,8 @@ Queue-level runner env lives in the `env` dotenv file under `qroot` (`WORKDIR`, 
 
 Interpretation cheats: `daemon.alive=false` with nonempty `pending/` means nothing will run until the dispatcher auto-heals or someone runs `shunt start` on the box. `stop=true` means draining. A task absent from all lists but present in `spool ls` has not been delivered yet.
 
+3. Ask the billing model at registration and write it into the row's `expire` field: owned or lab boxes (and `localhost`) get `expire = "unlimited"`; pay-as-you-go gets `expire = "metered"` (no deadline — it burns until the balance does, so keep an eye on spend anyway); subscription boxes get the deadline (`expire = "2026-02-01T00:00:00+08:00"`, keep the offset so `status` can compute `expires_in_s`). The vendor console shows the expiry — ask the user for it; don't guess. When a subscription's `expires_in_s` is close to the next task's runtime, warn before queueing rather than after. `status --all --json` surfaces both `expire` and `expires_in_s`.
+
 ## Cost-aware playbook
 
 1. Arm idle-shutdown right after enqueueing the last task of a batch: `shunt shutdown -c rw-a on`. The countdown only fires when both `pending/` and `running/` are empty, re-checks every second, and cancels if new work arrives, so arming early is safe.

@@ -7,6 +7,7 @@
 name = "" # overwritten by `client add <name>`
 qroot = "/root/autodl-tmp/queue" # queue dir on the box
 deploy_root = "/root/autodl-tmp" # AutoDL's persistent data mount
+expire = "metered" # AutoDL pay-as-you-go: runs until balance; subscription boxes write the deadline instead
 
 [ssh]
 host = "" # FILL: e.g. connect.<region>.seetacloud.com
@@ -17,6 +18,9 @@ password = "" # optional: enables unattended sshpass ssh-copy-id key deploy
 
 # facts is filled by `shunt client probe`/`bootstrap`; leave empty.
 [facts]
+# expire = "2026-02-01T00:00:00+08:00"  # subscription end (with offset)
+# expire = "unlimited"                  # owned box: never expires
+#
 # Optional: cost metadata surfaced to the agent (design.md §9).
 # [billing]
 # hourly = 2.6

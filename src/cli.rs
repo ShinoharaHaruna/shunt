@@ -342,6 +342,10 @@ pub enum ClientAction {
         /// row is always local regardless (design.md §4.1, §5)
         #[arg(long)]
         local: bool,
+        /// Billing lifetime: "unlimited", "metered", or an ISO-8601
+        /// timestamp for a subscription deadline
+        #[arg(long)]
+        expire: Option<String>,
     },
     /// List registered boxes
     Ls,
@@ -475,7 +479,7 @@ pub fn run(cli: Cli) -> Result<()> {
         },
 
         Command::Client(c) => match c.action {
-            ClientAction::Add { name, template, host, port, user, key, qroot, deploy_root, local } => client_add(&name, template.as_deref(), ClientAddOpts { host, port, user, key, qroot, deploy_root, local }),
+            ClientAction::Add { name, template, host, port, user, key, qroot, deploy_root, local, expire } => client_add(&name, template.as_deref(), ClientAddOpts { host, port, user, key, qroot, deploy_root, local, expire }),
             ClientAction::Ls => {
                 for n in registry::list_clients()? {
                     println!("{n}");
@@ -677,6 +681,7 @@ struct ClientAddOpts {
     qroot: Option<String>,
     deploy_root: Option<String>,
     local: bool,
+    expire: Option<String>,
 }
 
 fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result<()> {
@@ -684,7 +689,7 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
 
     let mut entry = match template {
         Some(t) => load_vendor_template(t)?,
-        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: String::new(), deploy_root: String::new(), facts: Default::default(), billing: None },
+        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: String::new(), deploy_root: String::new(), facts: Default::default(), billing: None },
     };
     entry.name = name.into();
     // Adding a row for the built-in name materializes the loopback
@@ -718,6 +723,9 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
     }
     if opts.local {
         entry.local = true;
+    }
+    if let Some(v) = opts.expire {
+        entry.expire = v;
     }
     // Dedicated keypair per client (design.md §4.1): generated at
     // registration so the row is usable immediately.

@@ -39,6 +39,13 @@ pub struct ClientEntry {
     /// at `true`/a marker script in test environments.
     #[serde(default)]
     pub shutdown_cmd: Option<String>,
+    /// Billing lifetime: "unlimited" (owned box, localhost, lab GPU),
+    /// "metered" (pay-as-you-go — runs until the balance does), or an
+    /// ISO-8601 timestamp string for a subscription deadline
+    /// ("2026-01-20T18:00:00+08:00"; with an offset, `status` can
+    /// report seconds remaining). Empty = unknown.
+    #[serde(default)]
+    pub expire: String,
     #[serde(default)]
     pub ssh: SshEndpoint,
     /// Queue dir on the box.
@@ -141,6 +148,7 @@ const CLIENT_HEADER: &str = "\
 #   ssh_timeout_s                      ssh transport: ConnectTimeout (default 15)
 #   ssh.password                       sshpass path for one-time key deploy (plaintext — keep registry private)
 #   shutdown_cmd                       poweroff command pushed to <qroot>/shutdown_cmd at arm time
+#   expire                             \"unlimited\" | \"metered\" | ISO-8601 timestamp (subscription end)
 #   billing.hourly / billing.currency  cost metadata surfaced to the agent
 # Facts (gpu, cores, can_root, shutdown_cmd guess, ...) fill in via `shunt client probe`.
 ";
@@ -190,7 +198,7 @@ fn usable(entry: ClientEntry) -> Result<ClientEntry> {
 
 fn localhost_default() -> Result<ClientEntry> {
     let home = std::env::var("HOME").context("HOME not set")?;
-    Ok(ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, ssh: SshEndpoint::default(), qroot: shunt_home()?.join("queue").display().to_string(), deploy_root: home, facts: BTreeMap::new(), billing: None })
+    Ok(ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: "unlimited".into(), ssh: SshEndpoint::default(), qroot: shunt_home()?.join("queue").display().to_string(), deploy_root: home, facts: BTreeMap::new(), billing: None })
 }
 
 /// Client names including the pre-registered `localhost`. Disabled
@@ -276,7 +284,7 @@ mod tests {
     fn client_roundtrip() {
         let tmp = std::env::temp_dir().join(format!("shunt-test-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &tmp);
-        let entry = ClientEntry { name: "box-1".into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: "/path/to/key".into(), password: String::new() }, qroot: "/root/autodl-tmp/queue".into(), deploy_root: "/root/autodl-tmp".into(), facts: BTreeMap::new(), billing: Some(Billing { hourly: 2.6, currency: "cny".into() }) };
+        let entry = ClientEntry { name: "box-1".into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: "/path/to/key".into(), password: String::new() }, qroot: "/root/autodl-tmp/queue".into(), deploy_root: "/root/autodl-tmp".into(), facts: BTreeMap::new(), billing: Some(Billing { hourly: 2.6, currency: "cny".into() }) };
         save_client(&entry).unwrap();
         let back = load_client("box-1").unwrap();
         assert_eq!(back.ssh.port, 22);

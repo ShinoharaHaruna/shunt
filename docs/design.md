@@ -234,6 +234,7 @@ Registry files are human-editable TOML and safe to keep in git (minus key paths)
 | `qroot`                                                       | queue dir on the box                                                                                                                                       |
 | `deploy_root`                                                 | vendor work root (AutoDL: `/root/autodl-tmp`)                                                                                                              |
 | `facts`                                                       | table filled by `probe`/`bootstrap`: `gpu`, `cuda`, `driver`, `cores`, `mem_gb`, `disk_free_gb`, `python`, `can_root`, `shutdown_cmd` (poweroff candidate) |
+| `expire`                                                      | billing lifetime: `unlimited` (owned box, localhost), `metered` (pay-as-you-go until balance), or an ISO-8601 deadline; empty = unknown                    |
 | `billing.hourly`, `billing.currency`                          | cost metadata surfaced to the agent                                                                                                                        |
 
 `projects/<name>.toml`:
@@ -334,7 +335,7 @@ Facts are advisory registry data for agent-side matching, not enforced constrain
 
 ## 9. Billing and cost surfacing
 
-`billing.hourly`/`billing.currency` in a client row flow into `shunt status --all --json` output so the agent can reason about cost. shunt never makes the decision — "instance has 40 min of paid time left but the next task needs 3 h → hold and notify" is agent logic taught in the skill file. shunt's job is accurate exposure of queue state, uptime context, and rates.
+`billing.hourly`/`billing.currency` in a client row flow into `shunt status --all --json` output so the agent can reason about cost. `expire` carries the billing lifetime — `unlimited` for owned compute (localhost, lab GPUs), `metered` for pay-as-you-go (no deadline; burns until the balance does), or an ISO-8601 timestamp for subscription boxes — and `status` adds `expires_in_s` when the timestamp carries an offset. shunt never makes the decision — "instance has 40 min of paid time left but the next task needs 3 h → hold and notify" is agent logic taught in the skill file. shunt's job is accurate exposure of queue state, uptime context, and rates.
 
 ## 10. CLI surface
 
