@@ -163,7 +163,8 @@ Every task runs under a fixed prologue (the bash `qexec.sh`). The queue-level `e
 - All proxy variables unset: `ALL_PROXY all_proxy http_proxy https_proxy HTTP_PROXY HTTPS_PROXY`. A task that needs a tunnel re-exports it inside itself.
 - `OMP_NUM_THREADS` / `MKL_NUM_THREADS` set to `env`'s `TASK_THREADS` (`auto` → cgroup probe, see §8). Rationale: AutoDL containers are cgroup-capped while `nproc`/`free` report host values — on RW-A, 14 real cores vs 112 reported. An uncapped torch process claims all of them and N workers thrash.
 - Remaining `env` keys pass through as environment; per-task `# shunt-env:K=V` directives apply last and win.
-- Then `exec bash <taskfile>`.
+- `<qroot>/env_setup` is a client-row `env_setup` snippet pushed by `client env`/`bootstrap`: sourced in the wrapper right before exec, so conda-activate/PATH-export land in the task env, and `--file` tasks get it too (the wrapper, not the render, owns it). The wrapper's shell is `<qroot>/shell` or bash — record `shell = "zsh"` when the snippet isn't POSIX (conda activate under bare `sh` fails silently). A nonzero snippet return doesn't block; `exit`/`exec` inside it kills the launch — same footgun as bashrc.
+- Then `exec <shell> <taskfile>`.
 
 A task may override any of these inside itself. `set -uo pipefail` is part of the generated task template, not enforced by the runner.
 
@@ -210,6 +211,7 @@ clients/<name>.toml
 projects/<name>.toml
 keys/<name>[.pub]      # dedicated ed25519 keypair per ssh client
 known_hosts            # shunt-scoped TOFU store (never ~/.ssh)
+state/<name>.fail      # consecutive ssh connect failures (endpoint-drift watchdog)
 spool/                 # server-side staging queue
 ```
 
@@ -221,21 +223,23 @@ Registry files are human-editable TOML and safe to keep in git (minus key paths)
 
 `clients/<name>.toml`:
 
-| field                                                         | meaning                                                                                                                                                    |
-| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`                                                        | registry key                                                                                                                                               |
-| `local`                                                       | loopback transport instead of ssh (localhost and any `client add --local` row)                                                                             |
-| `local_bin`                                                   | local transport: binary to exec (default: the running `shunt`)                                                                                             |
-| `timeout_s`                                                   | local transport: exec timeout; on expiry the child is killed                                                                                               |
-| `ssh_timeout_s`                                               | ssh transport: ConnectTimeout override (default 15)                                                                                                        |
-| `shutdown_cmd`                                                | poweroff command pushed to `<qroot>/shutdown_cmd` at `shutdown on` arm time — point at `true` or a marker script in test envs                              |
-| `disabled`                                                    | opt-out: row stays on disk but is not a usable client (skipped by listings, rejected by load)                                                              |
-| `ssh.host`, `ssh.port`, `ssh.user`, `ssh.key`, `ssh.password` | exec endpoint; `password` feeds the one-time `sshpass ssh-copy-id` key deploy                                                                              |
-| `qroot`                                                       | queue dir on the box                                                                                                                                       |
-| `deploy_root`                                                 | vendor work root (AutoDL: `/root/autodl-tmp`)                                                                                                              |
-| `facts`                                                       | table filled by `probe`/`bootstrap`: `gpu`, `cuda`, `driver`, `cores`, `mem_gb`, `disk_free_gb`, `python`, `can_root`, `shutdown_cmd` (poweroff candidate) |
-| `expire`                                                      | billing lifetime: `unlimited` (owned box, localhost), `metered` (pay-as-you-go until balance), or an ISO-8601 deadline; empty = unknown                    |
-| `billing.hourly`, `billing.currency`                          | cost metadata surfaced to the agent                                                                                                                        |
+| field                                                         | meaning                                                                                                                                                      |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`                                                        | registry key                                                                                                                                                 |
+| `local`                                                       | loopback transport instead of ssh (localhost and any `client add --local` row)                                                                               |
+| `local_bin`                                                   | local transport: binary to exec (default: the running `shunt`)                                                                                               |
+| `timeout_s`                                                   | local transport: exec timeout; on expiry the child is killed                                                                                                 |
+| `ssh_timeout_s`                                               | ssh transport: ConnectTimeout override (default 15)                                                                                                          |
+| `shutdown_cmd`                                                | poweroff command pushed to `<qroot>/shutdown_cmd` at `shutdown on` arm time — point at `true` or a marker script in test envs                                |
+| `disabled`                                                    | opt-out: row stays on disk but is not a usable client (skipped by listings, rejected by load)                                                                |
+| `ssh.host`, `ssh.port`, `ssh.user`, `ssh.key`, `ssh.password` | exec endpoint; `password` feeds the one-time `sshpass ssh-copy-id` key deploy                                                                                |
+| `qroot`                                                       | queue dir on the box                                                                                                                                         |
+| `deploy_root`                                                 | vendor work root (AutoDL: `/root/autodl-tmp`)                                                                                                                |
+| `facts`                                                       | table filled by `probe`/`bootstrap`: `gpu`, `cuda`, `driver`, `cores`, `mem_gb`, `disk_free_gb`, `python`, `can_root`, `shutdown_cmd` (poweroff candidate)   |
+| `expire`                                                      | billing lifetime: `unlimited` (owned box, localhost), `metered` (pay-as-you-go until balance), or an ISO-8601 deadline; empty = unknown                      |
+| `env_setup`, `shell`                                          | task preamble: snippet sourced before every task + the shell it runs under (default bash); pushed to `<qroot>/env_setup`/`shell` by `client env`/`bootstrap` |
+| `endpoint_rotates`                                            | vendor reassigns IP/port across restarts (AutoDL does not); steers the escalation hint after `CONN_FAIL_ESCALATE` consecutive ssh failures                   |
+| `billing.hourly`, `billing.currency`                          | cost metadata surfaced to the agent                                                                                                                          |
 
 `projects/<name>.toml`:
 

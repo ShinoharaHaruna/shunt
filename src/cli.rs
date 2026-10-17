@@ -311,42 +311,60 @@ pub struct ClientCmd {
     pub action: ClientAction,
 }
 
+/// Fields of `client add` — a struct variant would dwarf the enum's
+/// other arms (clippy::large_enum_variant), so it is an Args tuple.
+#[derive(Args)]
+pub struct ClientAddArgs {
+    /// Registry name
+    pub name: String,
+    /// Vendor template under etc/vendors/ (e.g. autodl)
+    #[arg(long)]
+    pub template: Option<String>,
+    /// SSH host
+    #[arg(long)]
+    pub host: Option<String>,
+    /// SSH port
+    #[arg(long)]
+    pub port: Option<u16>,
+    /// SSH user (template default: root)
+    #[arg(long)]
+    pub user: Option<String>,
+    /// SSH private key path
+    #[arg(long)]
+    pub key: Option<String>,
+    /// Queue dir on the box (template default: deploy_root/queue)
+    #[arg(long)]
+    pub qroot: Option<String>,
+    /// Vendor work root (template default for autodl: /root/autodl-tmp)
+    #[arg(long)]
+    pub deploy_root: Option<String>,
+    /// Local loopback client (no SSH); the built-in `localhost`
+    /// row is always local regardless (design.md §4.1, §5)
+    #[arg(long)]
+    pub local: bool,
+    /// Billing lifetime: "unlimited", "metered", or an ISO-8601
+    /// timestamp for a subscription deadline
+    #[arg(long)]
+    pub expire: Option<String>,
+    /// Shell snippet sourced before every task on this box
+    /// (e.g. "source ~/miniconda3/etc/profile.d/conda.sh && conda activate ribo")
+    #[arg(long)]
+    pub env_setup: Option<String>,
+    /// Shell for task wrappers + env_setup (default bash)
+    #[arg(long)]
+    pub shell: Option<String>,
+    /// Vendor reassigns IP/port across restarts (AutoDL does not)
+    #[arg(long)]
+    pub endpoint_rotates: bool,
+}
+
+// Add is parsed once per invocation — a fat variant is fine and
+// clap cannot Box the payload, so silence the lint honestly.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum ClientAction {
     /// Register a box (server-local, zero network traffic)
-    Add {
-        /// Registry name
-        name: String,
-        /// Vendor template under etc/vendors/ (e.g. autodl)
-        #[arg(long)]
-        template: Option<String>,
-        /// SSH host
-        #[arg(long)]
-        host: Option<String>,
-        /// SSH port
-        #[arg(long)]
-        port: Option<u16>,
-        /// SSH user (template default: root)
-        #[arg(long)]
-        user: Option<String>,
-        /// SSH private key path
-        #[arg(long)]
-        key: Option<String>,
-        /// Queue dir on the box (template default: deploy_root/queue)
-        #[arg(long)]
-        qroot: Option<String>,
-        /// Vendor work root (template default for autodl: /root/autodl-tmp)
-        #[arg(long)]
-        deploy_root: Option<String>,
-        /// Local loopback client (no SSH); the built-in `localhost`
-        /// row is always local regardless (design.md §4.1, §5)
-        #[arg(long)]
-        local: bool,
-        /// Billing lifetime: "unlimited", "metered", or an ISO-8601
-        /// timestamp for a subscription deadline
-        #[arg(long)]
-        expire: Option<String>,
-    },
+    Add(ClientAddArgs),
     /// List registered boxes
     Ls,
     /// Show one client row
@@ -358,6 +376,8 @@ pub enum ClientAction {
     Probe { name: String },
     /// Probe raw SSH, scp the binary, remote init + start
     Bootstrap { name: String },
+    /// Push the row's env_setup/shell to <qroot>/env_setup + shell
+    Env { name: String },
 }
 
 #[derive(Args)]
@@ -479,7 +499,7 @@ pub fn run(cli: Cli) -> Result<()> {
         },
 
         Command::Client(c) => match c.action {
-            ClientAction::Add { name, template, host, port, user, key, qroot, deploy_root, local, expire } => client_add(&name, template.as_deref(), ClientAddOpts { host, port, user, key, qroot, deploy_root, local, expire }),
+            ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { host: a.host, port: a.port, user: a.user, key: a.key, qroot: a.qroot, deploy_root: a.deploy_root, local: a.local, expire: a.expire, env_setup: a.env_setup, shell: a.shell, endpoint_rotates: a.endpoint_rotates }),
             ClientAction::Ls => {
                 for n in registry::list_clients()? {
                     println!("{n}");
@@ -502,6 +522,13 @@ pub fn run(cli: Cli) -> Result<()> {
                 let c = registry::load_client(&name)?;
                 let t = crate::server::transport::transport_for(&c);
                 crate::server::client_ops::probe(t.as_ref(), &name)
+            }
+            ClientAction::Env { name } => {
+                let c = registry::load_client(&name)?;
+                let t = crate::server::transport::transport_for(&c);
+                crate::server::client_ops::push_env(t.as_ref(), &name)?;
+                println!("env pushed: {}", name);
+                Ok(())
             }
             ClientAction::Bootstrap { name } => {
                 let c = registry::load_client(&name)?;
@@ -682,6 +709,9 @@ struct ClientAddOpts {
     deploy_root: Option<String>,
     local: bool,
     expire: Option<String>,
+    env_setup: Option<String>,
+    shell: Option<String>,
+    endpoint_rotates: bool,
 }
 
 fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result<()> {
@@ -689,7 +719,7 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
 
     let mut entry = match template {
         Some(t) => load_vendor_template(t)?,
-        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: String::new(), deploy_root: String::new(), facts: Default::default(), billing: None },
+        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: String::new(), deploy_root: String::new(), facts: Default::default(), billing: None },
     };
     entry.name = name.into();
     // Adding a row for the built-in name materializes the loopback
@@ -726,6 +756,15 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
     }
     if let Some(v) = opts.expire {
         entry.expire = v;
+    }
+    if let Some(v) = opts.env_setup {
+        entry.env_setup = v;
+    }
+    if let Some(v) = opts.shell {
+        entry.shell = v;
+    }
+    if opts.endpoint_rotates {
+        entry.endpoint_rotates = true;
     }
     // Dedicated keypair per client (design.md §4.1): generated at
     // registration so the row is usable immediately.

@@ -8,6 +8,12 @@ name = "" # overwritten by `client add <name>`
 qroot = "/root/autodl-tmp/queue" # queue dir on the box
 deploy_root = "/root/autodl-tmp" # AutoDL's persistent data mount
 expire = "metered" # AutoDL pay-as-you-go: runs until balance; subscription boxes write the deadline instead
+endpoint_rotates = false # AutoDL keeps ssh.host/ssh.port stable across stop/start
+# shell = "bash"      # task wrapper + env_setup shell (default bash)
+# env_setup = """     # sourced before every task; push with `shunt client env <name>`
+# source /root/miniconda3/etc/profile.d/conda.sh
+# conda activate ribo
+# """
 
 [ssh]
 host = "" # FILL: e.g. connect.<region>.seetacloud.com

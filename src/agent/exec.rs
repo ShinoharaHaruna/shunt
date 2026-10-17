@@ -55,12 +55,19 @@ pub fn spawn_task(root: &Path, task_name: &str) -> Result<Child> {
     let log_out = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
     let log_err = log_out.try_clone()?;
 
-    let mut cmd = Command::new("bash");
+    // Task shell: `<qroot>/shell` if the client pushed one, else
+    // bash. env_setup is a shell snippet sourced in the wrapper
+    // before exec'ing the task (design.md §3.12) — conda activate /
+    // `source env.sh` work because env mutations survive exec; a
+    // missing or erroring file never blocks the task.
+    let shell = std::fs::read_to_string(root.join("shell")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "bash".into());
+    let mut cmd = Command::new(&shell);
     cmd.arg("-c")
         // rc 97 when the workdir is unreachable (design.md §3.12)
-        .arg("cd \"$1\" || { echo \"shunt: cannot cd to $1\" >&2; exit 97; }; exec bash \"$2\"")
-        .arg("shunt-exec")
+        .arg("cd \"$1\" || { echo \"shunt: cannot cd to $1\" >&2; exit 97; }; [ -f \"$2/env_setup\" ] && . \"$2/env_setup\"; exec \"$0\" \"$3\"")
+        .arg(&shell)
         .arg(&workdir)
+        .arg(root)
         .arg(&task)
         .stdin(Stdio::null())
         .stdout(log_out)

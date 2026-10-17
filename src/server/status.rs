@@ -24,6 +24,15 @@ pub struct ClientStatus {
     /// metered, unknown, or a timestamp without an offset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_in_s: Option<i64>,
+    /// Consecutive ssh-level connect failures (exit 255). >=
+    /// `CONN_FAIL_ESCALATE` means the endpoint likely moved or the
+    /// box is down — agents should escalate to the user (§4.1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connect_failures: Option<u32>,
+    /// This vendor reassigns IP/port across restarts (row field);
+    /// steers whether "check the console for a new endpoint" applies.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub endpoint_rotates: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub facts: Option<std::collections::BTreeMap<String, serde_json::Value>>,
 }
@@ -66,12 +75,15 @@ fn now_epoch() -> i64 {
 pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
     let expire = (!client.expire.is_empty()).then(|| client.expire.clone());
     let expires_in_s = expire_epoch(&client.expire).map(|e| e - now_epoch());
+    let fails = registry::conn_fail_read(&client.name);
+    let connect_failures = (fails > 0).then_some(fails);
+    let endpoint_rotates = client.endpoint_rotates;
     match t.exec(client, &wire_argv(client, &["status", "--json"]), None) {
         Ok(out) => match serde_json::from_str::<serde_json::Value>(out.trim()) {
-            Ok(v) => ClientStatus { reachable: true, report: Some(v), error: None, billing: client.billing.clone(), expire, expires_in_s, facts: (!client.facts.is_empty()).then(|| client.facts.clone()) },
-            Err(e) => ClientStatus { reachable: true, report: None, error: Some(format!("bad status JSON: {e}")), billing: client.billing.clone(), expire, expires_in_s, facts: None },
+            Ok(v) => ClientStatus { reachable: true, report: Some(v), error: None, billing: client.billing.clone(), expire, expires_in_s, connect_failures, endpoint_rotates, facts: (!client.facts.is_empty()).then(|| client.facts.clone()) },
+            Err(e) => ClientStatus { reachable: true, report: None, error: Some(format!("bad status JSON: {e}")), billing: client.billing.clone(), expire, expires_in_s, connect_failures, endpoint_rotates, facts: None },
         },
-        Err(e) => ClientStatus { reachable: false, report: None, error: Some(format!("{e:#}")), billing: client.billing.clone(), expire, expires_in_s, facts: None },
+        Err(e) => ClientStatus { reachable: false, report: None, error: Some(format!("{e:#}")), billing: client.billing.clone(), expire, expires_in_s, connect_failures, endpoint_rotates, facts: None },
     }
 }
 

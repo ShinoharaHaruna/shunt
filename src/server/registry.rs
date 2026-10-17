@@ -46,6 +46,24 @@ pub struct ClientEntry {
     /// report seconds remaining). Empty = unknown.
     #[serde(default)]
     pub expire: String,
+    /// Shell snippet sourced before every task on this box
+    /// (conda activate, `source env.sh`, PATH exports — whatever the
+    /// first manual run proved necessary). Pushed to
+    /// `<qroot>/env_setup` by `client env`/`bootstrap`; the runner
+    /// sources it in the task wrapper (design.md §3.12).
+    #[serde(default)]
+    pub env_setup: String,
+    /// Shell the task wrapper + env_setup run under on this box
+    /// ("bash", "zsh", "sh"). Empty = bash. Pushed to
+    /// `<qroot>/shell`. conda-activate-style snippets need bash/zsh,
+    /// not POSIX sh — record what the box actually has.
+    #[serde(default)]
+    pub shell: String,
+    /// Whether the vendor reassigns IP/port across stop/start
+    /// (AutoDL does not). Drives the escalation text when connection
+    /// failures streak — see `CONN_FAIL_ESCALATE`.
+    #[serde(default)]
+    pub endpoint_rotates: bool,
     #[serde(default)]
     pub ssh: SshEndpoint,
     /// Queue dir on the box.
@@ -122,6 +140,41 @@ pub fn known_hosts_path() -> Result<PathBuf> {
     Ok(shunt_home()?.join("known_hosts"))
 }
 
+/// Consecutive ssh-level connect failures before the escalation hint
+/// fires (design.md §4.1 endpoint drift). Agents watch
+/// `connect_failures`/`endpoint_stale` in `status --all --json`.
+pub const CONN_FAIL_ESCALATE: u32 = 3;
+
+fn conn_fail_path(name: &str) -> Result<PathBuf> {
+    Ok(shunt_home()?.join("state").join(format!("{name}.fail")))
+}
+
+/// Consecutive ssh connect failures recorded for a client.
+pub fn conn_fail_read(name: &str) -> u32 {
+    conn_fail_path(name).ok().and_then(|p| fs::read_to_string(p).ok()).and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+}
+
+/// ssh-level failure (exit 255): bump the streak, return the count.
+pub fn conn_fail_bump(name: &str) -> u32 {
+    let n = conn_fail_read(name) + 1;
+    if let Ok(p) = conn_fail_path(name) {
+        if let Some(d) = p.parent() {
+            let _ = fs::create_dir_all(d);
+        }
+        let _ = fs::write(p, format!("{n}\n"));
+    }
+    n
+}
+
+/// A successful ssh exec clears the streak.
+pub fn conn_fail_reset(name: &str) {
+    if let Ok(p) = conn_fail_path(name) {
+        if p.exists() {
+            let _ = fs::remove_file(p);
+        }
+    }
+}
+
 /// Registry home: `$SHUNT_HOME` else `~/.config/shunt`.
 pub fn shunt_home() -> Result<PathBuf> {
     if let Ok(h) = std::env::var("SHUNT_HOME") {
@@ -149,6 +202,9 @@ const CLIENT_HEADER: &str = "\
 #   ssh.password                       sshpass path for one-time key deploy (plaintext — keep registry private)
 #   shutdown_cmd                       poweroff command pushed to <qroot>/shutdown_cmd at arm time
 #   expire                             \"unlimited\" | \"metered\" | ISO-8601 timestamp (subscription end)
+#   env_setup                          shell snippet sourced before every task (conda activate, exports)
+#   shell                              task/env_setup shell: bash | zsh | sh (default bash)
+#   endpoint_rotates                   true if the vendor reassigns IP/port across restarts
 #   billing.hourly / billing.currency  cost metadata surfaced to the agent
 # Facts (gpu, cores, can_root, shutdown_cmd guess, ...) fill in via `shunt client probe`.
 ";
@@ -198,7 +254,7 @@ fn usable(entry: ClientEntry) -> Result<ClientEntry> {
 
 fn localhost_default() -> Result<ClientEntry> {
     let home = std::env::var("HOME").context("HOME not set")?;
-    Ok(ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: "unlimited".into(), ssh: SshEndpoint::default(), qroot: shunt_home()?.join("queue").display().to_string(), deploy_root: home, facts: BTreeMap::new(), billing: None })
+    Ok(ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: "unlimited".into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint::default(), qroot: shunt_home()?.join("queue").display().to_string(), deploy_root: home, facts: BTreeMap::new(), billing: None })
 }
 
 /// Client names including the pre-registered `localhost`. Disabled
@@ -284,7 +340,7 @@ mod tests {
     fn client_roundtrip() {
         let tmp = std::env::temp_dir().join(format!("shunt-test-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &tmp);
-        let entry = ClientEntry { name: "box-1".into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: "/path/to/key".into(), password: String::new() }, qroot: "/root/autodl-tmp/queue".into(), deploy_root: "/root/autodl-tmp".into(), facts: BTreeMap::new(), billing: Some(Billing { hourly: 2.6, currency: "cny".into() }) };
+        let entry = ClientEntry { name: "box-1".into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: "/path/to/key".into(), password: String::new() }, qroot: "/root/autodl-tmp/queue".into(), deploy_root: "/root/autodl-tmp".into(), facts: BTreeMap::new(), billing: Some(Billing { hourly: 2.6, currency: "cny".into() }) };
         save_client(&entry).unwrap();
         let back = load_client("box-1").unwrap();
         assert_eq!(back.ssh.port, 22);

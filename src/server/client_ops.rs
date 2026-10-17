@@ -167,9 +167,32 @@ pub fn deploy_key(entry: &ClientEntry) -> Result<bool> {
     Ok(st.success())
 }
 
+/// `shunt client env <name>`: push the row's `env_setup`/`shell` to
+/// `<qroot>/env_setup` + `<qroot>/shell` on the box. Empty fields
+/// remove the files so the runner falls back to bash/none.
+pub fn push_env(t: &dyn Transport, name: &str) -> Result<()> {
+    let e = registry::load_client(name)?;
+    write_qroot_file(t, &e, "env_setup", &e.env_setup)?;
+    write_qroot_file(t, &e, "shell", &e.shell)?;
+    Ok(())
+}
+
+/// Write-or-remove one small file under `<qroot>` over the client's
+/// transport. Empty content removes the file.
+fn write_qroot_file(t: &dyn Transport, e: &ClientEntry, fname: &str, content: &str) -> Result<()> {
+    let path = format!("{}/{}", e.qroot, fname);
+    if content.is_empty() {
+        t.exec(e, &["rm".into(), "-f".into(), path], None)?;
+        return Ok(());
+    }
+    t.exec(e, &["mkdir".into(), "-p".into(), e.qroot.clone()], None)?;
+    t.exec(e, &["sh".into(), "-c".into(), "cat > \"$0\"".into(), path], Some(content))?;
+    Ok(())
+}
+
 /// `shunt client bootstrap <name>`: ensure key + try deploy, probe,
 /// ship the local binary to `<qroot>/bin/shunt`, remote `init` +
-/// `start`, merge facts.
+/// `start`, push env_setup, merge facts.
 pub fn bootstrap(t: &dyn Transport, name: &str) -> Result<()> {
     let mut entry = registry::load_client(name)?;
     ensure_key(&mut entry)?;
@@ -191,6 +214,14 @@ pub fn bootstrap(t: &dyn Transport, name: &str) -> Result<()> {
     t.exec(&entry, &[bin.clone(), "init".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt init")?;
     t.exec(&entry, &[bin.clone(), "start".into(), "--root".into(), entry.qroot.clone()], None).context("remote shunt start")?;
 
+    // env_setup/shell only push when the row actually carries them;
+    // an empty push would clobber a box-side edit, which is not the
+    // contract bootstrap has with the registry.
+    if !entry.env_setup.is_empty() || !entry.shell.is_empty() {
+        if let Err(e) = push_env(t, name) {
+            eprintln!("note: env_setup push failed: {e:#}");
+        }
+    }
     let p = registry::save_client(&entry)?;
     println!("bootstrapped {} ({})", entry.name, bin);
     println!("wrote {}", p.display());

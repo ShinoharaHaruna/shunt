@@ -530,3 +530,33 @@ fn enqueue_concurrent_no_duplicate_seq() {
     seqs.dedup();
     assert_eq!(seqs.len(), 8, "duplicate seq numbers: {names:?}");
 }
+
+#[test]
+fn env_setup_sourced_before_task() {
+    // `<qroot>/env_setup` is sourced in the task wrapper before exec
+    // (design.md §3.12): a var exported there lands in the task env.
+    let q = Q::new("envsetup");
+    std::fs::write(q.root.join("env_setup"), "export SHUNT_SETUP_RAN=yes-i-am-sourced\n").unwrap();
+    let marker = q.root.join("envsetup.txt");
+    q.enqueue_script("probe", &format!("#!/usr/bin/env bash\necho \"$SHUNT_SETUP_RAN\" > {}\n", marker.display()));
+    let mut d = q.daemon();
+    wait_until(|| q.names("done").iter().any(|n| n.ends_with(".exit")), 15, "task done");
+    q.stop();
+    let _ = d.wait();
+    assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "yes-i-am-sourced");
+}
+
+#[test]
+fn env_setup_failure_never_blocks_task() {
+    // A snippet whose last command fails returns nonzero but does not
+    // block the task (the wrapper isn't `set -e`).
+    let q = Q::new("envsetup-bad");
+    std::fs::write(q.root.join("env_setup"), "echo setup-partial >&2\nfalse\n").unwrap();
+    let marker = q.root.join("envsetup-ok.txt");
+    q.enqueue_script("probe", &format!("#!/usr/bin/env bash\ntouch {}\n", marker.display()));
+    let mut d = q.daemon();
+    wait_until(|| q.names("done").iter().any(|n| n.ends_with(".exit")), 15, "task done");
+    q.stop();
+    let _ = d.wait();
+    assert!(marker.exists());
+}

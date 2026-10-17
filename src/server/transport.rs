@@ -125,8 +125,27 @@ impl Transport for SshTransport {
         }
         let out = child.wait_with_output().context("wait ssh")?;
         if !out.status.success() {
-            anyhow::bail!("ssh {}@{}:{} rc={}: {}", client.ssh.user, client.ssh.host, client.ssh.port, out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).trim());
+            let rc = out.status.code().unwrap_or(-1);
+            // 255 = ssh itself failed (connect/auth/refused), i.e. a
+            // connectivity failure — count the streak for endpoint-
+            // drift escalation (design.md §4.1, CONN_FAIL_ESCALATE).
+            // Other codes are remote-command failures, not ours.
+            if rc == 255 {
+                let n = crate::server::registry::conn_fail_bump(&client.name);
+                let hint = if n >= crate::server::registry::CONN_FAIL_ESCALATE {
+                    if client.endpoint_rotates {
+                        format!(" [{n} consecutive connect failures — vendor may have reassigned IP/port on restart; check the console and update ssh.host/ssh.port in the row]")
+                    } else {
+                        format!(" [{n} consecutive connect failures — vendor keeps stable endpoints; box is likely off, asleep, or its sshd is down]")
+                    }
+                } else {
+                    String::new()
+                };
+                anyhow::bail!("ssh {}@{}:{} unreachable rc={}: {}{}", client.ssh.user, client.ssh.host, client.ssh.port, rc, String::from_utf8_lossy(&out.stderr).trim(), hint);
+            }
+            anyhow::bail!("ssh {}@{}:{} rc={}: {}", client.ssh.user, client.ssh.host, client.ssh.port, rc, String::from_utf8_lossy(&out.stderr).trim());
         }
+        crate::server::registry::conn_fail_reset(&client.name);
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
@@ -226,7 +245,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn local_client() -> ClientEntry {
-        ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), ssh: SshEndpoint::default(), qroot: "/tmp/qt".into(), deploy_root: "/tmp".into(), facts: BTreeMap::new(), billing: None }
+        ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint::default(), qroot: "/tmp/qt".into(), deploy_root: "/tmp".into(), facts: BTreeMap::new(), billing: None }
     }
 
     #[test]

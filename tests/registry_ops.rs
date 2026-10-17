@@ -8,7 +8,7 @@ use shunt::server::registry::{self, ClientEntry, SshEndpoint};
 use std::collections::BTreeMap;
 
 fn ssh_entry(name: &str) -> ClientEntry {
-    ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: "/q".into(), deploy_root: "/q".into(), facts: BTreeMap::new(), billing: None }
+    ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: "/q".into(), deploy_root: "/q".into(), facts: BTreeMap::new(), billing: None }
 }
 
 #[test]
