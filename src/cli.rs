@@ -817,23 +817,58 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
     Ok(())
 }
 
-/// Load `etc/vendors/<name>.toml` as a client-row seed. Looked up next
-/// to the binary's source tree; falls back to $SHUNT_VENDOR_DIR.
+/// Vendor-template search dirs, first hit wins: `$SHUNT_VENDOR_DIR`,
+/// the registry's own `vendors/` (user-supplied templates live with
+/// the data they seed), then the repo's `etc/vendors/` — a
+/// compile-time path that only works for builds run from the source
+/// tree.
+fn vendor_template_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(d) = std::env::var("SHUNT_VENDOR_DIR") {
+        dirs.push(std::path::PathBuf::from(d));
+    }
+    if let Ok(h) = crate::server::registry::shunt_home() {
+        dirs.push(h.join("vendors"));
+    }
+    dirs.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("etc/vendors"));
+    dirs
+}
+
+/// Load `<name>.toml` from the vendor-template dirs as a client-row
+/// seed. On a miss the error lists the templates that do exist.
 fn load_vendor_template(name: &str) -> Result<crate::server::registry::ClientEntry> {
-    let candidates = [
-        std::env::var("SHUNT_VENDOR_DIR")
-            .ok()
-            .map(std::path::PathBuf::from),
-        Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("etc/vendors")),
-    ];
-    for dir in candidates.into_iter().flatten() {
+    let dirs = vendor_template_dirs();
+    for dir in &dirs {
         let path = dir.join(format!("{name}.toml"));
         if let Ok(text) = std::fs::read_to_string(&path) {
             return toml::from_str(&text)
                 .with_context(|| format!("bad vendor template {}", path.display()));
         }
     }
-    anyhow::bail!("no vendor template named {name} (expected etc/vendors/{name}.toml)")
+    let mut have: Vec<String> = Vec::new();
+    for dir in &dirs {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                if let Some(n) = e.file_name().to_str().and_then(|s| s.strip_suffix(".toml")) {
+                    have.push(n.to_string());
+                }
+            }
+        }
+    }
+    have.sort();
+    have.dedup();
+    let note = if have.is_empty() {
+        format!(
+            "no templates found in any of: {}",
+            dirs.iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        format!("available templates: {}", have.join(", "))
+    };
+    anyhow::bail!("no vendor template named {name}; {note}")
 }
 
 // ---------------------------------------------------------------------------

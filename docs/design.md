@@ -251,7 +251,7 @@ workdir = "/data/RiboWorld"
 
 ### 4.2 Vendor templates
 
-`etc/vendors/<vendor>.toml` ships pre-filled client rows. `shunt client add --template autodl` seeds `ssh.user=root`, `deploy_root=/root/autodl-tmp`, `qroot=/root/autodl-tmp/queue`, leaving only `ssh.host`, `ssh.port`, `ssh.key` (and optionally `billing`) to fill. Templates are defaults for the row file, nothing more — after `add`, the client row stands alone.
+A vendor template is a plain client-row TOML used as a seed for `client add` — no special syntax, FILL markers are just comments. Search order, first hit wins: `$SHUNT_VENDOR_DIR`, then `$SHUNT_HOME/vendors/` (user-supplied templates live with the registry they seed), then the repo's `etc/vendors/` (a compile-time path that only resolves for builds from the source tree). `shunt client add --template autodl` seeds `ssh.user=root`, `deploy_root=/root/autodl-tmp`, `qroot=/root/autodl-tmp/queue`, leaving only `ssh.host`, `ssh.port` (and optionally `ssh.password`, `billing`) to fill — `ssh.key` is generated automatically. Templates are defaults for the row file, nothing more — after `add`, the client row stands alone. A bad name errors out listing every template the search dirs actually contain.
 
 ### 4.4 Box-side SOCKS5 tunnel
 

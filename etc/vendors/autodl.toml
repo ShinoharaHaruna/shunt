@@ -1,6 +1,7 @@
 # Vendor template: AutoDL container instance.
 # `shunt client add <name> --template autodl` seeds a client row from
-# this file; only the ssh.* fields (and optionally billing) need filling.
+# this file; ssh.key is generated automatically (keys/<name>), so only
+# host/port (and optionally ssh.password / billing) need filling.
 # After `add`, the row in ~/.config/shunt/clients/ stands alone.
 
 name = "" # overwritten by `client add <name>`
@@ -11,7 +12,8 @@ deploy_root = "/root/autodl-tmp" # AutoDL's persistent data mount
 host = "" # FILL: e.g. connect.<region>.seetacloud.com
 port = 0 # FILL: the mapped ssh port from the console
 user = "root" # AutoDL containers are always root
-key = "" # FILL: path to the private key for this box
+key = "" # empty = generated at ~/.config/shunt/keys/<name>
+password = "" # optional: enables unattended sshpass ssh-copy-id key deploy
 
 # facts is filled by `shunt client probe`/`bootstrap`; leave empty.
 [facts]
