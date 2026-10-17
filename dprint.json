@@ -1,6 +1,6 @@
 {
   "markdown": {
-    "textWrap": "maintain"
+    "textWrap": "never"
   },
   "includes": [
     "**/*.md",
