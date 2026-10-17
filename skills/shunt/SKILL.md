@@ -14,7 +14,7 @@ Mental model:
 - Execution is at-least-once. Tasks must guard on the artifact they produce so reruns are no-ops.
 - The box powers itself off when the queue drains and `shutdown_on_idle` is armed. Powering on is a human click in the vendor console; shunt never powers a box on.
 - Submitting while the box is off is normal: tasks wait in the server-side spool until the dispatcher can deliver.
-- The client name is user-supplied, never agent-invented — ask the user what to call the box before `client add`. The name lands in the row filename, every `-c <name>` invocation, and the task/daemon logs; a made-up name puts the registry on a handle nobody recognizes. Same for project names.
+- The client name is user-supplied, never agent-invented — ask the user what to call the box before `client add`. The name lands in the row filename, every `-c <name>` invocation, and the task/daemon logs; a made-up name puts the registry on a handle nobody recognizes. Same for project names. If a name turns out wrong, fix it with `shunt client rename <old> <new>` — it moves the row, keypair, mux socket, failure streak, spool refs, and project bindings together. Never hand-mv registry files; the sidecar paths keep pointing at the old name.
 
 ## Setup
 

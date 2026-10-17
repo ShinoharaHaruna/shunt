@@ -178,6 +178,77 @@ pub fn deploy_key(entry: &ClientEntry) -> Result<bool> {
     Ok(st.success())
 }
 
+/// `shunt client rename <old> <new>`: registry names are
+/// load-bearing — the row file, its `name` field, the dedicated
+/// keypair, mux socket, conn-fail streak, tunnel state, queued
+/// spool entries, and every project `[[bind]]` all move together.
+/// Disabled rows rename too (we read the file directly, not
+/// load_client, which would reject them).
+pub fn rename(old: &str, new: &str) -> Result<()> {
+    anyhow::ensure!(old != "localhost" && new != "localhost", "localhost is the reserved loopback name");
+    let home = registry::shunt_home()?;
+    let old_row = home.join("clients").join(format!("{old}.toml"));
+    let new_row = home.join("clients").join(format!("{new}.toml"));
+    let text = std::fs::read_to_string(&old_row).with_context(|| format!("no client row {}", old_row.display()))?;
+    let mut e: ClientEntry = toml::from_str(&text).with_context(|| format!("bad TOML in {}", old_row.display()))?;
+    anyhow::ensure!(!new_row.exists(), "client {new} already exists");
+
+    // Dedicated keypair moves only when ssh.key points at the managed
+    // default path; a user-supplied key path stays untouched.
+    let old_key = registry::client_key_path(old)?;
+    if e.ssh.key == old_key.display().to_string() && old_key.exists() {
+        let nk = registry::client_key_path(new)?;
+        std::fs::rename(&old_key, &nk)?;
+        let (old_pub, new_pub) = (old_key.with_extension("pub"), nk.with_extension("pub"));
+        if old_pub.exists() {
+            std::fs::rename(&old_pub, &new_pub)?;
+        }
+        e.ssh.key = nk.display().to_string();
+    }
+
+    e.name = new.into();
+    let written = registry::save_client(&e)?; // writes clients/<new>.toml
+    std::fs::remove_file(&old_row)?;
+
+    // A live mux master still answers on the old socket path — kill
+    // it; the next exec opens a fresh master under the new name.
+    let old_sock = crate::server::transport::cm_dir()?.join(format!("{old}.sock"));
+    if old_sock.exists() {
+        let _ = std::process::Command::new("ssh").args(["-S", &old_sock.display().to_string(), "-O", "exit", "x"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        let _ = std::fs::remove_file(&old_sock);
+    }
+    // Conn-fail streak and tunnel state follow the identity.
+    for (dir, ext) in [("state", "fail"), ("tunnels", "pid"), ("tunnels", "port"), ("tunnels", "log")] {
+        let (from, to) = (home.join(dir).join(format!("{old}.{ext}")), home.join(dir).join(format!("{new}.{ext}")));
+        if from.exists() {
+            let _ = std::fs::rename(&from, &to);
+        }
+    }
+    // Undelivered spool entries and project [[bind]] refs.
+    for mut se in crate::server::spool::list()? {
+        if se.client == old {
+            se.client = new.into();
+            let body = crate::server::spool::body(&se.id).unwrap_or_default();
+            crate::server::spool::stage(&se, &body)?;
+        }
+    }
+    for pname in registry::list_names("projects")? {
+        let mut pj = registry::load_project(&pname)?;
+        let mut touched = false;
+        for b in &mut pj.bind {
+            if b.client == old {
+                b.client = new.into();
+                touched = true;
+            }
+        }
+        if touched {
+            registry::save_project(&pj)?;
+        }
+    }
+    println!("renamed {old} -> {new} ({})", written.display());
+    Ok(())
+}
+
 /// `shunt client hostkey <name>`: drop the box's host-key entries
 /// from OUR known_hosts (`ssh-keygen -R` scoped to it) and kill the
 /// live mux master, so the next connect re-TOFUs a rebuilt container.

@@ -387,6 +387,9 @@ pub enum ClientAction {
     /// Drop the box's host key from shunt's known_hosts + kill the
     /// mux master (use after a container rebuild changed the key)
     Hostkey { name: String },
+    /// Rename a client: row + name field + keypair + mux socket +
+    /// state + spool refs + project bindings move together
+    Rename { old: String, new: String },
 }
 
 #[derive(Args)]
@@ -509,6 +512,7 @@ pub fn run(cli: Cli) -> Result<()> {
 
         Command::Client(c) => match c.action {
             ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { host: a.host, port: a.port, user: a.user, key: a.key, password: a.password, qroot: a.qroot, deploy_root: a.deploy_root, local: a.local, expire: a.expire, env_setup: a.env_setup, shell: a.shell, endpoint_rotates: a.endpoint_rotates }),
+            ClientAction::Rename { old, new } => crate::server::client_ops::rename(&old, &new),
             ClientAction::Hostkey { name } => {
                 let c = registry::load_client(&name)?;
                 crate::server::client_ops::rekey(&c)?;

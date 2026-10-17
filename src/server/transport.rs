@@ -22,7 +22,9 @@ pub fn shell_quote(arg: &str) -> String {
 /// ssh connection args for ad-hoc uses (tunnel manager): the same
 /// flags exec/scp use, without a remote command appended.
 pub fn ssh_conn_args(client: &ClientEntry) -> Vec<String> {
-    SshTransport::base_args(client)
+    let mut v = SshTransport::base_args(client);
+    v.push(SshTransport::target(client));
+    v
 }
 
 /// Join argv into one remote shell command string.
@@ -108,15 +110,22 @@ impl SshTransport {
             v.push("-i".into());
             v.push(client.ssh.key.clone());
         }
-        v.push(format!("{}@{}", client.ssh.user, client.ssh.host));
         v
+    }
+
+    /// `user@host` — appended by each caller that needs a target
+    /// (exec, tunnel). scp deliberately does not get it here: its
+    /// sources are paths, and a bare `user@host` parses as a local
+    /// file (field-reported bug).
+    pub(crate) fn target(client: &ClientEntry) -> String {
+        format!("{}@{}", client.ssh.user, client.ssh.host)
     }
 }
 
 impl Transport for SshTransport {
     fn exec(&self, client: &ClientEntry, argv: &[String], stdin: Option<&str>) -> Result<String> {
         let mut cmd = Command::new("ssh");
-        cmd.args(Self::base_args(client)).arg(join_argv(argv));
+        cmd.args(Self::base_args(client)).arg(Self::target(client)).arg(join_argv(argv));
         if stdin.is_some() {
             cmd.stdin(Stdio::piped());
         } else {
@@ -165,10 +174,12 @@ impl Transport for SshTransport {
         // scp shares the ssh flags — including the ControlMaster mux,
         // so bulk copies ride the same single connection (design.md
         // §4.1). -P for port (scp) vs -p (ssh): reuse base_args but
-        // drop its leading `-p PORT` pair.
-        let base = Self::base_args(client);
+        // drop its leading `-p PORT` pair and trailing `user@host`
+        // (scp sources are paths; a bare user@host reads as a local file).
+        // base_args is flags-only now: drop its leading `-p PORT`
+        // (scp spells it -P), then local source + user@host:path.
         let mut args = vec!["-P".into(), client.ssh.port.to_string()];
-        args.extend(base.into_iter().skip(2));
+        args.extend(Self::base_args(client).into_iter().skip(2));
         args.push(local.display().to_string());
         args.push(format!("{}@{}:{}", client.ssh.user, client.ssh.host, remote_path));
         let out = Command::new("scp").args(&args).stdin(Stdio::null()).output().context("spawn scp")?;
