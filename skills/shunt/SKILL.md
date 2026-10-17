@@ -14,6 +14,7 @@ Mental model:
 - Execution is at-least-once. Tasks must guard on the artifact they produce so reruns are no-ops.
 - The box powers itself off when the queue drains and `shutdown_on_idle` is armed. Powering on is a human click in the vendor console; shunt never powers a box on.
 - Submitting while the box is off is normal: tasks wait in the server-side spool until the dispatcher can deliver.
+- The client name is user-supplied, never agent-invented — ask the user what to call the box before `client add`. The name lands in the row filename, every `-c <name>` invocation, and the task/daemon logs; a made-up name puts the registry on a handle nobody recognizes. Same for project names.
 
 ## Setup
 
@@ -25,9 +26,8 @@ All commands below run on the dev machine unless marked client.
 #    ssh.key is filled automatically — ssh needs no manual keygen.
 shunt client add rw-a --template autodl
 #    then edit ~/.config/shunt/clients/rw-a.toml:
-#      ssh.host, ssh.port  (+ ssh.password for unattended key deploy,
-#      and optionally ssh.password (unattended key deploy) /
-#      billing.hourly/currency)
+#      ssh.host, ssh.port (+ ssh.password for unattended key deploy)
+#      expire, env_setup, shell — and optionally billing.hourly/currency
 
 #    `shunt client templates` lists what --template accepts.
 # 2. Bootstrap: deploys the pubkey via sshpass when ssh.password is
