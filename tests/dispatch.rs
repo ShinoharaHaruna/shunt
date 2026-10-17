@@ -76,6 +76,7 @@ fn fixture() -> Result<(PathBuf, ClientEntry)> {
             port: 22,
             user: "root".into(),
             key: String::new(),
+            password: String::new(),
         },
         qroot: "/root/queue".into(),
         deploy_root: "/root".into(),

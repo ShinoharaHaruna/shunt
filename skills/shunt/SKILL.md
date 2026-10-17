@@ -20,12 +20,18 @@ Mental model:
 All commands below run on the dev machine unless marked client.
 
 ```bash
-# 1. Register a box. Vendor template seeds defaults; zero network traffic.
+# 1. Register a box. Vendor template seeds defaults; a dedicated
+#    ed25519 keypair is generated at ~/.config/shunt/keys/rw-a and
+#    ssh.key is filled automatically — ssh needs no manual keygen.
 shunt client add rw-a --template autodl
 #    then edit ~/.config/shunt/clients/rw-a.toml:
-#      ssh.host, ssh.port, ssh.key  (and optionally billing.hourly/currency)
+#      ssh.host, ssh.port  (+ ssh.password for unattended key deploy,
+#      and optionally billing.hourly/currency)
 
-# 2. Bootstrap: probe over raw SSH, scp the binary, remote init + start.
+# 2. Bootstrap: sshpass ssh-copy-id when ssh.password is set (prints
+#    the .pub to install once otherwise), probe over raw SSH, scp the
+#    binary, remote init + start. Host keys are TOFU-accepted into
+#    ~/.config/shunt/known_hosts — no known_hosts maintenance.
 shunt client bootstrap rw-a
 
 # 3. Register a project and bind it to the box.

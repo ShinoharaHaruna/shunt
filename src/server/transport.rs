@@ -83,6 +83,9 @@ pub struct SshTransport;
 
 impl SshTransport {
     fn base_args(client: &ClientEntry) -> Vec<String> {
+        let kh = crate::server::registry::known_hosts_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "/dev/null".into());
         let mut v = vec![
             "-p".into(),
             client.ssh.port.to_string(),
@@ -90,6 +93,13 @@ impl SshTransport {
             "BatchMode=yes".into(),
             "-o".into(),
             format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)),
+            // TOFU on a shunt-scoped file: new host keys are accepted
+            // without prompting, changed ones still fail loudly — and
+            // the user's own ~/.ssh/known_hosts is never touched.
+            "-o".into(),
+            "StrictHostKeyChecking=accept-new".into(),
+            "-o".into(),
+            format!("UserKnownHostsFile={kh}"),
         ];
         if !client.ssh.key.is_empty() {
             v.push("-i".into());
@@ -137,6 +147,9 @@ impl Transport for SshTransport {
 
     fn copy_to(&self, client: &ClientEntry, local: &Path, remote_path: &str) -> Result<()> {
         // scp, matching the ssh flags; -P for port.
+        let kh = crate::server::registry::known_hosts_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "/dev/null".into());
         let mut args = vec![
             "-P".into(),
             client.ssh.port.to_string(),
@@ -144,6 +157,10 @@ impl Transport for SshTransport {
             "BatchMode=yes".into(),
             "-o".into(),
             format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)),
+            "-o".into(),
+            "StrictHostKeyChecking=accept-new".into(),
+            "-o".into(),
+            format!("UserKnownHostsFile={kh}"),
         ];
         if !client.ssh.key.is_empty() {
             args.push("-i".into());

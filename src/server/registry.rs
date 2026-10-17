@@ -33,10 +33,10 @@ pub struct ClientEntry {
     #[serde(default)]
     pub ssh_timeout_s: Option<u64>,
     /// Command this box execs when idle-shutdown fires. Pushed to
-    /// `<qroot>/shutdown_cmd` by `shutdown -c <name> on`; the daemon's
-    /// last-moment resolution uses it before falling back to
-    /// `$SHUTDOWN_CMD` and `/usr/bin/shutdown` (design.md §3.11).
-    /// Point it at `true`/a marker script in test environments.
+    /// `<qroot>/shutdown_cmd` by `shutdown -c <name> on`; precedence
+    /// for the pushed value is `--cmd` flag > this field > the
+    /// `facts.shutdown_cmd` probe guess (design.md §3.11). Point it
+    /// at `true`/a marker script in test environments.
     #[serde(default)]
     pub shutdown_cmd: Option<String>,
     #[serde(default)]
@@ -64,6 +64,13 @@ pub struct SshEndpoint {
     pub user: String,
     #[serde(default)]
     pub key: String,
+    /// Password for the one-time `ssh-copy-id` key deploy
+    /// (`sshpass`). AutoDL boxes default to password auth, so this is
+    /// how `bootstrap` installs the generated key unattended. Empty
+    /// = no password path; deploy must happen via console or a manual
+    /// ssh-copy-id.
+    #[serde(default)]
+    pub password: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +103,18 @@ pub struct ServerConfig {
     pub default_client: Option<String>,
 }
 
+/// Dedicated keypair for a client: `$SHUNT_HOME/keys/<name>`[.pub].
+/// `client add`/`bootstrap` generate it on demand (design.md §4.1).
+pub fn client_key_path(name: &str) -> Result<PathBuf> {
+    Ok(shunt_home()?.join("keys").join(name))
+}
+
+/// shunt-scoped known_hosts: TOFU (accept-new) keeps box keys out of
+/// the user's own ~/.ssh and needs no manual maintenance.
+pub fn known_hosts_path() -> Result<PathBuf> {
+    Ok(shunt_home()?.join("known_hosts"))
+}
+
 /// Registry home: `$SHUNT_HOME` else `~/.config/shunt`.
 pub fn shunt_home() -> Result<PathBuf> {
     if let Ok(h) = std::env::var("SHUNT_HOME") {
@@ -121,8 +140,10 @@ const CLIENT_HEADER: &str = "\
 #   local_bin                          loopback transport: binary to exec (default: running shunt)
 #   timeout_s                          loopback transport: exec timeout seconds
 #   ssh_timeout_s                      ssh transport: ConnectTimeout (default 15)
+#   ssh.password                       sshpass path for one-time key deploy (plaintext — keep registry private)
+#   shutdown_cmd                       poweroff command pushed to <qroot>/shutdown_cmd at arm time
 #   billing.hourly / billing.currency  cost metadata surfaced to the agent
-# Facts (gpu, cores, can_root, ...) fill in via `shunt client probe`.
+# Facts (gpu, cores, can_root, shutdown_cmd guess, ...) fill in via `shunt client probe`.
 ";
 
 fn save_with_header<T: Serialize>(
@@ -291,6 +312,7 @@ mod tests {
                 port: 22,
                 user: "root".into(),
                 key: "/path/to/key".into(),
+                password: String::new(),
             },
             qroot: "/root/autodl-tmp/queue".into(),
             deploy_root: "/root/autodl-tmp".into(),

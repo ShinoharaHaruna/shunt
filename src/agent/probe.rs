@@ -121,6 +121,29 @@ fn can_root() -> Option<bool> {
     Some(ok)
 }
 
+/// Best-guess poweroff command for `facts.shutdown_cmd` (design.md
+/// §8): `systemctl poweroff` when systemd is live, else `shutdown`,
+/// else `poweroff`, else none. Advisory — a container may have the
+/// binary but lack CAP_SYS_BOOT; the row's `shutdown_cmd` overrides.
+fn shutdown_cmd() -> Option<String> {
+    let have = |name: &str| {
+        Command::new("sh")
+            .args(["-c", &format!("command -v {name} >/dev/null 2>&1")])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    if std::path::Path::new("/run/systemd/system").is_dir() && have("systemctl") {
+        Some("systemctl poweroff".into())
+    } else if have("shutdown") {
+        Some("shutdown".into())
+    } else if have("poweroff") {
+        Some("poweroff".into())
+    } else {
+        None
+    }
+}
+
 fn python_version() -> Option<String> {
     // python3 --version prints to stdout on 3.x
     let out = run("python3", &["--version"])?;
@@ -143,5 +166,6 @@ pub fn collect(deploy_root: &str) -> ProbeReport {
         disk_free_gb: disk_free_gb(deploy_root).map(|g| (g * 100.0).round() / 100.0),
         python: python_version(),
         can_root: can_root(),
+        shutdown_cmd: shutdown_cmd(),
     }
 }

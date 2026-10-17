@@ -208,29 +208,33 @@ Both are optional and repeatable (`env`); scanning stops at the first non-commen
 server.toml            # global defaults (poll interval, default client)
 clients/<name>.toml
 projects/<name>.toml
+keys/<name>[.pub]      # dedicated ed25519 keypair per ssh client
+known_hosts            # shunt-scoped TOFU store (never ~/.ssh)
 spool/                 # server-side staging queue
 ```
 
 Registry files are human-editable TOML and safe to keep in git (minus key paths). "Registration" is server-local bookkeeping: `shunt client add` writes the row with zero network traffic. A client never needs to reach the server.
 
+**SSH is fully managed.** `client add`/`bootstrap` generate a dedicated ed25519 keypair at `keys/<name>` and fill `ssh.key` — registration alone makes the row usable. Deploying the public key is the one step that needs existing trust: when `ssh.password` is set, `bootstrap` runs `sshpass ssh-copy-id` unattended; without it, bootstrap prints the `.pub` to install once via the vendor console or a manual `ssh-copy-id`. Host-key checking is TOFU (`StrictHostKeyChecking=accept-new`) against `keys/`-sibling `known_hosts`, so first contact never prompts and the user's own `~/.ssh` stays untouched.
+
 **`localhost` is a pre-registered peer client, not a special case.** The dev machine is a real execution target (light tasks, tests, CPU-only work): it binds in projects, takes submissions, runs the daemon, and answers every wire op exactly like a remote box — the only difference is the transport. `local = true` in a client row selects the loopback transport (exec the local `shunt` binary instead of ssh); `localhost` is simply that transport's conventional reserved name, and `client add <name> --local` can mint more local queues. The first access materializes `clients/localhost.toml` with the defaults (`qroot=$SHUNT_HOME/queue`, `deploy_root=$HOME`), so a fresh install still runs the whole submit → dispatch → execute → finalize path with zero setup — and afterwards the row sits on disk, editable like any other: `local_bin`, `timeout_s` and friends override the loopback transport. The write is best-effort: an unwritable HOME still yields working defaults. `client rm localhost` resets to factory — the row regenerates on next use; a user who truly wants it gone writes `disabled = true` into the row (that file is never auto-rewritten, so the opt-out sticks).
 
 `clients/<name>.toml`:
 
-| field                                         | meaning                                                                                                                       |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `name`                                        | registry key                                                                                                                  |
-| `local`                                       | loopback transport instead of ssh (localhost and any `client add --local` row)                                                |
-| `local_bin`                                   | local transport: binary to exec (default: the running `shunt`)                                                                |
-| `timeout_s`                                   | local transport: exec timeout; on expiry the child is killed                                                                  |
-| `ssh_timeout_s`                               | ssh transport: ConnectTimeout override (default 15)                                                                           |
-| `shutdown_cmd`                                | poweroff command pushed to `<qroot>/shutdown_cmd` at `shutdown on` arm time — point at `true` or a marker script in test envs |
-| `disabled`                                    | opt-out: row stays on disk but is not a usable client (skipped by listings, rejected by load)                                 |
-| `ssh.host`, `ssh.port`, `ssh.user`, `ssh.key` | exec endpoint                                                                                                                 |
-| `qroot`                                       | queue dir on the box                                                                                                          |
-| `deploy_root`                                 | vendor work root (AutoDL: `/root/autodl-tmp`)                                                                                 |
-| `facts`                                       | table filled by `probe`/`bootstrap`: `gpu`, `cuda`, `driver`, `cores`, `mem_gb`, `disk_free_gb`, `python`, `can_root`         |
-| `billing.hourly`, `billing.currency`          | cost metadata surfaced to the agent                                                                                           |
+| field                                                         | meaning                                                                                                                                                    |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`                                                        | registry key                                                                                                                                               |
+| `local`                                                       | loopback transport instead of ssh (localhost and any `client add --local` row)                                                                             |
+| `local_bin`                                                   | local transport: binary to exec (default: the running `shunt`)                                                                                             |
+| `timeout_s`                                                   | local transport: exec timeout; on expiry the child is killed                                                                                               |
+| `ssh_timeout_s`                                               | ssh transport: ConnectTimeout override (default 15)                                                                                                        |
+| `shutdown_cmd`                                                | poweroff command pushed to `<qroot>/shutdown_cmd` at `shutdown on` arm time — point at `true` or a marker script in test envs                              |
+| `disabled`                                                    | opt-out: row stays on disk but is not a usable client (skipped by listings, rejected by load)                                                              |
+| `ssh.host`, `ssh.port`, `ssh.user`, `ssh.key`, `ssh.password` | exec endpoint; `password` feeds the one-time `sshpass ssh-copy-id` key deploy                                                                              |
+| `qroot`                                                       | queue dir on the box                                                                                                                                       |
+| `deploy_root`                                                 | vendor work root (AutoDL: `/root/autodl-tmp`)                                                                                                              |
+| `facts`                                                       | table filled by `probe`/`bootstrap`: `gpu`, `cuda`, `driver`, `cores`, `mem_gb`, `disk_free_gb`, `python`, `can_root`, `shutdown_cmd` (poweroff candidate) |
+| `billing.hourly`, `billing.currency`                          | cost metadata surfaced to the agent                                                                                                                        |
 
 `projects/<name>.toml`:
 
@@ -320,6 +324,7 @@ All argv crossing SSH is shell-quoted with `%q`-equivalent escaping on the serve
 - `mem_gb`: `memory.max` / `memory.limit_in_bytes`; `free` only as fallback, same caveat. Never size off host-reported values.
 - `disk_free_gb`: `df` on `deploy_root`.
 - `python`: `python3 --version`.
+- `shutdown_cmd`: best-guess poweroff command — `systemctl poweroff` when `/run/systemd/system` exists and `systemctl` is found, else `shutdown`, else `poweroff`, else absent. Advisory: a container may carry the binary yet lack CAP_SYS_BOOT; the row's `shutdown_cmd` field and `--cmd` flag still override it at arm time.
 
 Facts are advisory registry data for agent-side matching, not enforced constraints.
 

@@ -633,7 +633,12 @@ pub fn run(cli: Cli) -> Result<()> {
                         // daemon's first-choice poweroff command.
                         let client = registry::load_client(name)?;
                         let g = grace_s.map(|n| n.to_string());
-                        let c = cmd.as_deref().or(client.shutdown_cmd.as_deref());
+                        // --cmd > row.shutdown_cmd > facts.shutdown_cmd
+                        // (the probe guess from §8 detection).
+                        let c = cmd
+                            .as_deref()
+                            .or(client.shutdown_cmd.as_deref())
+                            .or_else(|| client.facts.get("shutdown_cmd").and_then(|v| v.as_str()));
                         let mut tail: Vec<String> = vec!["shutdown".into(), "on".into()];
                         if let Some(g) = &g {
                             tail.push(g.clone());
@@ -695,6 +700,7 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
                 port: 22,
                 user: "root".into(),
                 key: String::new(),
+                password: String::new(),
             },
             qroot: String::new(),
             deploy_root: String::new(),
@@ -737,6 +743,11 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
     }
     if opts.local {
         entry.local = true;
+    }
+    // Dedicated keypair per client (design.md §4.1): generated at
+    // registration so the row is usable immediately.
+    if !entry.local {
+        crate::server::client_ops::ensure_key(&mut entry)?;
     }
     let p = crate::server::registry::save_client(&entry)?;
     println!("wrote {}", p.display());

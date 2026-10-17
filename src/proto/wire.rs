@@ -111,4 +111,9 @@ pub struct ProbeReport {
     /// things" (install packages, poweroff). Advisory registry fact.
     #[serde(default)]
     pub can_root: Option<bool>,
+    /// Best-guess poweroff command (systemctl/shutdown/poweroff by
+    /// availability). Advisory — feeds `shutdown on` arm when the
+    /// row's `shutdown_cmd` field is unset.
+    #[serde(default)]
+    pub shutdown_cmd: Option<String>,
 }
