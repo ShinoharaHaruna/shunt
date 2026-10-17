@@ -32,6 +32,13 @@ pub struct ClientEntry {
     /// SSH transport: connect timeout override in seconds (default 10).
     #[serde(default)]
     pub ssh_timeout_s: Option<u64>,
+    /// Command this box execs when idle-shutdown fires. Pushed to
+    /// `<qroot>/shutdown_cmd` by `shutdown -c <name> on`; the daemon's
+    /// last-moment resolution uses it before falling back to
+    /// `$SHUTDOWN_CMD` and `/usr/bin/shutdown` (design.md §3.11).
+    /// Point it at `true`/a marker script in test environments.
+    #[serde(default)]
+    pub shutdown_cmd: Option<String>,
     #[serde(default)]
     pub ssh: SshEndpoint,
     /// Queue dir on the box.
@@ -175,6 +182,7 @@ fn localhost_default() -> Result<ClientEntry> {
         local_bin: None,
         timeout_s: None,
         ssh_timeout_s: None,
+        shutdown_cmd: None,
         ssh: SshEndpoint::default(),
         qroot: shunt_home()?.join("queue").display().to_string(),
         deploy_root: home,
@@ -277,6 +285,7 @@ mod tests {
             local_bin: None,
             timeout_s: None,
             ssh_timeout_s: None,
+            shutdown_cmd: None,
             ssh: SshEndpoint {
                 host: "example.invalid".into(),
                 port: 22,

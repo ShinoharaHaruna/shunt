@@ -88,8 +88,11 @@ shunt kill -c rw-a exp1          # TERM the running task's pgid, then KILL
 shunt workers -c rw-a            # resolved pool size + source
 shunt workers -c rw-a 4          # resize; takes effect next poll
 shunt shutdown -c rw-a on 120    # arm idle poweroff, 120 s grace
-shunt shutdown -c rw-a status
+shunt shutdown -c rw-a status    # armed state + the command that would fire
 shunt shutdown -c rw-a off
+# the row's `shutdown_cmd` is pushed at every arm; `shutdown on --cmd`
+# overrides it once. Set `shutdown_cmd = "true"` (or a marker script)
+# on test rows so a copied registry can never hit a real poweroff.
 shunt spool ls                   # staged-but-undelivered submissions
 shunt dispatch --once            # one spool sweep (tests, manual push)
 ```

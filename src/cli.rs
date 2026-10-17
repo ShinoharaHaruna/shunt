@@ -236,6 +236,10 @@ pub enum ShutdownAction {
     On {
         /// Countdown seconds (default 60)
         grace_s: Option<u64>,
+        /// Poweroff command to record as <qroot>/shutdown_cmd before
+        /// arming (placeholder commands like `true` for test envs)
+        #[arg(long)]
+        cmd: Option<String>,
     },
     /// Disarm
     Off,
@@ -623,14 +627,24 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Shutdown(a) => {
             if let Some(name) = &a.client {
                 return match a.action {
-                    ShutdownAction::On { grace_s } => {
+                    ShutdownAction::On { grace_s, cmd } => {
+                        // Push the row's shutdown_cmd unless --cmd
+                        // overrides it; the file it writes is the
+                        // daemon's first-choice poweroff command.
+                        let client = registry::load_client(name)?;
                         let g = grace_s.map(|n| n.to_string());
-                        let mut tail: Vec<&str> = vec!["shutdown", "on"];
+                        let c = cmd.as_deref().or(client.shutdown_cmd.as_deref());
+                        let mut tail: Vec<String> = vec!["shutdown".into(), "on".into()];
                         if let Some(g) = &g {
-                            tail.push(g);
+                            tail.push(g.clone());
                         }
-                        tail.push("--json");
-                        remote(name, &tail, None)
+                        if let Some(c) = c {
+                            tail.push("--cmd".into());
+                            tail.push(c.to_string());
+                        }
+                        tail.push("--json".into());
+                        let refs: Vec<&str> = tail.iter().map(String::as_str).collect();
+                        remote(name, &refs, None)
                     }
                     ShutdownAction::Off => remote(name, &["shutdown", "off", "--json"], None),
                     ShutdownAction::Status => remote(name, &["shutdown", "status", "--json"], None),
@@ -675,6 +689,7 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
             local_bin: None,
             timeout_s: None,
             ssh_timeout_s: None,
+            shutdown_cmd: None,
             ssh: SshEndpoint {
                 host: String::new(),
                 port: 22,
@@ -992,17 +1007,21 @@ fn agent_shutdown(a: &ShutdownArgs) -> Result<()> {
         })
     };
     match a.action {
-        ShutdownAction::On { grace_s } => {
+        ShutdownAction::On { grace_s, ref cmd } => {
+            if let Some(c) = cmd {
+                crate::agent::shutdown::set_cmd(&root, c.as_str())?;
+            }
             crate::agent::shutdown::arm(&root, grace_s)?;
             let st = crate::agent::shutdown::status(&root)?;
             if a.json {
-                let mut f = serde_json::json!({"armed": true, "grace_s": st.grace_s});
+                let mut f =
+                    serde_json::json!({"armed": true, "grace_s": st.grace_s, "cmd": st.cmd});
                 f.as_object_mut()
                     .unwrap()
                     .extend(counts().as_object().unwrap().clone());
                 jprint(jobj(jfields(f)));
             } else {
-                println!("armed: shutdown_on_idle set; poweroff fires {}s after pending/ AND running/ are both empty", st.grace_s);
+                println!("armed: shutdown_on_idle set; poweroff fires {}s after pending/ AND running/ are both empty (cmd: {})", st.grace_s, st.cmd);
             }
         }
         ShutdownAction::Off => {
@@ -1022,13 +1041,17 @@ fn agent_shutdown(a: &ShutdownArgs) -> Result<()> {
         ShutdownAction::Status => {
             let st = crate::agent::shutdown::status(&root)?;
             if a.json {
-                let mut f = serde_json::json!({"armed": st.armed, "grace_s": st.grace_s});
+                let mut f =
+                    serde_json::json!({"armed": st.armed, "grace_s": st.grace_s, "cmd": st.cmd});
                 f.as_object_mut()
                     .unwrap()
                     .extend(counts().as_object().unwrap().clone());
                 jprint(jobj(jfields(f)));
             } else if st.armed {
-                println!("shutdown_on_idle: ARMED (grace {}s)", st.grace_s);
+                println!(
+                    "shutdown_on_idle: ARMED (grace {}s, cmd: {})",
+                    st.grace_s, st.cmd
+                );
             } else {
                 println!("shutdown_on_idle: off   (arm: shunt shutdown on [grace_s])");
             }

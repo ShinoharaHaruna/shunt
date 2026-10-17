@@ -8,6 +8,13 @@ use std::path::Path;
 
 use crate::agent::queue::{self, DEFAULT_GRACE_S};
 
+/// Write `<qroot>/shutdown_cmd` — the poweroff command the daemon
+/// execs at countdown end (design.md §3.11 resolution chain).
+pub fn set_cmd(root: &Path, cmd: &str) -> Result<()> {
+    std::fs::write(root.join("shutdown_cmd"), format!("{cmd}\n"))?;
+    Ok(())
+}
+
 /// Arm idle-shutdown, optionally overriding the grace file.
 pub fn arm(root: &Path, grace_s: Option<u64>) -> Result<()> {
     std::fs::write(root.join("shutdown_on_idle"), b"")?;
@@ -39,11 +46,12 @@ pub fn grace(root: &Path) -> u64 {
     }
 }
 
-/// Armed state + grace for `shutdown status`.
+/// Armed state + grace + the command that would fire.
 pub fn status(root: &Path) -> Result<crate::proto::wire::ShutdownState> {
     Ok(crate::proto::wire::ShutdownState {
         armed: root.join("shutdown_on_idle").exists(),
         grace_s: grace(root),
+        cmd: resolve_cmd(root),
     })
 }
 

@@ -88,6 +88,10 @@ pub struct ExitRecord {
 pub struct ShutdownState {
     pub armed: bool,
     pub grace_s: u64,
+    /// Command that would fire (file > $SHUTDOWN_CMD > default), so an
+    /// agent can see the real poweroff path before arming.
+    #[serde(default)]
+    pub cmd: String,
 }
 
 /// `shunt probe --json` machine facts (design.md §8). Fields are

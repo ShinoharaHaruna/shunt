@@ -150,7 +150,7 @@ When `shutdown_on_idle` exists AND `running/` is empty AND `pending/` is empty:
 1. Arm: log `IDLE-SHUTDOWN ARMED` with the grace length.
 2. Count down `shutdown_grace_s` (file > default 60) one second at a time. Each second, re-check: flag removed → cancel; a new `pending/*.sh` → cancel; `STOP` sentinel → cancel. Log every 10 s and for the final 5 s.
 3. After the countdown, re-check once more: flag still present, pending still empty, running set empty. Only then exec the shutdown command.
-4. Resolve the command at the last moment: `shutdown_cmd` file > `$SHUTDOWN_CMD` env > `/usr/bin/shutdown`. Last-moment resolution is what lets a test redirect the command to a marker — a test must never reach the real `/usr/bin/shutdown`.
+4. Resolve the command at the last moment: `shutdown_cmd` file > `$SHUTDOWN_CMD` env > `/usr/bin/shutdown`. Last-moment resolution is what lets a test redirect the command to a marker — a test must never reach the real `/usr/bin/shutdown`. The `shutdown_cmd` file is written by `shunt shutdown on --cmd`, and the server-side arm (`shutdown -c <name> on`) pushes the client row's `shutdown_cmd` field every time, so the registry stays the source of truth — copy a row to a test env and its placeholder command comes along. `shutdown status` reports the resolved command before anything fires.
 
 Residual race, documented in the bash source and retained: an enqueue in flight during the final instant (or an scp mid-copy) can still lose to poweroff. The last re-check narrows but cannot close it.
 
@@ -217,19 +217,20 @@ Registry files are human-editable TOML and safe to keep in git (minus key paths)
 
 `clients/<name>.toml`:
 
-| field                                         | meaning                                                                                                               |
-| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `name`                                        | registry key                                                                                                          |
-| `local`                                       | loopback transport instead of ssh (localhost and any `client add --local` row)                                        |
-| `local_bin`                                   | local transport: binary to exec (default: the running `shunt`)                                                        |
-| `timeout_s`                                   | local transport: exec timeout; on expiry the child is killed                                                          |
-| `ssh_timeout_s`                               | ssh transport: ConnectTimeout override (default 15)                                                                   |
-| `disabled`                                    | opt-out: row stays on disk but is not a usable client (skipped by listings, rejected by load)                         |
-| `ssh.host`, `ssh.port`, `ssh.user`, `ssh.key` | exec endpoint                                                                                                         |
-| `qroot`                                       | queue dir on the box                                                                                                  |
-| `deploy_root`                                 | vendor work root (AutoDL: `/root/autodl-tmp`)                                                                         |
-| `facts`                                       | table filled by `probe`/`bootstrap`: `gpu`, `cuda`, `driver`, `cores`, `mem_gb`, `disk_free_gb`, `python`, `can_root` |
-| `billing.hourly`, `billing.currency`          | cost metadata surfaced to the agent                                                                                   |
+| field                                         | meaning                                                                                                                       |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `name`                                        | registry key                                                                                                                  |
+| `local`                                       | loopback transport instead of ssh (localhost and any `client add --local` row)                                                |
+| `local_bin`                                   | local transport: binary to exec (default: the running `shunt`)                                                                |
+| `timeout_s`                                   | local transport: exec timeout; on expiry the child is killed                                                                  |
+| `ssh_timeout_s`                               | ssh transport: ConnectTimeout override (default 15)                                                                           |
+| `shutdown_cmd`                                | poweroff command pushed to `<qroot>/shutdown_cmd` at `shutdown on` arm time — point at `true` or a marker script in test envs |
+| `disabled`                                    | opt-out: row stays on disk but is not a usable client (skipped by listings, rejected by load)                                 |
+| `ssh.host`, `ssh.port`, `ssh.user`, `ssh.key` | exec endpoint                                                                                                                 |
+| `qroot`                                       | queue dir on the box                                                                                                          |
+| `deploy_root`                                 | vendor work root (AutoDL: `/root/autodl-tmp`)                                                                                 |
+| `facts`                                       | table filled by `probe`/`bootstrap`: `gpu`, `cuda`, `driver`, `cores`, `mem_gb`, `disk_free_gb`, `python`, `can_root`         |
+| `billing.hourly`, `billing.currency`          | cost metadata surfaced to the agent                                                                                           |
 
 `projects/<name>.toml`:
 
