@@ -12,7 +12,10 @@ use clap::{Args, Parser, Subcommand};
     name = "shunt",
     version,
     about = "Experiment queue for hourly-billed GPU boxes: FIFO + at-least-once, per-task process groups, idle auto-shutdown",
-    long_about = "shunt runs on both sides. Server subcommands (submit, client, project,\nspool, dispatch) operate the registry and staging queue on the dev\nmachine. Client subcommands (daemon, enqueue, status, ...) operate\nthe local queue and double as the SSH wire protocol via --json."
+    // Single-line long_about: clap wraps help text to $COLUMNS at
+    // render time; baked \n would render the same breaks at every
+    // terminal width and fight clap's own wrap.
+    long_about = "shunt runs on both sides. Server subcommands (submit, client, project, spool, dispatch) operate the registry and staging queue on the dev machine. Client subcommands (daemon, enqueue, status, ...) operate the local queue and double as the SSH wire protocol via --json."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -675,6 +678,20 @@ fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result
         },
     };
     entry.name = name.into();
+    // Adding a row for the built-in name materializes the loopback
+    // defaults instead of a broken ssh-shaped row (registry §4.1).
+    if name == "localhost" {
+        entry.local = true;
+        if entry.qroot.is_empty() {
+            entry.qroot = crate::server::registry::shunt_home()?
+                .join("queue")
+                .display()
+                .to_string();
+        }
+        if entry.deploy_root.is_empty() {
+            entry.deploy_root = std::env::var("HOME").unwrap_or_default();
+        }
+    }
     if let Some(v) = opts.host {
         entry.ssh.host = v;
     }
