@@ -161,3 +161,17 @@ fn bad_spool_entry_quarantined_good_delivers() -> Result<()> {
     std::fs::remove_dir_all(&home).ok();
     Ok(())
 }
+
+/// A dash-leading slug must be refused at submit time: on the wire it
+/// parses as a flag, the remote rejects it, and the spool entry would
+/// retry forever.
+#[test]
+fn submit_rejects_dash_slug() -> Result<()> {
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (_home, _c) = fixture("dashslug")?;
+    let e = spool::submit("fake-a", None, None, Some("-rf"), None, &["echo".into(), "hi".into()]);
+    assert!(e.is_err(), "dash slug spooled");
+    assert!(e.unwrap_err().to_string().contains("bad slug"));
+    assert!(spool::list()?.is_empty(), "rejected submit must not stage");
+    Ok(())
+}

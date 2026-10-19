@@ -11,6 +11,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const SEQ_INIT: u32 = 99;
 pub const PRIORITY_BAND_MAX: u32 = 99;
 
+/// Last usable sequence: names are fixed at 4 digits (`{n:04}`) and
+/// claim order is byte sort — a 5-digit `10000_x` would sort ahead
+/// of `9999_*` and break FIFO (design.md §3.2).
+pub const SEQ_MAX: u32 = 9999;
+
 /// Liveness identity string for cmdline matching (design.md §3.4).
 /// Single-sourced here; the bash version duplicated it in three
 /// scripts, which was a logged defect.
@@ -69,7 +74,26 @@ pub fn next_seq(root: &Path) -> Result<u32> {
     }
     let seq_path = root.join(".seq");
     let cur: u32 = std::fs::read_to_string(&seq_path).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(SEQ_INIT);
-    let next = cur + 1;
+    // The new entry must sort BEHIND every pending one (claim order
+    // is byte sort on the 4-digit prefix). Normally `cur + 1`
+    // qualifies; when the counter wrapped at SEQ_MAX (or pending
+    // holds a higher hand-placed number) continue just past the
+    // highest pending sequence instead. True exhaustion — pending
+    // already holding 9999 — errors out rather than minting a
+    // 5-digit name that would leapfrog the queue.
+    let hi_pending = pending_list(root)?.iter().filter_map(|n| n.get(..4)?.parse::<u32>().ok()).filter(|&n| n > PRIORITY_BAND_MAX).max().unwrap_or(SEQ_INIT);
+    let next = if cur >= SEQ_MAX {
+        // Counter wrapped the 4-digit ceiling: restart just past
+        // the highest pending number.
+        hi_pending + 1
+    } else {
+        // A hand-placed pending entry above `cur` still forces the
+        // new task to sort behind it.
+        (cur + 1).max(hi_pending + 1)
+    };
+    if next > SEQ_MAX {
+        anyhow::bail!("sequence space exhausted: pending already holds {SEQ_MAX}; let tasks drain or cancel some");
+    }
     std::fs::write(&seq_path, format!("{next}\n"))?;
     lock.unlock()?;
     Ok(next)

@@ -712,3 +712,75 @@ fn term_with_pending_leaves_flag_armed_loudly() {
     assert!(!fired.exists(), "must not power off with pending work");
     assert_eq!(q.tasks("pending").len(), 1, "queued task survives for the next daemon");
 }
+
+#[test]
+fn seq_wrap_stays_four_digits_and_fifo() {
+    // design.md §3.2: the 4-digit namespace tops out at 9999. After
+    // the counter passes it, allocation continues just past the
+    // highest pending number so claim order stays FIFO — a 5-digit
+    // `10000_x` would sort ahead of `9999_*` and leapfrog the queue.
+    let q = Q::new("seqwrap");
+    std::fs::write(q.root.join("pending/0500_held.sh"), sleep_task()).unwrap();
+    std::fs::write(q.root.join(".seq"), "9999\n").unwrap();
+    let name = q.enqueue_script("n1", &sleep_task());
+    assert_eq!(name, "0501_n1", "wrapped seq must continue past the pending max, got {name}");
+    // pending reaching 9999 leaves no name that sorts last: refuse.
+    std::fs::write(q.root.join("pending/9999_top.sh"), sleep_task()).unwrap();
+    let f = q.root.join("task-n2.sh.src");
+    std::fs::write(&f, sleep_task()).unwrap();
+    let err = q.run_err(&["enqueue", f.to_str().unwrap(), "n2"]);
+    assert!(err.contains("sequence"), "got {err}");
+    assert_eq!(q.tasks("pending").len(), 3, "failed enqueue must not install a task");
+    assert!(q.names("pending").iter().all(|n| n.split('_').next().unwrap().len() == 4), "5-digit name leaked: {:?}", q.names("pending"));
+}
+
+#[test]
+fn prio_rejects_outside_band() {
+    // design.md §3.2: prio moves a task INTO 0000-0099; renumbering
+    // into the normal sequence would collide with .seq allocation.
+    let q = Q::new("prioband");
+    q.enqueue_script("one", &sleep_task());
+    let err = q.run_err(&["prio", "one", "123"]);
+    assert!(err.contains("priority band"), "got {err}");
+    let err = q.run_err(&["prio", "one", "100"]);
+    assert!(err.contains("priority band"), "got {err}");
+    // band edges still work
+    let out = q.run_ok(&["prio", "one", "0"]);
+    assert!(out.contains("0000_one"), "got {out}");
+    let out = q.run_ok(&["prio", "one", "99"]);
+    assert!(out.contains("0099_one"), "got {out}");
+}
+
+#[test]
+fn slug_leading_dash_rejected() {
+    // A `-`-leading slug parses as a flag in the remote argv; entries
+    // rejected there stay in spool retrying forever (design.md §3.3).
+    let q = Q::new("dashslug");
+    let f = q.root.join("task.sh.src");
+    std::fs::write(&f, sleep_task()).unwrap();
+    // Wire form (`--` before the positionals, as dispatch sends it):
+    // the check must produce a clean nonzero exit, not a queued task.
+    let o = Command::new(bin())
+        .args(["enqueue", "--root"])
+        .arg(&q.root)
+        .args(["--json", "--", "-", "-rf"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write;
+            c.stdin.as_mut().unwrap().write_all(b"#!/usr/bin/env bash\nexit 0\n")?;
+            c.wait_with_output()
+        })
+        .unwrap();
+    assert!(!o.status.success(), "dash slug must not enqueue");
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).expect("rejection is still wire JSON");
+    assert_eq!(v["ok"], false);
+    // mktask renders without a queue; --slug=-x reaches our check.
+    let o = Command::new(bin()).args(["mktask", "--slug=-rf", "--root"]).arg(&q.root).args(["--", "echo", "hi"]).output().unwrap();
+    assert!(!o.status.success(), "mktask must reject dash slug: {}", String::from_utf8_lossy(&o.stdout));
+    // `new` shares it.
+    let o = Command::new(bin()).args(["new", "--slug=-rf", "--root"]).arg(&q.root).args(["--", "echo", "hi"]).output().unwrap();
+    assert!(!o.status.success(), "new must reject dash slug");
+    assert!(q.names("pending").is_empty(), "rejected slugs must not enqueue: {:?}", q.names("pending"));
+}

@@ -193,7 +193,8 @@ pub struct PatternArgs {
 pub struct PrioArgs {
     /// Pending task name or unique substring
     pub pattern: String,
-    /// New sequence number, normally inside the 0000-0099 band
+    /// New sequence number; must be inside the 0000-0099 priority
+    /// band (renumbering into the normal sequence would corrupt it)
     pub n: u32,
     /// Forward to a client over SSH (server side)
     #[arg(short, long)]
@@ -544,7 +545,9 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Logs(a) => {
             if let Some(name) = &a.client {
                 let pat = a.pattern.clone().unwrap_or_default();
-                return remote(name, &["logs", &pat], None);
+                // `--` keeps a dash-leading pattern positional on
+                // the remote instead of parsing as a flag.
+                return remote(name, &["logs", "--", &pat], None);
             }
             if rootless(&a.root) {
                 return print_subhelp("logs");
@@ -778,15 +781,15 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Mktask(a) => {
             // mktask can render for real: it is pure output.
             let meta = crate::proto::task::TaskMeta { slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard, workdir: None, env: Default::default(), cmd: a.cmd };
-            if meta.slug.is_empty() {
-                anyhow::bail!("empty slug after sanitization");
+            if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
+                anyhow::bail!("bad slug '{}': {p}", a.slug);
             }
             print!("{}", crate::agent::exec::render_task(&meta));
             Ok(())
         }
         Command::Cancel(a) => {
             if let Some(name) = &a.client {
-                return remote(name, &["cancel", &a.pattern, "--json"], None);
+                return remote(name, &["cancel", "--json", "--", &a.pattern], None);
             }
             if rootless(&a.root) {
                 return print_subhelp("cancel");
@@ -796,7 +799,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Prio(a) => {
             if let Some(name) = &a.client {
                 let n = a.n.to_string();
-                return remote(name, &["prio", &a.pattern, &n, "--json"], None);
+                return remote(name, &["prio", "--json", "--", &a.pattern, &n], None);
             }
             if rootless(&a.root) {
                 return print_subhelp("prio");
@@ -805,7 +808,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Command::Kill(a) => {
             if let Some(name) = &a.client {
-                return remote(name, &["kill", &a.pattern, "--json"], None);
+                return remote(name, &["kill", "--json", "--", &a.pattern], None);
             }
             if rootless(&a.root) {
                 return print_subhelp("kill");
@@ -1058,8 +1061,8 @@ fn agent_enqueue(a: &EnqueueArgs) -> Result<()> {
             None => std::path::Path::new(&a.file).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
         };
         let slug = crate::proto::task::sanitize_slug(&raw_slug);
-        if slug.is_empty() {
-            anyhow::bail!("empty slug after sanitization");
+        if let Some(p) = crate::proto::task::slug_problem(&slug) {
+            anyhow::bail!("bad slug '{raw_slug}': {p}");
         }
         crate::agent::queue::enqueue(&root, &slug, &body)
     };
@@ -1086,8 +1089,8 @@ fn agent_new(a: &NewArgs) -> Result<()> {
             anyhow::bail!("missing command after --");
         }
         let meta = crate::proto::task::TaskMeta { slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard.clone(), workdir: None, env: Default::default(), cmd: a.cmd.clone() };
-        if meta.slug.is_empty() {
-            anyhow::bail!("empty slug after sanitization");
+        if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
+            anyhow::bail!("bad slug '{}': {p}", a.slug);
         }
         let body = crate::agent::exec::render_task(&meta);
         let root = agent_root(&a.root)?;
@@ -1130,6 +1133,9 @@ fn agent_cancel(a: &PatternArgs) -> Result<()> {
 
 fn agent_prio(a: &PrioArgs) -> Result<()> {
     let root = agent_root(&a.root)?;
+    if a.n > crate::agent::queue::PRIORITY_BAND_MAX {
+        return jfail(a.json, &format!("prio number must be inside the 0000-{:04} priority band, got {:04}", crate::agent::queue::PRIORITY_BAND_MAX, a.n));
+    }
     let m = crate::agent::queue::match_pending(&root, &a.pattern)?;
     if m.len() != 1 {
         return jfail(a.json, &format!("need exactly one pending match, got {}:\n  {}", m.len(), m.join("\n  ")));

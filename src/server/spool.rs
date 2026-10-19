@@ -102,8 +102,8 @@ pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slu
 
     let raw_slug = slug.map(str::to_string).unwrap_or_else(|| if let Some(path) = file { std::path::Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "task".into()) } else { std::path::Path::new(&cmd[0]).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "task".into()) });
     let slug = sanitize_slug(&raw_slug);
-    if slug.is_empty() {
-        bail!("empty slug after sanitization");
+    if let Some(p) = crate::proto::task::slug_problem(&slug) {
+        bail!("bad slug '{raw_slug}': {p}");
     }
 
     let dir = spool_dir()?;

@@ -43,11 +43,17 @@ pub fn shunt_bin(client: &ClientEntry) -> String {
 /// own queue root. Tail args already carrying `--root` are respected.
 pub fn wire_argv(client: &ClientEntry, tail: &[&str]) -> Vec<String> {
     let mut v = vec![shunt_bin(client)];
-    v.extend(tail.iter().map(|s| s.to_string()));
-    if !tail.contains(&"--root") {
-        v.push("--root".into());
-        v.push(client.qroot.clone());
+    if tail.contains(&"--root") {
+        v.extend(tail.iter().map(|s| s.to_string()));
+        return v;
     }
+    // `--root` must precede a `--` separator or it lands in the
+    // positional tail itself and the qroot flag is lost.
+    let i = tail.iter().position(|s| *s == "--").unwrap_or(tail.len());
+    v.extend(tail[..i].iter().map(|s| s.to_string()));
+    v.push("--root".into());
+    v.push(client.qroot.clone());
+    v.extend(tail[i..].iter().map(|s| s.to_string()));
     v
 }
 

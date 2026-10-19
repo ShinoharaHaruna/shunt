@@ -37,9 +37,24 @@ pub struct SpoolEntry {
 }
 
 /// Sanitize a slug to `[A-Za-z0-9_.-]`; anything else becomes `-`.
-/// An empty result is an error upstream (design.md §3.3).
+/// An empty or dash-leading result is an error upstream
+/// (design.md §3.3); check with [`slug_problem`].
 pub fn sanitize_slug(raw: &str) -> String {
     raw.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') { c } else { '-' }).collect()
+}
+
+/// Why a sanitized slug is unusable (`None` = fine). A leading `-`
+/// is rejected: the slug rides in remote argv (`shunt enqueue -
+/// <slug>`) where a dash parses as a flag, and a pushed entry that
+/// the remote rejects stays in spool and retries forever.
+pub fn slug_problem(slug: &str) -> Option<&'static str> {
+    if slug.is_empty() {
+        Some("empty after sanitization")
+    } else if slug.starts_with('-') {
+        Some("starts with '-': would parse as a flag in remote argv")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -60,5 +75,16 @@ mod tests {
     #[test]
     fn slug_empty_stays_empty() {
         assert_eq!(sanitize_slug(""), "");
+    }
+
+    #[test]
+    fn slug_problem_flags_dash_and_empty() {
+        use super::slug_problem;
+        assert!(slug_problem("-rf").is_some());
+        assert!(slug_problem("--help").is_some());
+        assert!(slug_problem("").is_some());
+        assert!(slug_problem("train-v2").is_none());
+        // non-ASCII slugs sanitize to leading dashes -> rejected too
+        assert!(slug_problem(&sanitize_slug("实验A")).is_some());
     }
 }
