@@ -131,11 +131,37 @@ fn requeue_orphans(root: &Path) -> Result<()> {
                 let _ = std::fs::rename(&old_log, interrupted.with_extension("log"));
             }
             let _ = std::fs::remove_file(dir.join("pid"));
-            let _ = std::fs::rename(&dir, pending.join(format!("0000_requeued_{clean}")));
+            if let Err(e) = std::fs::rename(&dir, pending.join(format!("0000_requeued_{clean}"))) {
+                // A failed rename must not strand the entry in
+                // running/ forever: no pid file means kill/status
+                // can't see it. Quarantine to failed/ so the task
+                // stays accounted for (design.md §3.6).
+                dlog(root, "requeue_failed", ev(json!({"task": base, "error": e.to_string()})));
+                if let Err(e2) = exec::quarantine(root, "running", &base, &format!("orphan requeue failed: {e}")) {
+                    dlog(
+                        root,
+                        "ghost_entry",
+                        ev(json!({"task": base, "error": e2.to_string(),
+                           "warning": "entry stuck in running/ with no pid file; kill cannot reach it"})),
+                    );
+                }
+                continue;
+            }
         } else {
             // Legacy flat entry: stays a flat `NNNN_slug.sh` in
             // pending so the listing keeps seeing it.
-            let _ = std::fs::rename(running.join(format!("{base}.sh")), pending.join(format!("0000_requeued_{clean}.sh")));
+            if let Err(e) = std::fs::rename(running.join(format!("{base}.sh")), pending.join(format!("0000_requeued_{clean}.sh"))) {
+                dlog(root, "requeue_failed", ev(json!({"task": base, "error": e.to_string()})));
+                if let Err(e2) = exec::quarantine(root, "running", &base, &format!("orphan requeue failed: {e}")) {
+                    dlog(
+                        root,
+                        "ghost_entry",
+                        ev(json!({"task": base, "error": e2.to_string(),
+                           "warning": "entry stuck in running/ with no pid file; kill cannot reach it"})),
+                    );
+                }
+                continue;
+            }
             let old_log = running.join(format!("{base}.sh.log"));
             if old_log.exists() {
                 let _ = std::fs::rename(&old_log, failed.join(format!("{clean}.interrupted.{}.log", queue::unix_now())));
@@ -244,7 +270,21 @@ impl Daemon {
         }
         for (pid, base, rc) in done {
             self.runpids.remove(&pid);
-            let _ = exec::finalize(&self.root, &base, rc);
+            if let Err(e) = exec::finalize(&self.root, &base, rc) {
+                // A failed rename leaves a pid-less entry in
+                // running/ — invisible to kill and status forever.
+                // Quarantine to failed/ so it stays accounted for;
+                // if even that fails, scream in the log.
+                dlog(&self.root, "finalize_failed", ev(json!({"task": base, "rc": rc, "error": format!("{e:#}")})));
+                if let Err(e2) = exec::quarantine(&self.root, "running", &base, &format!("finalize failed (rc {rc}): {e:#}")) {
+                    dlog(
+                        &self.root,
+                        "ghost_entry",
+                        ev(json!({"task": base, "error": e2.to_string(),
+                           "warning": "entry stuck in running/ with no pid file; kill cannot reach it"})),
+                    );
+                }
+            }
             dlog(
                 &self.root,
                 "finish",

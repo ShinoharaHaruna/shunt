@@ -111,16 +111,18 @@ Any `running/` entry present at daemon start means a previous daemon died mid-fl
 4. Its `log` moves to `failed/<clean>.interrupted.<unixts>.log`.
 5. Remove the `pid` file.
 
+If the requeue `mv` fails (the `0000_requeued_<clean>` target already exists, permissions, full disk) the entry must not be left in `running/`: it is moved to `failed/` with a `shunt_error` note and a `requeue_failed` event is logged, because a `running/` entry with no `pid` file is invisible to `shunt kill` and would ghost forever. If even the quarantine move fails, a `ghost_entry` WARNING is logged.
+
 Then sweep legacy strays: any remaining `running/*.pid` files are removed; any remaining `running/*.log` moves to `failed/<name>.interrupted.<unixts>.log`. Dir entries carry their sidecars inside, so they cannot stray.
 
 ### 3.7 Dispatch
 
 - Read desired workers (see §3.8). While `len(running) < workers`:
-  1. Pick the first `pending/` entry by `LC_ALL=C` name sort.
-  2. Claim by `mv pending/<f> running/<f>`. If the `mv` fails (a concurrent `shunt cancel` won the race), skip to next iteration — the `mv` result is the recheck, not a prior existence test.
+  1. Snapshot the `pending/` list once per cycle (`LC_ALL=C` name sort) and walk it — re-reading the head after every failed claim would hot-spin on the same unclaimable entry for the whole poll.
+  2. Claim by `mv pending/<f> running/<f>`. If the entry vanished mid-race (a concurrent `shunt cancel` won), skip to the next candidate — the `mv` result is the recheck, not a prior existence test. If the `mv` fails but the entry still exists (a name collision with a leftover `running/<f>` dir, permissions), the entry can never be claimed: log `claim_failed` and quarantine it to `failed/` with a `shunt_error` note rather than letting it poison every future poll's head-of-queue.
   3. `chmod +x`, write log header (`=== task`, `=== start <iso>`).
   4. Spawn via `process_group(0)` (setsid) so the task's pgid equals its leader pid; stdout/stderr append to `running/<name>/log`.
-  5. Write the leader pid to `running/<name>/pid`, record pgid → entry name.
+  5. Write the leader pid **and its /proc start_time** to `running/<name>/pid` (`<pgid> <start_time>`), record pgid → entry name. The start_time pin lets `shunt kill` distinguish the leader it spawned from a recycled pid (§3.9a below).
 - Each task runs in its own process group precisely so `shunt kill` and the daemon's signal forwarding can address the whole task tree by pgid without touching the daemon or sibling tasks.
 
 ### 3.8 Worker pool resolution
@@ -141,6 +143,11 @@ Re-read every cycle. Order: `workers` file > `QUEUE_WORKERS` env (set at daemon 
   - `mv` the whole entry dir to `done/` if rc 0, else `failed/` (legacy flat entries are normalized into the dir layout here);
   - write `<rc>` to `<name>/exit`;
   - log `finish <base> rc=<rc> -> done|failed`.
+- If the finalize `mv` fails, the entry is quarantined to `failed/` with a `shunt_error` note and a `finalize_failed` event is logged — same rule as §3.6: no pid-less ghosts in `running/`. If quarantine itself fails, a `ghost_entry` WARNING is logged.
+
+### 3.9a Signaling discipline (`shunt kill`)
+
+Every signal goes to a pgid read from an entry's `pid` file — never a name match — and is gated on an identity check: `/proc/<pgid>/stat` must show the leader pid alive, self-grouped (`pgrp == pgid`), and with the start_time recorded at spawn. A pgid that fails the check means the task was already reaped and the OS recycled the pid; `kill` then reports `gone` and sends nothing, because signaling a recycled pgid hits a stranger's process group. The check is re-run before the KILL escalation too — the group may have died on TERM and been recycled during the grace window. A `kill` result is honest about what happened: `signaled` (TERM, optionally escalated) vs `gone` (nothing sent; the entry will finalize on the daemon's next reap).
 
 ### 3.10 STOP sentinel
 
@@ -327,7 +334,7 @@ Transport is chosen per client row: `ssh` (default) execs over SSH; `local` (`lo
 | `status`                                 | —                              | `{daemon:{alive,pid}, workers:{value,source}, running[], pending[], done_recent[], failed_recent[], stop, shutdown:{armed,grace_s}}` |
 | `cancel`                                 | pattern                        | `{ok, name}` or error on 0/multi match                                                                                               |
 | `prio`                                   | pattern, n                     | `{ok, from, to}`; error if target exists                                                                                             |
-| `kill`                                   | pattern                        | `{ok, pgid, escalated}`                                                                                                              |
+| `kill`                                   | pattern                        | `{ok, pgid, escalated}`; `{ok, gone}` when the recorded leader is dead/recycled — nothing was signaled                               |
 | `workers get` / `workers set N`          | —                              | `{workers, source}`                                                                                                                  |
 | `shutdown on [grace]` / `off` / `status` | —                              | `{armed, grace_s, running, pending}`                                                                                                 |
 | `probe`                                  | —                              | `{gpu, driver, cuda, cores, mem_gb, disk_free_gb, python}`                                                                           |
@@ -411,8 +418,9 @@ Integration tests spawn a real daemon against a tmp `SHUNT_ROOT`; the poll inter
 - dispatch order (filename sort; `0000_` band ahead of `0100_`)
 - enqueue concurrency vs dispatch (`.seq` under lock; no dup numbers)
 - `cancel` 0/1/many match; `prio` renumber incl. target-exists refusal
-- `kill`: TERM → 10 s → KILL, rc recorded, lands in `failed/`
-- orphan requeue: dead daemon leaves `running/` entries → restart → front-of-queue, prefix strip, interrupted logs swept
+- `kill`: TERM → 10 s → KILL, rc recorded, lands in `failed/`; recycled-pgid refusal (leader start_time mismatch → `gone`, foreign group untouched)
+- orphan requeue: dead daemon leaves `running/` entries → restart → front-of-queue, prefix strip, interrupted logs swept; requeue-target collision quarantines to `failed/`
+- claim/finalize failure paths: unclaimable pending entry quarantined (no dispatch spin); failed finalize quarantines instead of ghosting in `running/`
 - live-pgid orphan: WARNING + requeue anyway
 - STOP drain: running task finalizes, then daemon exits; armed shutdown_on_idle is honored (grace countdown → fire) instead of orphaned
 - idle-shutdown: arm → fire (marker), cancel via flag rm / new pending / STOP, grace default, final re-check

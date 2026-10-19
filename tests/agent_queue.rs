@@ -814,29 +814,43 @@ fn unclaimable_pending_entry_quarantined_not_spun() {
 }
 
 #[test]
-fn unclaimable_pending_entry_quarantined_not_spun() {
-    // A pending entry that cannot be renamed into running/ (name
-    // collision with a leftover non-empty running dir) must be
-    // quarantined and skipped — spinning on it would wedge the whole
-    // dispatch loop and starve the tasks behind it.
-    let q = Q::new("claimfail");
-    let ran = q.root.join("next-ran");
+fn failed_finalize_quarantines_instead_of_ghosting() {
+    // If the finalize rename fails (here: done/ is unwritable), the
+    // entry must not be left pid-less in running/ where kill and
+    // status can't see it — it is moved to failed/ with a note.
+    let q = Q::new("finfail");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(q.root.join("done"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let marker = q.root.join("task-ran");
+    q.enqueue_script("victim", &marker_task(&marker));
     let mut d = q.daemon();
-    // Wait for the startup sweep to finish, then create the
-    // collision — requeue_orphans only runs at daemon start.
-    wait_until(|| q.dlog().contains("workers_now"), 10, "daemon startup done");
-    std::fs::create_dir_all(q.root.join("running/0050_stuck")).unwrap();
-    std::fs::write(q.root.join("running/0050_stuck/task.sh"), sleep_task()).unwrap();
-    std::fs::create_dir_all(q.root.join("pending/0050_stuck")).unwrap();
-    std::fs::write(q.root.join("pending/0050_stuck/task.sh"), sleep_task()).unwrap();
-    q.enqueue_script("next", &marker_task(&ran));
-    wait_until(|| ran.exists(), 15, "task behind the stuck head still dispatched");
-    wait_until(|| q.dlog().contains("claim_failed"), 10, "claim_failed event logged");
-    assert!(q.tasks("pending").is_empty(), "stuck entry must leave pending/: {:?}", q.tasks("pending"));
-    let quarantined = q.root.join("failed/0050_stuck");
-    assert!(quarantined.is_dir(), "stuck entry quarantined to failed/");
-    assert!(quarantined.join("shunt_error").exists(), "quarantine note written");
-    assert!(q.daemon_pid().is_some(), "daemon still alive");
+    wait_until(|| q.dlog().contains("finalize_failed"), 15, "finalize_failed event logged");
+    wait_until(|| q.tasks("running").is_empty(), 10, "no ghost left in running/");
+    let failed = q.names("failed");
+    let entry = failed.iter().find(|n| n.contains("victim")).unwrap_or_else(|| panic!("quarantined entry in failed/: {failed:?}"));
+    assert!(q.root.join("failed").join(entry).join("shunt_error").exists(), "quarantine note written: {entry}");
+    q.stop();
+    let _ = d.wait();
+    let _ = std::fs::set_permissions(q.root.join("done"), std::fs::Permissions::from_mode(0o755));
+}
+
+#[test]
+fn orphan_requeue_collision_quarantines() {
+    // A running/ leftover whose requeue target in pending/ is already
+    // taken must land in failed/ with a note, not stay an invisible
+    // ghost (design.md §3.6 rename-failure path).
+    let q = Q::new("orphcoll");
+    std::fs::create_dir_all(q.root.join("running/0200_orph")).unwrap();
+    std::fs::write(q.root.join("running/0200_orph/task.sh"), sleep_task()).unwrap();
+    // Conflicting non-empty dir at the requeue target name — the
+    // requeue target is 0000_requeued_<basename> = 0000_requeued_0200_orph.
+    std::fs::create_dir_all(q.root.join("pending/0000_requeued_0200_orph")).unwrap();
+    std::fs::write(q.root.join("pending/0000_requeued_0200_orph/task.sh"), sleep_task()).unwrap();
+    let mut d = q.daemon();
+    wait_until(|| q.dlog().contains("requeue_failed"), 10, "requeue_failed event logged");
+    assert!(q.tasks("running").is_empty() || !q.tasks("running").iter().any(|n| n == "0200_orph"), "orphan quarantined out of running/: {:?}", q.tasks("running"));
+    assert!(q.root.join("failed/0200_orph").is_dir(), "orphan landed in failed/");
+    assert!(q.root.join("failed/0200_orph/shunt_error").exists());
     q.stop();
     let _ = d.wait();
 }
