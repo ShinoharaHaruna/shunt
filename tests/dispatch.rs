@@ -55,8 +55,11 @@ impl Transport for FakeTransport {
     }
 }
 
-fn fixture() -> Result<(PathBuf, ClientEntry)> {
-    let home = std::env::temp_dir().join(format!("shunt-itest-{}", std::process::id()));
+/// Serialize tests that mutate process env (SHUNT_HOME).
+static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+fn fixture(tag: &str) -> Result<(PathBuf, ClientEntry)> {
+    let home = std::env::temp_dir().join(format!("shunt-itest-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&home)?;
     std::env::set_var("SHUNT_HOME", &home);
     let client = ClientEntry { name: "fake-a".into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: "/root/queue".into(), deploy_root: "/root".into(), facts: BTreeMap::new(), billing: None };
@@ -70,7 +73,8 @@ fn entry(id: &str, slug: &str) -> SpoolEntry {
 
 #[test]
 fn dispatch_ack_deletes_failure_retains() -> Result<()> {
-    let (home, _client) = fixture()?;
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, _client) = fixture("ack")?;
     let pending = home.join("pending");
     std::fs::create_dir_all(&pending)?;
 
@@ -92,6 +96,36 @@ fn dispatch_ack_deletes_failure_retains() -> Result<()> {
     let t_down = FakeTransport { pending: pending.clone(), fail_enqueue: false, down: true, calls: Mutex::new(Vec::new()) };
     assert_eq!(dispatch::sweep_with(&t_down)?, 0);
     assert_eq!(spool::list()?.len(), 2);
+
+    std::fs::remove_dir_all(&home).ok();
+    Ok(())
+}
+
+/// A corrupt spool file must not wedge the sweep: it is quarantined
+/// to `*.bad` and the healthy entry still dispatches.
+#[test]
+fn bad_spool_entry_quarantined_good_delivers() -> Result<()> {
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, _client) = fixture("bad")?;
+    let pending = home.join("pending");
+    std::fs::create_dir_all(&pending)?;
+
+    // One corrupt entry (garbage JSON) and one healthy entry.
+    let dir = spool::spool_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("zzz_corrupt.json"), "{not json")?;
+    std::fs::write(dir.join("zzz_corrupt.sh"), "echo corrupt\n")?;
+    spool::stage(&entry("t1", "a-t1"), "echo t1\n")?;
+
+    let t = FakeTransport { pending: pending.clone(), fail_enqueue: false, down: false, calls: Mutex::new(Vec::new()) };
+    assert_eq!(dispatch::sweep_with(&t)?, 1);
+
+    // Healthy entry delivered and gone; corrupt files renamed aside.
+    assert!(spool::list()?.is_empty());
+    assert_eq!(std::fs::read_to_string(pending.join("0100_task/task.sh"))?, "echo t1\n");
+    assert!(dir.join("zzz_corrupt.json.bad").exists());
+    assert!(dir.join("zzz_corrupt.sh.bad").exists());
+    assert!(!dir.join("zzz_corrupt.json").exists());
 
     std::fs::remove_dir_all(&home).ok();
     Ok(())

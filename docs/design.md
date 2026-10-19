@@ -291,6 +291,8 @@ Two-phase dispatch, at-least-once end to end:
 3. Only on a clean ack (exit 0 + JSON `{ok: true, name: ...}`) does the server remove the spool entry. Any failure leaves it for the next poll.
 4. Dupes from a retry after a lost ack are absorbed client-side by the task's guard; the server task id is embedded in the slug (`<slug>-<shortid>`) so a re-pushed task is recognizable in logs.
 
+Fault isolation: a spool file that fails to read or parse is quarantined — `<id>.json`/`<id>.sh` renamed to `*.bad` — with a stderr warning, and the sweep continues; one corrupt entry must never stop delivery for any client. A client row that fails to load skips only that client's entries. In the looping dispatcher a failed sweep is logged and retried next poll; `dispatch --once` still propagates errors.
+
 Auto-heal: if the box answers but the daemon liveness check fails, the dispatcher runs `shunt start --root <qroot>` once before pushing (this is the "power on → claims work" link; box-side autostart remains optional sugar). If the transport fails entirely (box off), the entry stays in spool.
 
 ## 5. Wire protocol

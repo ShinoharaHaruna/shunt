@@ -104,14 +104,20 @@ fn sweep_inner(forced: Option<&dyn Transport>) -> Result<usize> {
     Ok(pushed)
 }
 
-/// Run the dispatch loop. `once` = single sweep, for tests.
+/// Run the dispatch loop. `once` = single sweep, for tests — errors
+/// propagate there. In the looping form a failed sweep (e.g. spool
+/// dir unreadable this poll) is logged and retried next cycle; the
+/// dispatcher must never exit on a transient fault.
 pub fn run(once: bool) -> Result<()> {
     let cfg = registry::load_server_config()?;
     let interval = cfg.poll_interval_s.unwrap_or(DEFAULT_POLL_S);
     loop {
-        sweep()?;
         if once {
+            sweep()?;
             return Ok(());
+        }
+        if let Err(e) = sweep() {
+            eprintln!("dispatch: sweep failed, retrying next poll: {e:#}");
         }
         std::thread::sleep(std::time::Duration::from_secs(interval));
     }

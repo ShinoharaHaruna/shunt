@@ -134,21 +134,34 @@ pub fn stage(entry: &SpoolEntry, body: &str) -> Result<()> {
 }
 
 /// Oldest-first listing of staged entries (submitted_at sorts
-/// lexically; id breaks ties).
+/// lexically; id breaks ties). Per-entry fault tolerance: an entry
+/// that fails to read or parse is quarantined — the `.json` (and its
+/// `.sh` sibling) renamed to `*.bad` — with a stderr warning, so one
+/// corrupt file can never wedge the whole sweep (design.md §4.5).
 pub fn list() -> Result<Vec<SpoolEntry>> {
     let dir = spool_dir()?;
     let mut out = Vec::new();
     match fs::read_dir(&dir) {
         Ok(rd) => {
             for ent in rd {
-                let name = ent?.file_name().to_string_lossy().into_owned();
-                if let Some(id) = name.strip_suffix(".json") {
-                    if id.starts_with('.') {
+                let ent = match ent {
+                    Ok(e) => e,
+                    Err(e) => {
+                        eprintln!("spool: cannot stat entry in {}: {e}", dir.display());
                         continue;
                     }
-                    let text = fs::read_to_string(dir.join(&name)).with_context(|| format!("cannot read spool entry {name}"))?;
-                    let e: SpoolEntry = serde_json::from_str(&text).with_context(|| format!("bad JSON in spool/{name}"))?;
-                    out.push(e);
+                };
+                let name = ent.file_name().to_string_lossy().into_owned();
+                let Some(id) = name.strip_suffix(".json") else { continue };
+                if id.starts_with('.') {
+                    continue;
+                }
+                match read_entry(&dir, &name) {
+                    Ok(e) => out.push(e),
+                    Err(e) => {
+                        eprintln!("spool: {e:#}; quarantining {id}.* as .bad");
+                        quarantine(&dir, id);
+                    }
                 }
             }
         }
@@ -157,6 +170,25 @@ pub fn list() -> Result<Vec<SpoolEntry>> {
     }
     out.sort_by(|a, b| a.submitted_at.cmp(&b.submitted_at).then(a.id.cmp(&b.id)));
     Ok(out)
+}
+
+fn read_entry(dir: &std::path::Path, name: &str) -> Result<SpoolEntry> {
+    let text = fs::read_to_string(dir.join(name)).with_context(|| format!("cannot read spool entry {name}"))?;
+    serde_json::from_str(&text).with_context(|| format!("bad JSON in spool/{name}"))
+}
+
+/// Rename a bad entry's files to `*.bad` so listings skip them but
+/// they stay on disk for inspection. Best-effort: a failed rename
+/// warns and the entry is still skipped this round.
+fn quarantine(dir: &std::path::Path, id: &str) {
+    for ext in ["json", "sh"] {
+        let from = dir.join(format!("{id}.{ext}"));
+        match fs::rename(&from, dir.join(format!("{id}.{ext}.bad"))) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!("spool: cannot quarantine {}: {e}", from.display()),
+        }
+    }
 }
 
 /// Read the staged task body for an entry.
