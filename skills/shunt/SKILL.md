@@ -142,7 +142,7 @@ The client queue is a directory of tracks under `qroot`:
 | `done/`    | `NNNN_<slug>/` with `task.sh` + `log` + `exit` (contains `0`)          |
 | `failed/`  | `NNNN_<slug>/` with `task.sh` + `log` + `exit` (nonzero rc, or killed) |
 
-Queue-level runner env lives in the `env` dotenv file under `qroot` (`WORKDIR`, `PATH_PREPEND`, `TASK_THREADS`, plus passthrough keys); per-task `# shunt-env:` directives override it.
+Queue-level runner env lives in the `env` dotenv file under `qroot` (`WORKDIR`, `PATH_PREPEND`, `TASK_THREADS`, plus passthrough keys); per-task `# shunt-env:` directives override it. Values are literal `KEY=value` — no quote stripping or `$` expansion, so write `K=a b`, never `K="a b"` (the quotes would become part of the value).
 
 `status --json` returns `{protocol:1, daemon:{alive,pid}, workers:{value,source}, running[], pending[], done_recent[], failed_recent[], stop, shutdown:{armed,grace_s}}`. On the server side, `status --all --json` merges per-client rows and adds `facts` and `billing` from the registry.
 

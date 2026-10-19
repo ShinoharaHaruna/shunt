@@ -18,6 +18,13 @@ const PROXY_VARS: [&str; 6] = ["ALL_PROXY", "all_proxy", "http_proxy", "https_pr
 /// (`KEY=value` per line, `#` comments and blanks skipped). The
 /// runner consumes `WORKDIR`, `PATH_PREPEND` and `TASK_THREADS` itself
 /// and injects any remaining keys into the task's environment.
+///
+/// Values are LITERAL: there is no shell between the file and
+/// `Command::env`, so no quote stripping, no `$VAR` expansion, no
+/// escape processing. `K="a b"` yields a value that *contains* the
+/// quote characters; write `K=a b` instead — embedded spaces are
+/// preserved verbatim. The first `=` splits key/value; surrounding
+/// whitespace is trimmed.
 pub fn read_env_file(root: &Path) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     if let Ok(text) = std::fs::read_to_string(root.join("env")) {
@@ -329,4 +336,26 @@ pub fn render_task(meta: &crate::proto::task::TaskMeta) -> String {
 /// Convenience: the path of a running task's log (`running/<name>/log`).
 pub fn running_log(root: &Path, base: &str) -> PathBuf {
     queue::piece_file(root, "running", base, "log")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_env_file;
+
+    /// The env file is literal KEY=value (design.md §3.12): spaces
+    /// survive verbatim but quotes are never stripped — `K="a b"`
+    /// keeps the quote characters as part of the value.
+    #[test]
+    fn env_values_are_literal_no_quote_semantics() {
+        let root = std::env::temp_dir().join(format!("shunt-envtest-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("env"), "# comment\n\nFOO=a b c\nQUOTED=\"a b\"\nSQUOTED='x'\nSPACED =  padded  \nNOEQ\n").unwrap();
+        let m = read_env_file(&root);
+        assert_eq!(m["FOO"], "a b c");
+        assert_eq!(m["QUOTED"], "\"a b\"");
+        assert_eq!(m["SQUOTED"], "'x'");
+        assert_eq!(m["SPACED"], "padded");
+        assert!(!m.contains_key("NOEQ"));
+        std::fs::remove_dir_all(&root).ok();
+    }
 }
