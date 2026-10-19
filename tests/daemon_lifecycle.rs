@@ -26,36 +26,67 @@ fn stop_drains_then_exits() {
 
 #[test]
 fn orphan_requeue_front_of_queue() {
+    // A leftover running/ entry is crafted by hand instead of racing a
+    // live task against `kill -9`: two flakes lived there — the task
+    // could finalize before the -9 landed (no orphan, no interrupted
+    // log), and with the default workers=3 the requeued orphan and the
+    // normal task are claimed in the same dispatch cycle, so their
+    // order-file writes interleave nondeterministically. workers=1
+    // serializes the check this test actually makes: requeue sorts
+    // ahead of the normal sequence.
     let q = Q::new("orphan");
+    std::fs::write(q.root.join("workers"), "1\n").unwrap();
     let m_orphan = q.root.join("orphan-ran");
     let m_normal = q.root.join("normal-ran");
     let order = q.root.join("order.txt");
     let mk = |tag: &str, marker: &Path| format!("#!/usr/bin/env bash\necho {tag} >> {}\ntouch {}\n", order.display(), marker.display());
-    q.enqueue_script("old", &mk("old", &m_orphan));
-    {
-        let mut d = q.daemon();
-        wait_until(|| !q.tasks("running").is_empty(), 10, "task running");
-        // kill the daemon hard mid-flight: task left in running/
-        let pid = q.daemon_pid().unwrap();
-        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
-        let _ = d.wait();
-        wait_until(|| !q.tasks("running").is_empty(), 5, "running stays");
-    }
-    // queue a normal task before restart
+    // dead-daemon leftover: dir entry with task.sh + an in-flight log
+    std::fs::create_dir_all(q.root.join("running/0001_old")).unwrap();
+    std::fs::write(q.root.join("running/0001_old/task.sh"), mk("old", &m_orphan)).unwrap();
+    std::fs::write(q.root.join("running/0001_old/log"), b"partial\n").unwrap();
+    std::fs::write(q.root.join("running/0001_old/pid"), b"99999999\n").unwrap();
     q.enqueue_script("new", &mk("new", &m_normal));
     let mut d = q.daemon();
     wait_until(|| m_orphan.exists() && m_normal.exists(), 15, "both tasks ran");
     let lines: Vec<String> = std::fs::read_to_string(&order).unwrap().lines().map(|s| s.to_string()).collect();
-    // at-least-once: the unguarded orphan may have already run once
-    // before the daemon died, so "old" can appear twice; the point is
-    // the requeued copy precedes the normally-numbered task.
-    assert_eq!(lines.first().map(String::as_str), Some("old"), "{lines:?}");
-    assert_eq!(lines.last().map(String::as_str), Some("new"), "{lines:?}");
+    // the requeued copy lands at 0000_requeued_* and runs first
+    assert_eq!(lines, ["old", "new"], "{lines:?}");
     // interrupted log swept to failed/
     assert!(q.names("failed").iter().any(|n| n.contains("interrupted")), "expected interrupted log in failed/: {:?}", q.names("failed"));
     // double-requeue must not stack prefixes
     let requeued = q.names("done");
     assert!(!requeued.iter().any(|n| n.contains("requeued_0000_requeued")), "prefix stacked: {requeued:?}");
+    q.stop();
+    let _ = d.wait();
+}
+
+#[test]
+fn leader_exit_lingering_pgid_finalize_deferred() {
+    // The leader exits while a grandchild keeps the process group
+    // alive: finalize must wait out the group (bounded) so the
+    // sidecars stay addressable and kill can still reach it.
+    let q = Q::new("linger");
+    q.enqueue_script("linger", "#!/usr/bin/env bash\nsleep 1 &\nexit 0\n");
+    let mut d = q.daemon();
+    wait_until(|| !q.tasks("running").is_empty(), 10, "task running");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(q.tasks("running").iter().any(|n| n.contains("linger")), "entry must not finalize while the pgid is still alive: {:?}", q.tasks("running"));
+    wait_until(|| q.exits("done").iter().any(|(n, _)| n.contains("linger")), 15, "finalized once the group drained");
+    assert!(!q.dlog().contains("finalize_lingering_pgid"), "grace must not fire for a drained group");
+    q.stop();
+    let _ = d.wait();
+}
+
+#[test]
+fn lingering_pgid_grace_expiry_warns_and_finalizes() {
+    // Grandchild outlives the drain grace: finalize anyway, but leave
+    // a WARNING naming the residual pgid for audit.
+    let q = Q::new("linger2");
+    q.enqueue_script("linger", "#!/usr/bin/env bash\nsleep 30 &\nexit 0\n");
+    let mut c = Command::new(common::bin());
+    let mut d = c.args(["daemon", "--root"]).arg(&q.root).env("POLL", "0.1").env("SHUNT_PGID_DRAIN_S", "1").env("SHUNT_STATE", q.root.join("boxstate")).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().expect("spawn daemon");
+    wait_until(|| q.dlog().contains("finalize_lingering_pgid"), 15, "lingering-pgid WARNING logged");
+    assert!(q.exits("done").iter().any(|(n, _)| n.contains("linger")), "entry finalized despite live grandchild");
     q.stop();
     let _ = d.wait();
 }

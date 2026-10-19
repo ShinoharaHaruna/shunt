@@ -23,6 +23,21 @@ const SIGNALS: [i32; 3] = [signal_hook::consts::SIGTERM, signal_hook::consts::SI
 /// discipline as `shunt kill`.
 const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
 
+/// After the leader exits, finalize waits this long for the rest of
+/// the process group to drain before moving the entry anyway
+/// (design.md §3.9). `SHUNT_PGID_DRAIN_S` overrides (tests).
+fn pgid_drain_grace() -> Duration {
+    std::env::var("SHUNT_PGID_DRAIN_S").ok().and_then(|s| s.parse::<u64>().ok()).map(Duration::from_secs).unwrap_or(Duration::from_secs(5))
+}
+
+/// Leader reaped but the process group may still hold grandchildren:
+/// finalize is deferred until the pgid drains or the bounded grace
+/// expires (design.md §3.9).
+struct Exited {
+    rc: i32,
+    deadline: std::time::Instant,
+}
+
 /// One in-flight task: the spawned leader plus its wall-clock budget
 /// bookkeeping. `deadline` is spawn-time + `# shunt:timeout_s=`;
 /// `timed_out` is set once the budget is exceeded so reap can mark
@@ -35,6 +50,8 @@ struct RunHandle {
     deadline: Option<std::time::Instant>,
     timed_out: Option<u64>,
     kill_at: Option<std::time::Instant>,
+    /// Set once the leader is reaped; finalize waits out the pgid.
+    exited: Option<Exited>,
 }
 
 struct Daemon {
@@ -55,6 +72,11 @@ impl Daemon {
     fn enforce_timeouts(&mut self) {
         let now = std::time::Instant::now();
         for (pid, h) in self.runpids.iter_mut() {
+            // Leader already reaped: the deadline check must not mark
+            // a finished task timed_out while its pgid drains.
+            if h.exited.is_some() {
+                continue;
+            }
             if h.timed_out.is_none() {
                 let expired = h.deadline.is_some_and(|d| now >= d);
                 if !expired {
@@ -83,17 +105,52 @@ impl Daemon {
     }
 
     fn reap(&mut self) {
+        let grace = pgid_drain_grace();
+        let now = std::time::Instant::now();
         let mut done = Vec::new();
         for (pid, h) in self.runpids.iter_mut() {
-            match h.child.try_wait() {
-                Ok(Some(status)) => done.push((*pid, h.base.clone(), exec::status_rc(&status))),
-                Ok(None) => {}
-                Err(_) => done.push((*pid, h.base.clone(), 1)),
+            match &mut h.exited {
+                // Leader already reaped: finalize once the process
+                // group is fully gone, or once the bounded grace
+                // expires — surviving grandchildren keep writing to
+                // the moved log but the entry can wait no longer.
+                Some(ex) => {
+                    if !exec::pgid_alive(*pid) {
+                        done.push((*pid, h.base.clone(), ex.rc, false));
+                    } else if now >= ex.deadline {
+                        done.push((*pid, h.base.clone(), ex.rc, true));
+                    }
+                }
+                None => match h.child.try_wait() {
+                    Ok(Some(status)) => {
+                        if exec::pgid_alive(*pid) {
+                            h.exited = Some(Exited { rc: exec::status_rc(&status), deadline: now + grace });
+                        } else {
+                            done.push((*pid, h.base.clone(), exec::status_rc(&status), false));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        if exec::pgid_alive(*pid) {
+                            h.exited = Some(Exited { rc: 1, deadline: now + grace });
+                        } else {
+                            done.push((*pid, h.base.clone(), 1, false));
+                        }
+                    }
+                },
             }
         }
-        for (pid, base, rc) in done {
+        for (pid, base, rc, lingering) in done {
             let timed_out = self.runpids.get(&pid).and_then(|h| h.timed_out);
             self.runpids.remove(&pid);
+            if lingering {
+                dlog(
+                    &self.root,
+                    "finalize_lingering_pgid",
+                    ev(json!({"task": base, "pgid": pid,
+                       "warning": "task leader exited but the process group is still alive; finalized anyway — survivors keep writing to the moved log and are unreachable by kill"})),
+                );
+            }
             if let Err(e) = exec::finalize(&self.root, &base, rc, timed_out) {
                 // A failed rename leaves a pid-less entry in
                 // running/ — invisible to kill and status forever.
@@ -173,7 +230,7 @@ impl Daemon {
                     };
                     let _ = std::fs::write(queue::piece_file(&self.root, "running", &next, "pid"), line);
                     let deadline = timeout_s.map(|s| std::time::Instant::now() + Duration::from_secs(s));
-                    self.runpids.insert(pid, RunHandle { base: next.clone(), child, timeout_s, deadline, timed_out: None, kill_at: None });
+                    self.runpids.insert(pid, RunHandle { base: next.clone(), child, timeout_s, deadline, timed_out: None, kill_at: None, exited: None });
                     dlog(
                         &self.root,
                         "start",
@@ -225,8 +282,7 @@ impl Daemon {
                 eprintln!("[shunt] WARNING: exiting on signal; shutdown_on_idle still armed with pending tasks — restart the daemon to honor it");
             } else {
                 dlog(&self.root, "signal_honors_shutdown", Map::new());
-                let base = self.got_signal.load(Ordering::SeqCst);
-                maybe_shutdown(&self.root, self.runpids.is_empty(), false, Some((&self.got_signal, base)));
+                maybe_shutdown(&self.root, self.runpids.is_empty(), false, Some(&self.got_signal));
             }
         }
         let _ = std::fs::remove_file(self.root.join("daemon.pid"));
@@ -279,7 +335,7 @@ pub fn run(root: &Path) -> Result<()> {
                 // and a new pending entry still can.
                 if d.root.join("shutdown_on_idle").exists() && !shutdown::pending_nonempty(&d.root) {
                     dlog(&d.root, "stop_drain_honors_shutdown", Map::new());
-                    maybe_shutdown(&d.root, true, true, None);
+                    maybe_shutdown(&d.root, true, true, Some(&d.got_signal));
                 }
                 let _ = std::fs::remove_file(d.root.join("daemon.pid"));
                 shutdown::deregister_qroot(&d.root);
@@ -289,7 +345,7 @@ pub fn run(root: &Path) -> Result<()> {
         } else {
             d.dispatch();
             if d.root.join("shutdown_on_idle").exists() && d.runpids.is_empty() && !shutdown::pending_nonempty(&d.root) {
-                maybe_shutdown(&d.root, true, false, None);
+                maybe_shutdown(&d.root, true, false, Some(&d.got_signal));
             }
         }
         std::thread::sleep(poll);

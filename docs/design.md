@@ -47,21 +47,21 @@ This section specifies the state machine ported from `reference/bash-queue/bin/q
 
 Under `$QROOT` (client-local; resolved as `--root` flag > `$SHUNT_ROOT` env. Every wire op passes `--root <qroot>` from the client row, so the registry stays authoritative and the remote never resolves its own queue root):
 
-| Entry                | Meaning                                                                        |
-| -------------------- | ------------------------------------------------------------------------------ |
-| `pending/`           | `NNNN_<slug>/` entry dirs holding `task.sh`; claimed in name sort order        |
-| `running/`           | in-flight `NNNN_<slug>/` with `task.sh`, `log`, `pid`                          |
-| `done/`              | `NNNN_<slug>/` with `task.sh` + `log` + `exit` for rc 0                        |
-| `failed/`            | `NNNN_<slug>/` with `task.sh` + `log` + `exit` for nonzero rc or killed tasks  |
-| `workers`            | pool size file, re-read every poll cycle                                       |
-| `env`                | runner env dotenv: `WORKDIR`, `PATH_PREPEND`, `TASK_THREADS`, passthrough keys |
-| `STOP`               | sentinel file: drain in-flight tasks, then daemon exits                        |
-| `shutdown_on_idle`   | flag file: power off once queue fully drains                                   |
-| `shutdown_grace_s`   | countdown seconds (default 60)                                                 |
-| `shutdown_cmd`       | command exec'd at countdown end                                                |
-| `daemon.pid`         | daemon pid, written at startup                                                 |
-| `daemon.log`         | structured JSONL event stream (see §3.9)                                       |
-| `.seq` + `.seq.lock` | enqueue counter under flock                                                    |
+| Entry                | Meaning                                                                                                                              |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `pending/`           | `NNNN_<slug>/` entry dirs holding `task.sh`; claimed in name sort order                                                              |
+| `running/`           | in-flight `NNNN_<slug>/` with `task.sh`, `log`, `pid`                                                                                |
+| `done/`              | `NNNN_<slug>/` with `task.sh` + `log` + `exit` for rc 0                                                                              |
+| `failed/`            | `NNNN_<slug>/` with `task.sh` + `log` + `exit` for nonzero rc or killed tasks                                                        |
+| `workers`            | pool size file, re-read every poll cycle                                                                                             |
+| `env`                | runner env dotenv: `WORKDIR`, `PATH_PREPEND`, `TASK_THREADS`, passthrough keys                                                       |
+| `STOP`               | sentinel file: drain in-flight tasks, then daemon exits                                                                              |
+| `shutdown_on_idle`   | flag file: power off once queue fully drains                                                                                         |
+| `shutdown_grace_s`   | countdown seconds (default 60)                                                                                                       |
+| `shutdown_cmd`       | command exec'd at countdown end                                                                                                      |
+| `daemon.pid`         | daemon pid, written at startup                                                                                                       |
+| `daemon.log`         | structured JSONL event stream (see §3.9); rotated to `daemon.log.1` past `SHUNT_DAEMON_LOG_MAX` (default 1 MiB), one generation kept |
+| `.seq` + `.seq.lock` | enqueue counter under flock                                                                                                          |
 
 Every queue entry is a directory named `NNNN_<slug>` containing `task.sh` plus the sidecars it accumulates (`log`, `pid`, `exit`). Readers also understand the legacy flat layout (`NNNN_<slug>.sh` with `.sh.log`/`.sh.pid`/`.sh.exit` sidecars) so pre-existing queues need no migration; writers always create dirs, and `finalize` normalizes any legacy entry it touches. A suffixless flat file is NOT an entry — it is ignored entirely.
 
@@ -137,6 +137,7 @@ Re-read every cycle. Order: `workers` file > `QUEUE_WORKERS` env (set at daemon 
 ### 3.9 Reap and finalize
 
 - Reap: for each tracked pid, if `kill -0` fails the child is gone; collect its exit status and finalize.
+- Leader-exit vs group-drain: a reaped leader whose process group still has live members (detached grandchildren) is NOT finalized immediately — finalize waits out the group for a bounded grace (`SHUNT_PGID_DRAIN_S`, default 5 s), so the `pid` file keeps the pgid addressable to `kill` and the log stays put while anyone still writes to it. If the group is still alive at grace expiry the entry is finalized anyway and a `finalize_lingering_pgid` WARNING names the residual pgid for audit: survivors keep writing to the moved log through their inherited fd and are unreachable by `kill` from then on.
 - Finalize entry `<name>` with rc:
   - append `=== exit <rc> <iso>` to the log;
   - remove the entry's `pid` file;
@@ -145,6 +146,7 @@ Re-read every cycle. Order: `workers` file > `QUEUE_WORKERS` env (set at daemon 
   - if the task exceeded its `# shunt:timeout_s=` budget (§3.13): it lands in `failed/` even on a clean-exit race, the log gains a `=== timeout: exceeded wall-clock limit <n>s` line, and a `timeout` marker file carrying the limit is written beside `exit` so agents can tell budget death from a plain non-zero rc;
   - log `finish <base> rc=<rc> -> done|failed`.
 - If the finalize `mv` fails, the entry is quarantined to `failed/` with a `shunt_error` note and a `finalize_failed` event is logged — same rule as §3.6: no pid-less ghosts in `running/`. If quarantine itself fails, a `ghost_entry` WARNING is logged.
+- Terminal tracks are capped: after each finalize, when `done/` or `failed/` exceeds `SHUNT_TRACK_KEEP` (default 500) entries, the oldest by name sort (sequence order) move to `<track>/.archive/` — dot-prefixed, invisible to every listing, preserved on disk. Without the cap a long-lived queue makes every `status` readdir grow without bound.
 
 ### 3.9a Signaling discipline (`shunt kill`)
 
@@ -160,6 +162,8 @@ When `shutdown_on_idle` exists AND `running/` is empty AND `pending/` is empty:
 
 1. Arm: log `IDLE-SHUTDOWN ARMED` with the grace length.
 2. Count down `shutdown_grace_s` (file > default 60) one second at a time. Each second, re-check: flag removed → cancel; a new `pending/` entry → cancel; `STOP` sentinel → cancel and disarm (flag removed — without the disarm the STOP-drain honoring path below would fire it anyway). Exception: when the countdown is running as part of STOP-drain honoring, §3.10, `STOP` is already consumed and does not apply. Also each second: a busy sibling daemon → abort the countdown (`idle_shutdown_blocked`) _without_ disarming — the poll loop re-arms and retries once the box drains. Log every 10 s and for the final 5 s.
+
+   A signal during the countdown ends it early: the daemon returns to the poll loop and the normal signal path runs — which, with the flag still armed and `pending/` empty, re-enters honoring through §3.5.
 
    **Box-level qroot registry.** Several daemons with different qroots can share one box (a second `--root` started by hand, future local multi-queue); the idle check must not power off while a sibling still has work. At start the daemon registers its canonical qroot path in a shared registry dir (`$SHUNT_STATE/qroots/` > `$XDG_STATE_HOME/shunt/qroots/` > `~/.local/state/shunt/qroots/` > `/tmp/shunt-$USER/qroots/`), one file per qroot keyed by a hash of its path, and removes the entry on every exit path (drain exit, signal, fire). A registered peer _blocks_ firing only when its daemon is live (§3.4 pidfile + cmdline discipline) **and** its queue holds pending or running entries; an idle live daemon does not block — a forgotten idle daemon must not pin the box up forever — and a stale entry is swept when met. The residual race mirrors the existing one: a sibling enqueue landing after the final re-check can still lose to poweroff.
 
