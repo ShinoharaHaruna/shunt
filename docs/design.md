@@ -325,6 +325,12 @@ Auto-heal: if the box answers but the daemon liveness check fails, the dispatche
 
 Dead-box probe backoff: the sweep walks entries in order, so a single dead box (a full `ConnectTimeout` × retry stretch) would head-of-line block every live client behind it. Once a client's conn_fail streak reaches `CONN_FAIL_ESCALATE`, the dispatcher probes it only every 4th sweep and treats it as down in between; a recovered box clears the streak on its first periodic probe and resumes full service. `dispatch --once` (sweep 0) always probes.
 
+### 4.6 Task ledger and events
+
+A clean enqueue ack deletes the spool entry, so without a ledger the spool id → queue-name mapping would be lost and an agent could only grep `done/`/`failed/` by shortid. On every successful push the dispatcher writes `tasks/<id>.json` (one file per task, same write-temp-then-rename discipline as the spool): `{id, project, client, slug, queue_name, submitted_at, pushed_at, outcome}`. `queue_name` is the box-side handle (`NNNN_<slug>`) for `logs`/`kill`/`cancel`. A ledger write failure warns but never makes a delivered task look undelivered.
+
+The box never reports back (there is no reverse channel), so outcomes are resolved **lazily**: `shunt task show <id>` re-queries the client's `status` and matches `queue_name` against `pending`/`running`/`done_recent`/`failed_recent`. A terminal sighting (`done`/`failed` with rc) is written back into the record's `outcome` exactly once and appended to `events.jsonl` as a `finish`/`fail` line; transient states are reported live but not recorded. A name absent from all lists reports `unknown` — it may have aged out of the recent-5 window, been cancelled, or renamed. `task ls` lists records; `task events` prints the raw stream (`{ts, event: pushed|finish|fail, id, client, queue, rc?}` — appends are single O_APPEND writes). `client rename` retargets ledger `client` fields; `client rm` leaves the ledger as history. This is deliberately the minimal spine — a ledger and event stream an agent can grep — not a notification system: nothing pushes, nothing polls on the agent's behalf.
+
 ## 5. Wire protocol
 
 The remote interface is `shunt <subcmd> --json` on the client. Every response is a single compact JSON object line with `"protocol": 1`. Errors exit nonzero with `{"protocol":1,"ok":false,"error":"..."}`.
@@ -404,6 +410,7 @@ Facts are advisory registry data for agent-side matching, not enforced constrain
 | `shunt submit -c client file.sh`                               | server | spool a script file         |
 | `shunt status [--all] [--json]`                                | server | aggregate client states     |
 | `shunt spool ls\|rm`                                           | server | inspect staging             |
+| `shunt task ls\|show <id>\|events`                             | server | task ledger + outcomes      |
 | `shunt client add\|update\|ls\|show\|bootstrap\|probe\|remove` | server | registry                    |
 | `shunt project add\|bind\|ls\|show`                            | server | registry                    |
 | `shunt dispatch [--once]`                                      | server | run the dispatcher loop     |

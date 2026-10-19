@@ -151,6 +151,8 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
             crate::server::spool::stage(&se, &body)?;
         }
     }
+    // Delivered-task ledger records point at the live row too.
+    crate::server::tasks::retarget_client(old, new);
     for pname in registry::list_names("projects")? {
         let mut pj = registry::load_project(&pname)?;
         let mut touched = false;

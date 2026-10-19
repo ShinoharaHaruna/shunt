@@ -139,6 +139,13 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
         match spool::body(&entry.id).and_then(|b| push(t, client, &entry, &b)) {
             Ok(name) => {
                 eprintln!("dispatch: {} -> {} as {name}", entry.id, client.name);
+                // Ledger (design.md §4.6): the spool id -> queue
+                // name mapping survives only here once the spool
+                // entry is gone. Best-effort — a ledger failure
+                // must not make a delivered task look undelivered.
+                if let Err(e) = crate::server::tasks::record_push(&entry, &name) {
+                    eprintln!("dispatch: {} ledger write failed: {e:#}", entry.id);
+                }
                 spool::remove(&entry.id)?;
                 pushed += 1;
             }

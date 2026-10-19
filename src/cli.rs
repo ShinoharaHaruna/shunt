@@ -37,6 +37,10 @@ pub enum Command {
     /// Manage the server-side staging queue
     #[command(arg_required_else_help = true)]
     Spool(SpoolCmd),
+    /// Task ledger: what a spool id became on the box and how it
+    /// ended (design.md §4.6)
+    #[command(arg_required_else_help = true)]
+    Task(TaskCmd),
     /// Manage registered experiment boxes
     #[command(arg_required_else_help = true)]
     Client(ClientCmd),
@@ -331,6 +335,33 @@ pub enum SpoolAction {
 }
 
 #[derive(Args)]
+pub struct TaskCmd {
+    #[command(subcommand)]
+    pub action: TaskAction,
+}
+
+#[derive(Subcommand)]
+pub enum TaskAction {
+    /// List recorded tasks (pushed_at order)
+    Ls {
+        /// Emit one JSON object per line
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one task by spool id; when no outcome is recorded yet,
+    /// queries the client's live status and writes a terminal
+    /// result back to the ledger + events.jsonl
+    Show {
+        /// Task id as printed by `submit` (unique prefix works)
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the server-side event stream (events.jsonl)
+    Events,
+}
+
+#[derive(Args)]
 pub struct ClientCmd {
     #[command(subcommand)]
     pub action: ClientAction,
@@ -506,6 +537,66 @@ pub enum ProjectAction {
     },
 }
 
+/// `shunt task show <id>`: print the ledger record, resolving the
+/// outcome live from the box when none is recorded yet (lazy
+/// write-back, design.md §4.6). A unique id prefix is accepted.
+fn task_show(id: &str, json: bool) -> Result<()> {
+    use crate::server::registry;
+    use crate::server::tasks::{self, Observed};
+    let mut rec = match tasks::load(id) {
+        Ok(r) => r,
+        Err(e) => {
+            // Prefix fallback: ids are long; a unique prefix resolves.
+            let matches: Vec<_> = tasks::list()?.into_iter().filter(|r| r.id.starts_with(id)).collect();
+            match matches.len() {
+                1 => matches.into_iter().next().unwrap(),
+                0 => return Err(e).context("no ledger record; the task may predate the ledger or the id is wrong"),
+                _ => anyhow::bail!("id prefix '{id}' matches several tasks"),
+            }
+        }
+    };
+    let mut live: Option<String> = None;
+    if rec.outcome.is_none() {
+        match registry::load_client(&rec.client) {
+            Ok(client) => {
+                let t = crate::server::transport::transport_for(&client);
+                if let Ok(obs) = tasks::observe(t.as_ref(), &client, &mut rec) {
+                    live = Some(match obs {
+                        Observed::Pending => "pending".into(),
+                        Observed::Running => "running".into(),
+                        Observed::Done(rc) => format!("done rc={rc}"),
+                        Observed::Failed(rc) => format!("failed rc={rc}"),
+                        Observed::Unknown => "unknown".into(),
+                        Observed::Unreachable(e) => format!("unreachable: {}", e.lines().next().unwrap_or(&e)),
+                    });
+                }
+            }
+            Err(e) => live = Some(format!("client unloadable: {e:#}")),
+        }
+    }
+    if json {
+        let mut v = serde_json::to_value(&rec)?;
+        if let Some(l) = &live {
+            v["live"] = serde_json::json!(l);
+        }
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else {
+        println!("id:        {}", rec.id);
+        println!("client:    {}", rec.client);
+        println!("project:   {}", if rec.project.is_empty() { "-" } else { &rec.project });
+        println!("slug:      {}", rec.slug);
+        println!("queue:     {}  (on {})", rec.queue_name, rec.client);
+        println!("submitted: {}", rec.submitted_at);
+        println!("pushed:    {}", rec.pushed_at);
+        match (&rec.outcome, &live) {
+            (Some(o), _) => println!("outcome:   {} rc={} (observed {})", o.state, o.rc, o.observed_at),
+            (None, Some(l)) => println!("outcome:   {l} (live)"),
+            (None, None) => println!("outcome:   not yet observed"),
+        }
+    }
+    Ok(())
+}
+
 /// Forward one wire op to a client and print remote stdout.
 /// The remote argv is `<qroot>/bin/shunt <tail...> --root <qroot>`;
 /// transport is `ssh` or the `localhost` loopback (design.md §5).
@@ -647,6 +738,25 @@ pub fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
             SpoolAction::Remove { task_id } => crate::server::spool::remove(&task_id),
+        },
+
+        Command::Task(c) => match c.action {
+            TaskAction::Ls { json } => {
+                for r in crate::server::tasks::list()? {
+                    if json {
+                        println!("{}", serde_json::to_string(&r)?);
+                    } else {
+                        let state = r.outcome.as_ref().map(|o| format!("{} rc={}", o.state, o.rc)).unwrap_or_else(|| "-".into());
+                        println!("{}\t{}\t{}\t{}\t{}\t{}", r.id, r.client, r.queue_name, r.project, r.pushed_at, state);
+                    }
+                }
+                Ok(())
+            }
+            TaskAction::Show { id, json } => task_show(&id, json),
+            TaskAction::Events => {
+                print!("{}", crate::server::tasks::events()?);
+                Ok(())
+            }
         },
 
         Command::Client(c) => match c.action {

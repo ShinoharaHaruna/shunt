@@ -20,7 +20,14 @@ struct FakeTransport {
     pending: PathBuf,
     fail_enqueue: bool,
     down: bool,
+    /// Extra `done_recent` rows in the `status` answer, for the
+    /// ledger's lazy-outcome path.
+    done_recent: Vec<(String, i32)>,
     calls: Mutex<Vec<String>>,
+}
+
+fn fake(pending: &Path) -> FakeTransport {
+    FakeTransport { pending: pending.to_path_buf(), fail_enqueue: false, down: false, done_recent: Vec::new(), calls: Mutex::new(Vec::new()) }
 }
 
 impl Transport for FakeTransport {
@@ -30,11 +37,12 @@ impl Transport for FakeTransport {
             anyhow::bail!("ssh connect timeout");
         }
         match argv.get(1).map(String::as_str) {
-            Some("status") => Ok(r#"{"protocol":1,"daemon":{"alive":true,"pid":1234},
-                "workers":{"value":3,"source":"default"},"running":[],"pending":[],
-                "done_recent":[],"failed_recent":[],"stop":false,
-                "shutdown":{"armed":false,"grace_s":60}}"#
-                .into()),
+            Some("status") => {
+                let done: Vec<String> = self.done_recent.iter().map(|(n, rc)| format!(r#"{{"name":"{n}","rc":{rc}}}"#)).collect();
+                // Wire answers are one compact JSON object line
+                // (design.md §5); extract() line-scans for it.
+                Ok(format!(r#"{{"protocol":1,"daemon":{{"alive":true,"pid":1234}},"workers":{{"value":3,"source":"default"}},"running":[],"pending":[],"done_recent":[{}],"failed_recent":[],"stop":false,"shutdown":{{"armed":false,"grace_s":60}}}}"#, done.join(",")))
+            }
             Some("enqueue") => {
                 if self.fail_enqueue {
                     anyhow::bail!("remote rc=1: disk full");
@@ -80,20 +88,29 @@ fn dispatch_ack_deletes_failure_retains() -> Result<()> {
 
     // Clean ack: pushed and removed from spool.
     spool::stage(&entry("t1", "a-t1"), "echo t1\n")?;
-    let t = FakeTransport { pending: pending.clone(), fail_enqueue: false, down: false, calls: Mutex::new(Vec::new()) };
+    let t = fake(&pending);
     assert_eq!(dispatch::sweep_with(&t)?, 1);
     assert!(spool::list()?.is_empty());
     assert_eq!(std::fs::read_to_string(pending.join("0100_task/task.sh"))?, "echo t1\n");
 
+    // Ledger (design.md §4.6): the ack recorded spool id -> queue
+    // name, and a `pushed` line landed in events.jsonl.
+    let rec = shunt::server::tasks::load("t1")?;
+    assert_eq!(rec.queue_name, "0100_task");
+    assert_eq!(rec.client, "fake-a");
+    assert!(rec.outcome.is_none());
+    let ev = shunt::server::tasks::events()?;
+    assert!(ev.contains("\"event\":\"pushed\"") && ev.contains("\"id\":\"t1\""), "{ev}");
+
     // Remote enqueue error: entry stays for the next poll.
     spool::stage(&entry("t2", "a-t2"), "echo t2\n")?;
-    let t_fail = FakeTransport { pending: pending.clone(), fail_enqueue: true, down: false, calls: Mutex::new(Vec::new()) };
+    let t_fail = FakeTransport { fail_enqueue: true, ..fake(&pending) };
     assert_eq!(dispatch::sweep_with(&t_fail)?, 0);
     assert_eq!(spool::list()?.len(), 1);
 
     // Unreachable box: entry stays, no error.
     spool::stage(&entry("t3", "a-t3"), "echo t3\n")?;
-    let t_down = FakeTransport { pending: pending.clone(), fail_enqueue: false, down: true, calls: Mutex::new(Vec::new()) };
+    let t_down = FakeTransport { down: true, ..fake(&pending) };
     assert_eq!(dispatch::sweep_with(&t_down)?, 0);
     assert_eq!(spool::list()?.len(), 2);
 
@@ -116,7 +133,7 @@ fn dead_box_probe_backs_off() -> Result<()> {
         registry::conn_fail_bump("fake-a");
     }
 
-    let t = FakeTransport { pending: pending.clone(), fail_enqueue: false, down: false, calls: Mutex::new(Vec::new()) };
+    let t = fake(&pending);
     // Sweeps 1..=3 skip the probe entirely: no exec, entry retained.
     for idx in 1..4 {
         assert_eq!(dispatch::sweep_at(&t, idx)?, 0);
@@ -148,7 +165,7 @@ fn bad_spool_entry_quarantined_good_delivers() -> Result<()> {
     std::fs::write(dir.join("zzz_corrupt.sh"), "echo corrupt\n")?;
     spool::stage(&entry("t1", "a-t1"), "echo t1\n")?;
 
-    let t = FakeTransport { pending: pending.clone(), fail_enqueue: false, down: false, calls: Mutex::new(Vec::new()) };
+    let t = fake(&pending);
     assert_eq!(dispatch::sweep_with(&t)?, 1);
 
     // Healthy entry delivered and gone; corrupt files renamed aside.
@@ -157,6 +174,48 @@ fn bad_spool_entry_quarantined_good_delivers() -> Result<()> {
     assert!(dir.join("zzz_corrupt.json.bad").exists());
     assert!(dir.join("zzz_corrupt.sh.bad").exists());
     assert!(!dir.join("zzz_corrupt.json").exists());
+
+    std::fs::remove_dir_all(&home).ok();
+    Ok(())
+}
+
+/// `task show`'s lazy outcome resolution (§4.6): a terminal
+/// sighting in `done_recent` is written back to the record and
+/// appended to events.jsonl exactly once; transient/absent states
+/// report live but record nothing.
+#[test]
+fn task_ledger_lazy_outcome() -> Result<()> {
+    use shunt::server::tasks::{self, Observed};
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, client) = fixture("ledger")?;
+    let pending = home.join("pending");
+    std::fs::create_dir_all(&pending)?;
+
+    let e = entry("t9", "a-t9");
+    tasks::record_push(&e, "0100_task")?;
+
+    // Not yet on any track list -> unknown, nothing recorded.
+    let t = fake(&pending);
+    let mut rec = tasks::load("t9")?;
+    let obs = tasks::observe(&t, &client, &mut rec)?;
+    assert!(matches!(obs, Observed::Unknown), "{obs:?}");
+    assert!(tasks::load("t9")?.outcome.is_none());
+
+    // Now it lands in done_recent: written back + one finish event.
+    let t_done = FakeTransport { done_recent: vec![("0100_task".into(), 0)], ..fake(&pending) };
+    let mut rec = tasks::load("t9")?;
+    assert!(matches!(tasks::observe(&t_done, &client, &mut rec)?, Observed::Done(0)));
+    let rec = tasks::load("t9")?;
+    let o = rec.outcome.unwrap();
+    assert_eq!(o.state, "done");
+    assert_eq!(o.rc, 0);
+    let ev = tasks::events()?;
+    assert_eq!(ev.matches("\"event\":\"finish\"").count(), 1, "{ev}");
+
+    // A recorded outcome answers without another wire call.
+    let mut rec = tasks::load("t9")?;
+    assert!(matches!(tasks::observe(&t, &client, &mut rec)?, Observed::Done(0)));
+    assert_eq!(tasks::events()?.matches("\"event\":").count(), 2); // pushed + finish
 
     std::fs::remove_dir_all(&home).ok();
     Ok(())

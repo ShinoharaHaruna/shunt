@@ -5,5 +5,6 @@ pub mod dispatch;
 pub mod registry;
 pub mod spool;
 pub mod status;
+pub mod tasks;
 pub mod transport;
 pub mod tunnel;
