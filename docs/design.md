@@ -183,7 +183,7 @@ A task may override any of these inside itself. `set -uo pipefail` is part of th
 
 ### 3.13 Task file format and the guard contract
 
-Generated task (single generator on the client; `shunt new`/`shunt mktask` share it):
+Generated task (single generator — `agent::exec::render_task` — shared by `new`/`mktask` and server-side `submit`):
 
 ```bash
 #!/usr/bin/env bash
@@ -320,7 +320,7 @@ Dead-box probe backoff: the sweep walks entries in order, so a single dead box (
 
 The remote interface is `shunt <subcmd> --json` on the client. Every response is a single compact JSON object line with `"protocol": 1`. Errors exit nonzero with `{"protocol":1,"ok":false,"error":"..."}`.
 
-Remote stdout is not guaranteed clean: ssh runs the login shell, so `.bashrc` echoes, motd, or conda-init banners can surround the answer. The server never whole-parses stdout — it scans lines from the end and takes the first that parses as a JSON object carrying `"protocol"` (`wire::extract`). Non-JSON responses (`logs`, `mktask` bodies, `KEY=value` probes) are unaffected.
+Remote stdout is not guaranteed clean: ssh runs the login shell, so `.bashrc` echoes, motd, or conda-init banners can surround the answer. The server never whole-parses stdout — it scans lines from the end and takes the first that parses as a JSON object carrying `"protocol"` (`wire::extract`). Non-JSON responses (`logs`, `mktask` bodies) are unaffected.
 
 The `protocol` field is validated, not just located: an answer whose `protocol` differs from the build's version is rejected with a binary-drift error (`extract` fails; callers surface the message), and a JSON answer carrying no `protocol` field at all is treated the same way — a remote binary that predates the field is by definition a version mismatch, so "missing" is reported as drift, not as a format error. Both errors direct the operator to `shunt client bootstrap <name>`: bootstrap is idempotent (key deploy dedupes, `init`/`start` no-op on a live queue, the binary ships staged-then-`mv` so an scp never truncates a running executable) and therefore doubles as the binary upgrade path — no separate upgrade command exists.
 
@@ -364,15 +364,14 @@ Every ssh exec is bounded twice, because `ConnectTimeout` covers only the handsh
 ## 7. End-to-end lifecycle
 
 1. `shunt client add rw-a --template autodl` — edit host/port/key in the row.
-2. `shunt client bootstrap rw-a` — probe over raw SSH (no binary yet: the probe is server-side shell), scp the binary, remote `shunt init`
-   - `shunt start`, facts merged into the row.
+2. `shunt client bootstrap rw-a` — scp the binary, remote `shunt init` + `shunt start`, then wire `shunt probe` (the binary is already on the box, so there is exactly one probe implementation); facts merged into the row.
 3. `shunt project add riboworld` + `shunt project bind riboworld --client rw-a --workdir /root/autodl-tmp/RiboWorld`.
 4. `shunt submit -p riboworld -c rw-a --guard runs/x.json -- uv run python ...` → lands in `spool/`.
 5. Dispatcher pushes when the box is reachable; box runs it; on drain, idle-shutdown powers off. Overnight submissions sit in spool until the human powers the box on; the dispatcher's auto-heal restarts `shuntd` and delivers.
 
 ## 8. Probe spec
 
-`shunt probe` (and the bootstrap pre-binary shell equivalent) collects, emitting JSON:
+`shunt probe` collects, emitting JSON — it is the only probe implementation; bootstrap ships the binary before probing and `client probe` runs it over the wire (an unbootstrapped box answers with the binary-drift error from §5):
 
 - `gpu`: `nvidia-smi --query-gpu=name,driver_version --format=csv,noheader`; absent → `null` (CPU-only boot is a valid state — AutoDL no-card boots drop the GPU).
 - `cuda`: `nvidia-smi` header parse.

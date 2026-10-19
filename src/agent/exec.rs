@@ -271,8 +271,8 @@ pub fn status_rc(status: &std::process::ExitStatus) -> i32 {
     }
 }
 
-/// Render a task body from metadata (single generator, shared by
-/// `new`/`mktask`/submit forwarding; design.md §3.13–3.14).
+/// Render a task body from metadata — the single generator for
+/// `new`/`mktask` and server-side `submit` (design.md §3.13–3.14).
 /// No `cd` line: the runner places cwd at the binding's workdir.
 pub fn render_task(meta: &crate::proto::task::TaskMeta) -> String {
     let mut out = String::from("#!/usr/bin/env bash\n");
