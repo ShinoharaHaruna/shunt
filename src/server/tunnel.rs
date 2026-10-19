@@ -16,6 +16,7 @@
 use crate::server::registry::{self, ClientEntry};
 use crate::server::transport::{ssh_conn_args, Transport};
 use anyhow::{Context, Result};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -115,8 +116,8 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
     }
     let port = port.unwrap_or(DEFAULT_SOCKS_PORT);
     let dir = tunnels_dir()?;
-    std::fs::create_dir_all(&dir)?;
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("{}.log", client.name)))?;
+    registry::private_dir(&dir)?;
+    let log = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(dir.join(format!("{}.log", client.name)))?;
     let err = log.try_clone()?;
 
     let mut args = vec!["ssh".to_string()];
@@ -129,8 +130,8 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
         anyhow::bail!("ssh tunnel exited during setup; see {}", dir.join(format!("{}.log", client.name)).display());
     }
     let pid = child.id();
-    std::fs::write(pid_path(&client.name)?, format!("{pid}\n"))?;
-    std::fs::write(port_path(&client.name)?, format!("{port}\n"))?;
+    registry::write_private(&pid_path(&client.name)?, format!("{pid}\n"))?;
+    registry::write_private(&port_path(&client.name)?, format!("{port}\n"))?;
 
     // Wire the queue env so tasks see the proxy without any task edits.
     let proxy = format!("socks5h://127.0.0.1:{port}");
@@ -174,7 +175,7 @@ mod tests {
     #[test]
     fn env_write_upserts_and_removes() {
         let root = std::env::temp_dir().join(format!("shunt-tun-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+        registry::private_dir(&root).unwrap();
         let client = entry(&root);
         let t = LocalTransport { bin: PathBuf::from("/bin/sh"), timeout_s: Some(10) };
         let f = root.join("env");

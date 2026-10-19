@@ -107,7 +107,7 @@ pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slu
     }
 
     let dir = spool_dir()?;
-    fs::create_dir_all(&dir)?;
+    crate::server::registry::private_dir(&dir)?;
     let id = new_task_id(&dir);
     let shortid: String = id.chars().take(8).collect();
     meta.slug = format!("{slug}-{shortid}");
@@ -123,11 +123,11 @@ pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slu
 /// write-temp-then-rename.
 pub fn stage(entry: &SpoolEntry, body: &str) -> Result<()> {
     let dir = spool_dir()?;
-    fs::create_dir_all(&dir)?;
+    crate::server::registry::private_dir(&dir)?;
     let json = serde_json::to_string_pretty(entry)?;
     for (name, contents) in [(format!("{}.json", entry.id), json), (format!("{}.sh", entry.id), body.to_string())] {
         let tmp = dir.join(format!(".{name}.tmp"));
-        fs::write(&tmp, contents)?;
+        crate::server::registry::write_private(&tmp, contents)?;
         fs::rename(&tmp, dir.join(&name))?;
     }
     Ok(())

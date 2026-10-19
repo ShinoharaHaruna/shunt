@@ -6,7 +6,9 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 /// One experiment box (design.md §4.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,9 +179,9 @@ pub fn conn_fail_bump(name: &str) -> u32 {
     let n = conn_fail_read(name) + 1;
     if let Ok(p) = conn_fail_path(name) {
         if let Some(d) = p.parent() {
-            let _ = fs::create_dir_all(d);
+            let _ = private_dir(d);
         }
-        let _ = fs::write(p, format!("{n}\n"));
+        let _ = write_private(&p, format!("{n}\n"));
     }
     n
 }
@@ -200,6 +202,41 @@ pub fn shunt_home() -> Result<PathBuf> {
     }
     let home = std::env::var("HOME").context("HOME not set")?;
     Ok(PathBuf::from(home).join(".config/shunt"))
+}
+
+/// Registry privacy (design.md §4.1: ssh.password is plaintext —
+/// "keep registry private"). `create_dir_all`/`fs::write` follow the
+/// process umask, which can leave rows group/world-readable, so every
+/// shunt-managed dir under $SHUNT_HOME is forced to 0700 and every
+/// file to 0600 — including re-tightening paths that predate the fix.
+/// Nothing outside $SHUNT_HOME is touched (a user-supplied ssh.key
+/// path keeps its own permissions).
+pub(crate) fn private_dir(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    if let Ok(home) = shunt_home() {
+        if let Ok(rel) = dir.strip_prefix(&home) {
+            let mut p = home;
+            let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o700));
+            for comp in rel.components() {
+                p.push(comp.as_os_str());
+                let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o700));
+            }
+            return Ok(());
+        }
+    }
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+/// Write a file 0600 regardless of umask (mode on create + explicit
+/// chmod to re-tighten a pre-existing loose file).
+pub(crate) fn write_private(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    {
+        let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+        f.write_all(contents.as_ref())?;
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
 }
 
 fn load<T: for<'de> Deserialize<'de>>(dir: &str, name: &str) -> Result<T> {
@@ -241,10 +278,10 @@ const CLIENT_HEADER: &str = "\
 fn save_with_header<T: Serialize>(dir: &str, name: &str, value: &T, header: &str) -> Result<PathBuf> {
     let path = shunt_home()?.join(dir).join(format!("{name}.toml"));
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        private_dir(parent)?;
     }
     let text = format!("{header}{}", toml::to_string_pretty(value)?);
-    fs::write(&path, text)?;
+    write_private(&path, text)?;
     Ok(path)
 }
 
@@ -361,8 +398,12 @@ pub fn remove(dir: &str, name: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    // SHUNT_HOME is process-global: tests that set it serialize here.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn client_roundtrip() {
+        let _g = HOME_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join(format!("shunt-test-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &tmp);
         let entry = ClientEntry { name: "box-1".into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: "/path/to/key".into(), password: String::new() }, qroot: "/root/autodl-tmp/queue".into(), deploy_root: "/root/autodl-tmp".into(), facts: BTreeMap::new(), billing: Some(Billing { hourly: 2.6, currency: "cny".into() }) };
@@ -397,6 +438,34 @@ mod tests {
         let lo3 = load_client("localhost").unwrap();
         assert!(lo3.local && !lo3.disabled);
         assert!(tmp.join("clients/localhost.toml").exists());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Registry privacy: client rows can carry ssh.password
+    /// plaintext, so dirs are 0700 and files 0600 regardless of
+    /// umask — including re-tightening a pre-existing loose file.
+    #[test]
+    fn registry_files_are_private() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("shunt-test-mode-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &tmp);
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        let entry = localhost_default().unwrap();
+        let row = save_client(&entry).unwrap();
+        assert_eq!(mode(&tmp), 0o700, "shunt_home root");
+        assert_eq!(mode(&tmp.join("clients")), 0o700, "clients/");
+        assert_eq!(mode(&row), 0o600, "client row");
+
+        // A pre-existing loose row is re-tightened on the next save.
+        fs::set_permissions(&row, fs::Permissions::from_mode(0o644)).unwrap();
+        save_client(&entry).unwrap();
+        assert_eq!(mode(&row), 0o600, "re-saved row");
+
+        // state/ (conn-fail streaks) is private too.
+        conn_fail_bump("box");
+        assert_eq!(mode(&tmp.join("state")), 0o700, "state/");
+        assert_eq!(mode(&tmp.join("state/box.fail")), 0o600, "fail file");
         std::fs::remove_dir_all(&tmp).ok();
     }
 }

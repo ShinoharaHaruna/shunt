@@ -104,7 +104,7 @@ impl SshTransport {
         // MaxStartups`) reject back-to-back handshakes — muxing is the
         // fix, not retries. The socket lives under $SHUNT_HOME/cm/ so
         // nothing touches the user's own ssh config.
-        let _ = std::fs::create_dir_all(cm_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp")));
+        let _ = crate::server::registry::private_dir(&cm_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp")));
         let mut v = vec!["-p".into(), client.ssh.port.to_string(), "-o".into(), "BatchMode=yes".into(), "-o".into(), format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)), "-o".into(), "StrictHostKeyChecking=accept-new".into(), "-o".into(), format!("UserKnownHostsFile={kh}"), "-o".into(), "ControlMaster=auto".into(), "-o".into(), format!("ControlPath={}", cm_sock(client)), "-o".into(), "ControlPersist=60".into()];
         if !client.ssh.key.is_empty() {
             v.push("-i".into());

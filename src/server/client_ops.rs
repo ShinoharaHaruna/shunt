@@ -137,7 +137,7 @@ pub fn ensure_key(entry: &mut ClientEntry) -> Result<()> {
     }
     let path = registry::client_key_path(&entry.name)?;
     if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p)?;
+        registry::private_dir(p)?;
     }
     if !path.exists() {
         let st = std::process::Command::new("ssh-keygen").args(["-t", "ed25519", "-N", "", "-f", &path.display().to_string(), "-C", &format!("shunt-{}", entry.name)]).stdin(std::process::Stdio::null()).status().context("spawn ssh-keygen")?;

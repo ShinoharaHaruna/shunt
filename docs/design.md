@@ -224,6 +224,8 @@ spool/                 # server-side staging queue
 
 Registry files are human-editable TOML and safe to keep in git (minus key paths). "Registration" is server-local bookkeeping: `shunt client add` writes the row with zero network traffic. A client never needs to reach the server.
 
+**Permissions are enforced, not assumed.** `ssh.password` is plaintext and `keys/` holds private keys, so every shunt-managed dir under `$SHUNT_HOME` is created/re-tightened to `0700` and every file (rows, spool entries, state, tunnel pid/port/log) to `0600` — umask never widens the registry, and saving re-tightens a file a user loosened. Paths outside `$SHUNT_HOME` (a user-supplied `ssh.key`) keep their own permissions.
+
 **SSH is fully managed.** `client add`/`bootstrap` generate a dedicated ed25519 keypair at `keys/<name>` and fill `ssh.key` — registration alone makes the row usable. Deploying the public key is the one step that needs existing trust: when `ssh.password` is set, `bootstrap` appends the pubkey via a single password-only sshpass session (no key offers, idempotent `grep -qxF`); without it, bootstrap prints the `.pub` to install once via the vendor console or a manual `ssh-copy-id`. Host-key checking is TOFU (`StrictHostKeyChecking=accept-new`) against `keys/`-sibling `known_hosts`, so first contact never prompts and the user's own `~/.ssh` stays untouched.
 
 **Host-key rotation** (rebuilt containers change their key): `shunt client hostkey <name>` runs `ssh-keygen -R` scoped to our `known_hosts` and kills the mux master, so the next connect re-TOFUs cleanly. Anything — agent or human — must never write to `~/.ssh/known_hosts`; a stale entry there surfaces as an unexplained REMOTE HOST IDENTIFICATION HAS CHANGED on the user's own connections.
