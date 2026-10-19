@@ -582,6 +582,8 @@ pub fn run(cli: Cli) -> Result<()> {
                     let st = tunnel::status(&a.client)?;
                     if st.alive {
                         println!("{}: up (socks5h://127.0.0.1:{})", a.client, st.port.map(|p| p.to_string()).unwrap_or_else(|| "?".into()));
+                    } else if st.stale {
+                        println!("{}: down (stale state — the box's env may still export ALL_PROXY; `tunnel up` or `down` cleans it)", a.client);
                     } else {
                         println!("{}: down", a.client);
                     }

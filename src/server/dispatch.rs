@@ -108,11 +108,26 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
             } else {
                 probe_client(t, client)
             };
-            if let Reach::Up { daemon_alive: false } = r {
-                // Auto-heal: ssh works but shuntd is dead; start it once.
-                match t.exec(client, &wire_argv(client, &["start"]), None) {
-                    Ok(_) => eprintln!("dispatch: {} daemon restarted", client.name),
-                    Err(e) => eprintln!("dispatch: {} start failed: {e:#}", client.name),
+            if let Reach::Up { daemon_alive } = r {
+                if !daemon_alive {
+                    // Auto-heal: ssh works but shuntd is dead; start it once.
+                    match t.exec(client, &wire_argv(client, &["start"]), None) {
+                        Ok(_) => eprintln!("dispatch: {} daemon restarted", client.name),
+                        Err(e) => eprintln!("dispatch: {} start failed: {e:#}", client.name),
+                    }
+                }
+                // Tunnel self-heal (design.md §4.4): a dead tunnel ssh
+                // leaves ALL_PROXY pointing at a dead proxy, poisoning
+                // every task on a live box. Only runs when the probe
+                // actually happened — backoff-skipped probes above
+                // also skip this, so a dead box never pays for it.
+                if !client.local && crate::server::tunnel::recorded(&client.name).unwrap_or(false) {
+                    match crate::server::tunnel::heal(t, client) {
+                        Ok(crate::server::tunnel::Heal::Reconnected(pid)) => eprintln!("dispatch: {} tunnel reconnected pid {pid}", client.name),
+                        Ok(crate::server::tunnel::Heal::Stripped) => eprintln!("dispatch: {} tunnel dead; ALL_PROXY stripped from env", client.name),
+                        Ok(_) => {}
+                        Err(e) => eprintln!("dispatch: {} tunnel heal failed: {e:#}", client.name),
+                    }
                 }
             }
             v.insert(r);

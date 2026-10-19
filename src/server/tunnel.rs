@@ -27,12 +27,12 @@ fn tunnels_dir() -> Result<PathBuf> {
     Ok(registry::shunt_home()?.join("tunnels"))
 }
 
-fn pid_path(name: &str) -> Result<PathBuf> {
-    Ok(tunnels_dir()?.join(format!("{name}.pid")))
+fn pid_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}.pid"))
 }
 
-fn port_path(name: &str) -> Result<PathBuf> {
-    Ok(tunnels_dir()?.join(format!("{name}.port")))
+fn port_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}.port"))
 }
 
 /// Upsert or remove one KEY=value line in `<qroot>/env` on the box,
@@ -54,14 +54,14 @@ mv "$f.tmp" "$f"
 pub struct TunnelState {
     pub alive: bool,
     pub port: Option<u16>,
+    /// Pid is dead but state files remain: the box's env may still
+    /// carry ALL_PROXY pointing at a dead proxy (poisoned).
+    pub stale: bool,
 }
 
-fn read_pid(name: &str) -> Result<Option<u32>> {
-    let p = pid_path(name)?;
-    let Ok(s) = std::fs::read_to_string(&p) else {
-        return Ok(None);
-    };
-    Ok(s.trim().parse().ok())
+fn read_pid(dir: &Path, name: &str) -> Option<u32> {
+    let s = std::fs::read_to_string(pid_path(dir, name)).ok()?;
+    s.trim().parse().ok()
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -71,17 +71,25 @@ fn pid_alive(pid: u32) -> bool {
 /// A tunnel was set up for `name` at some point: a pid or port
 /// state file exists, so the box's env may still carry ALL_PROXY
 /// even after the ssh process died (endpoint drift, reboot).
+fn recorded_in(dir: &Path, name: &str) -> bool {
+    pid_path(dir, name).exists() || port_path(dir, name).exists()
+}
+
+/// `recorded_in` against the real `$SHUNT_HOME/tunnels/`.
 pub fn recorded(name: &str) -> Result<bool> {
-    Ok(pid_path(name)?.exists() || port_path(name)?.exists())
+    Ok(recorded_in(&tunnels_dir()?, name))
+}
+
+fn status_in(dir: &Path, name: &str) -> TunnelState {
+    let port = std::fs::read_to_string(port_path(dir, name)).ok().and_then(|s| s.trim().parse::<u16>().ok());
+    let alive = matches!(read_pid(dir, name), Some(pid) if pid_alive(pid));
+    let stale = !alive && recorded_in(dir, name);
+    TunnelState { alive, port, stale }
 }
 
 /// Current tunnel state for a client (no network needed).
 pub fn status(name: &str) -> Result<TunnelState> {
-    let port = port_path(name)?.exists().then(|| std::fs::read_to_string(port_path(name).unwrap())).and_then(|r| r.ok()).and_then(|s| s.trim().parse::<u16>().ok());
-    Ok(match read_pid(name)? {
-        Some(pid) if pid_alive(pid) => TunnelState { alive: true, port },
-        _ => TunnelState { alive: false, port },
-    })
+    Ok(status_in(&tunnels_dir()?, name))
 }
 
 /// List every recorded tunnel name (clients/tunnels dir).
@@ -109,13 +117,13 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
     if client.local {
         anyhow::bail!("{} uses the loopback transport — no tunnel needed", client.name);
     }
-    if let Some(pid) = read_pid(&client.name)? {
+    let dir = tunnels_dir()?;
+    if let Some(pid) = read_pid(&dir, &client.name) {
         if pid_alive(pid) {
             return Ok(pid);
         }
     }
     let port = port.unwrap_or(DEFAULT_SOCKS_PORT);
-    let dir = tunnels_dir()?;
     registry::private_dir(&dir)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(dir.join(format!("{}.log", client.name)))?;
     let err = log.try_clone()?;
@@ -130,8 +138,8 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
         anyhow::bail!("ssh tunnel exited during setup; see {}", dir.join(format!("{}.log", client.name)).display());
     }
     let pid = child.id();
-    registry::write_private(&pid_path(&client.name)?, format!("{pid}\n"))?;
-    registry::write_private(&port_path(&client.name)?, format!("{port}\n"))?;
+    registry::write_private(&pid_path(&dir, &client.name), format!("{pid}\n"))?;
+    registry::write_private(&port_path(&dir, &client.name), format!("{port}\n"))?;
 
     // Wire the queue env so tasks see the proxy without any task edits.
     let proxy = format!("socks5h://127.0.0.1:{port}");
@@ -144,16 +152,62 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
     Ok(pid)
 }
 
+/// What `heal` did for one client whose box answered a probe.
+pub enum Heal {
+    /// No tunnel was ever set up — nothing to do.
+    NotRecorded,
+    /// Tunnel ssh is still alive.
+    Healthy,
+    /// Dead tunnel re-established; carries the new pid.
+    Reconnected(u32),
+    /// Reconnect failed; ALL_PROXY was stripped from the box's env so
+    /// tasks fail over to direct egress instead of a dead proxy. State
+    /// files stay — the next sweep retries the reconnect.
+    Stripped,
+}
+
+/// Self-heal a dead recorded tunnel while the box itself is
+/// reachable (design.md §4.4): try `up` once; on failure strip
+/// ALL_PROXY so queued tasks are not poisoned by a dead proxy.
+/// Called by the dispatcher sweep only on a successful probe — a
+/// dead box never reaches this (env cannot be edited anyway).
+pub fn heal(t: &dyn Transport, client: &ClientEntry) -> Result<Heal> {
+    let dir = tunnels_dir()?;
+    heal_in(&dir, t, client, |t, c| up(t, c, None))
+}
+
+/// The decision logic, with the state dir and the reconnect action
+/// injected — tests exercise it without `$SHUNT_HOME` or real ssh.
+fn heal_in(dir: &Path, t: &dyn Transport, client: &ClientEntry, reconnect: impl FnOnce(&dyn Transport, &ClientEntry) -> Result<u32>) -> Result<Heal> {
+    if !recorded_in(dir, &client.name) {
+        return Ok(Heal::NotRecorded);
+    }
+    if status_in(dir, &client.name).alive {
+        return Ok(Heal::Healthy);
+    }
+    match reconnect(t, client) {
+        Ok(pid) => Ok(Heal::Reconnected(pid)),
+        Err(e) => {
+            eprintln!("tunnel: {} dead; reconnect failed ({e:#}); stripping ALL_PROXY from env", client.name);
+            // The box answered a probe this sweep, so the strip is
+            // expected to work — surface a failure rather than drop it.
+            env_write(t, client, "ALL_PROXY", None)?;
+            Ok(Heal::Stripped)
+        }
+    }
+}
+
 /// Tear it down: TERM the ssh process group, drop state files, and
 /// remove the ALL_PROXY line from the box's env.
 pub fn down(t: &dyn Transport, client: &ClientEntry) -> Result<()> {
-    if let Some(pid) = read_pid(&client.name)? {
+    let dir = tunnels_dir()?;
+    if let Some(pid) = read_pid(&dir, &client.name) {
         if pid_alive(pid) {
             let _ = Command::new("kill").args([&pid.to_string()]).status();
         }
     }
-    let _ = std::fs::remove_file(pid_path(&client.name)?);
-    let _ = std::fs::remove_file(port_path(&client.name)?);
+    let _ = std::fs::remove_file(pid_path(&dir, &client.name));
+    let _ = std::fs::remove_file(port_path(&dir, &client.name));
     if !client.local {
         // Best-effort: a dead box may not answer; the tunnel is already down.
         let _ = env_write(t, client, "ALL_PROXY", None);
@@ -172,10 +226,15 @@ mod tests {
         ClientEntry { name: "tun-test".into(), local: true, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint::default(), qroot: root.display().to_string(), deploy_root: "/".into(), facts: BTreeMap::new(), billing: None }
     }
 
+    fn tmp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("shunt-tun-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        registry::private_dir(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn env_write_upserts_and_removes() {
-        let root = std::env::temp_dir().join(format!("shunt-tun-{}", std::process::id()));
-        registry::private_dir(&root).unwrap();
+        let root = tmp("env");
         let client = entry(&root);
         let t = LocalTransport { bin: PathBuf::from("/bin/sh"), timeout_s: Some(10) };
         let f = root.join("env");
@@ -194,6 +253,62 @@ mod tests {
         let text = std::fs::read_to_string(&f).unwrap();
         assert!(!text.contains("ALL_PROXY"));
         assert!(text.contains("WORKDIR=/work"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn heal_not_recorded_is_noop() {
+        let state = tmp("heal-nr");
+        let root = tmp("heal-nr-q");
+        let client = entry(&root);
+        let t = LocalTransport { bin: PathBuf::from("/bin/sh"), timeout_s: Some(10) };
+        let called = std::cell::Cell::new(false);
+        let res = heal_in(&state, &t, &client, |_, _| {
+            called.set(true);
+            Ok(1)
+        })
+        .unwrap();
+        assert!(matches!(res, Heal::NotRecorded));
+        assert!(!called.get());
+        std::fs::remove_dir_all(&state).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn heal_dead_tunnel_reconnects() {
+        let state = tmp("heal-up");
+        let root = tmp("heal-up-q");
+        let client = entry(&root);
+        let t = LocalTransport { bin: PathBuf::from("/bin/sh"), timeout_s: Some(10) };
+        // Recorded + dead: port file only, no live pid.
+        registry::write_private(&port_path(&state, "tun-test"), "1080\n").unwrap();
+        let res = heal_in(&state, &t, &client, |_, _| Ok(4242)).unwrap();
+        assert!(matches!(res, Heal::Reconnected(4242)));
+        std::fs::remove_dir_all(&state).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn heal_dead_tunnel_strips_proxy_on_failure() {
+        let state = tmp("heal-strip");
+        let root = tmp("heal-strip-q");
+        let client = entry(&root);
+        let t = LocalTransport { bin: PathBuf::from("/bin/sh"), timeout_s: Some(10) };
+        // Poisoned env + dead tunnel record (pid file naming a dead pid).
+        env_write(&t, &client, "ALL_PROXY", Some("socks5h://127.0.0.1:1080")).unwrap();
+        env_write(&t, &client, "WORKDIR", Some("/work")).unwrap();
+        registry::write_private(&pid_path(&state, "tun-test"), "99999999\n").unwrap();
+        registry::write_private(&port_path(&state, "tun-test"), "1080\n").unwrap();
+        let res = heal_in(&state, &t, &client, |_, _| anyhow::bail!("ssh refused")).unwrap();
+        assert!(matches!(res, Heal::Stripped));
+        let text = std::fs::read_to_string(root.join("env")).unwrap();
+        assert!(!text.contains("ALL_PROXY"), "{text}");
+        assert!(text.contains("WORKDIR=/work"), "{text}");
+        // State files stay so the next sweep retries the reconnect,
+        // and status reports the intermediate state as stale.
+        assert!(recorded_in(&state, "tun-test"));
+        assert!(status_in(&state, "tun-test").stale);
+        std::fs::remove_dir_all(&state).ok();
         std::fs::remove_dir_all(&root).ok();
     }
 }
