@@ -8,7 +8,7 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -161,13 +161,22 @@ fn requeue_orphans(root: &Path) -> Result<()> {
 /// on success it execs the shutdown command and never returns.
 /// `stop_consumed`: caller already removed the STOP sentinel, so it
 /// must not cancel this countdown (STOP drain honoring an armed flag).
-fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bool) {
+/// `abort_at`: `(signal counter, base)` — a further signal past `base`
+/// cancels the countdown, so a second TERM during signal-path honoring
+/// still kills the daemon promptly.
+fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bool, abort_at: Option<(&Arc<AtomicUsize>, usize)>) {
     let flag = root.join("shutdown_on_idle");
     let grace = shutdown::grace(root);
     dlog(root, "idle_shutdown_armed", ev(json!({"grace_s": grace})));
     eprintln!("[shunt] IDLE-SHUTDOWN ARMED: poweroff in {grace}s (cancel: shunt shutdown off / shunt stop / enqueue a task)");
     for i in (1..=grace).rev() {
         std::thread::sleep(Duration::from_secs(1));
+        if let Some((count, base)) = abort_at {
+            if count.load(Ordering::SeqCst) > base {
+                dlog(root, "idle_shutdown_cancelled", ev(json!({"why": "signal during honoring countdown"})));
+                return;
+            }
+        }
         if !flag.exists() {
             dlog(root, "idle_shutdown_cancelled", ev(json!({"why": "flag removed"})));
             return;
@@ -216,7 +225,8 @@ struct Daemon {
     /// leader pid (= task pgid) -> (task basename, child)
     runpids: HashMap<u32, (String, Child)>,
     last_workers: Option<u32>,
-    got_signal: Arc<AtomicBool>,
+    /// Count of TERM/INT/HUP seen; >0 means exit at the next boundary.
+    got_signal: Arc<AtomicUsize>,
 }
 
 impl Daemon {
@@ -283,12 +293,18 @@ impl Daemon {
         }
     }
 
-    /// TERM/INT/HUP: drop the pidfile, TERM every tracked pgid, wait
-    /// 2 s, KILL survivors, exit 143 (design.md §3.5).
-    fn on_term(&self) -> ! {
+    /// TERM/INT/HUP: TERM every tracked pgid, wait 2 s, KILL
+    /// survivors, reap them into `failed/`, then exit 143
+    /// (design.md §3.5). An armed `shutdown_on_idle` must not be
+    /// orphaned here either — the daemon is the only process that can
+    /// fire it — so with `pending/` empty it is honored exactly as in
+    /// the STOP-drain path (grace countdown, then fire); the pidfile
+    /// and registry entry survive the countdown. A further signal
+    /// during the countdown cancels it and exits promptly. With
+    /// `pending/` non-empty the flag stays armed and a WARNING is
+    /// logged: a restarted daemon drains the queue and honors it.
+    fn on_term(&mut self) -> ! {
         dlog(&self.root, "signal", ev(json!({"forwarded_to": self.runpids.len()})));
-        let _ = std::fs::remove_file(self.root.join("daemon.pid"));
-        shutdown::deregister_qroot(&self.root);
         for pid in self.runpids.keys() {
             exec::signal_pgid(*pid, "TERM");
         }
@@ -296,6 +312,27 @@ impl Daemon {
         for pid in self.runpids.keys() {
             exec::signal_pgid(*pid, "KILL");
         }
+        // Finalize the killed tasks so they land in failed/ rather
+        // than orphaning as running/ entries for the next daemon.
+        for _ in 0..20 {
+            if self.runpids.is_empty() {
+                break;
+            }
+            self.reap();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if self.root.join("shutdown_on_idle").exists() {
+            if shutdown::pending_nonempty(&self.root) {
+                dlog(&self.root, "signal_left_shutdown_armed", ev(json!({"warning": "daemon exiting on signal with shutdown_on_idle armed and pending work; a restarted daemon will honor the flag"})));
+                eprintln!("[shunt] WARNING: exiting on signal; shutdown_on_idle still armed with pending tasks — restart the daemon to honor it");
+            } else {
+                dlog(&self.root, "signal_honors_shutdown", Map::new());
+                let base = self.got_signal.load(Ordering::SeqCst);
+                maybe_shutdown(&self.root, self.runpids.is_empty(), false, Some((&self.got_signal, base)));
+            }
+        }
+        let _ = std::fs::remove_file(self.root.join("daemon.pid"));
+        shutdown::deregister_qroot(&self.root);
         std::process::exit(143);
     }
 }
@@ -309,13 +346,13 @@ pub fn run(root: &Path) -> Result<()> {
     std::fs::write(root.join("daemon.pid"), format!("{}\n", std::process::id()))?;
     shutdown::register_qroot(root);
 
-    let got_signal = Arc::new(AtomicBool::new(false));
+    let got_signal = Arc::new(AtomicUsize::new(0));
     {
-        let flag = Arc::clone(&got_signal);
+        let count = Arc::clone(&got_signal);
         let mut sigs = signal_hook::iterator::Signals::new(SIGNALS).context("cannot install signal handlers")?;
         std::thread::spawn(move || {
             for _ in sigs.forever() {
-                flag.store(true, Ordering::SeqCst);
+                count.fetch_add(1, Ordering::SeqCst);
             }
         });
     }
@@ -327,7 +364,7 @@ pub fn run(root: &Path) -> Result<()> {
     let mut d = Daemon { root: root.clone(), runpids: HashMap::new(), last_workers: None, got_signal };
     let poll = poll_interval();
     loop {
-        if d.got_signal.load(Ordering::SeqCst) {
+        if d.got_signal.load(Ordering::SeqCst) > 0 {
             d.on_term();
         }
         d.reap();
@@ -343,7 +380,7 @@ pub fn run(root: &Path) -> Result<()> {
                 // and a new pending entry still can.
                 if d.root.join("shutdown_on_idle").exists() && !shutdown::pending_nonempty(&d.root) {
                     dlog(&d.root, "stop_drain_honors_shutdown", Map::new());
-                    maybe_shutdown(&d.root, true, true);
+                    maybe_shutdown(&d.root, true, true, None);
                 }
                 let _ = std::fs::remove_file(d.root.join("daemon.pid"));
                 shutdown::deregister_qroot(&d.root);
@@ -353,7 +390,7 @@ pub fn run(root: &Path) -> Result<()> {
         } else {
             d.dispatch();
             if d.root.join("shutdown_on_idle").exists() && d.runpids.is_empty() && !shutdown::pending_nonempty(&d.root) {
-                maybe_shutdown(&d.root, true, false);
+                maybe_shutdown(&d.root, true, false, None);
             }
         }
         std::thread::sleep(poll);

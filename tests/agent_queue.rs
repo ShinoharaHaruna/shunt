@@ -651,3 +651,56 @@ fn env_setup_failure_never_blocks_task() {
     let _ = d.wait();
     assert!(marker.exists());
 }
+
+#[test]
+fn term_honors_armed_shutdown() {
+    // design.md §3.5: a signal-killed daemon must not orphan an armed
+    // shutdown_on_idle flag — after forwarding TERM→KILL it honors the
+    // flag (grace countdown, then fire) instead of exiting with the
+    // box left billing idle.
+    let q = Q::new("termshut");
+    let fired = q.root.join("FIRED");
+    std::fs::write(q.root.join("shutdown_cmd"), format!("touch {}", fired.display())).unwrap();
+    // A running task keeps the idle check from firing on its own, so
+    // the honoring must come from the signal path.
+    q.enqueue_script("long", &sleep_task());
+    q.run_ok(&["shutdown", "on", "2"]);
+    let mut d = q.daemon();
+    wait_until(|| !q.tasks("running").is_empty(), 10, "task running");
+    let pid = q.daemon_pid().unwrap();
+    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    wait_until(|| q.dlog().contains("signal_honors_shutdown"), 10, "signal path honors armed flag");
+    // the TERM'd task is finalized to failed/, not left as an orphan
+    wait_until(|| !q.exits("failed").is_empty(), 10, "killed task finalized");
+    let (_, rc) = q.exits("failed").into_iter().next().unwrap();
+    assert_eq!(rc, 143, "forwarded TERM should record rc 143, got {rc}");
+    wait_until(|| fired.exists(), 15, "shutdown command fired after grace");
+    wait_until(|| q.daemon_pid().is_none(), 5, "daemon gone after exec");
+    assert!(q.dlog().contains("idle_shutdown_exec"));
+    let _ = d.wait();
+}
+
+#[test]
+fn term_with_pending_leaves_flag_armed_loudly() {
+    // design.md §3.5: with pending work the daemon must not power off
+    // (queued tasks would be stranded), so the flag stays armed and a
+    // WARNING event records the hand-off — silent orphaning was the bug.
+    let q = Q::new("termpend");
+    let fired = q.root.join("FIRED");
+    std::fs::write(q.root.join("shutdown_cmd"), format!("touch {}", fired.display())).unwrap();
+    std::fs::write(q.root.join("workers"), "1\n").unwrap();
+    q.enqueue_script("run", &sleep_task());
+    q.enqueue_script("queued", &sleep_task());
+    q.run_ok(&["shutdown", "on", "2"]);
+    let mut d = q.daemon();
+    wait_until(|| !q.tasks("running").is_empty(), 10, "first task running");
+    let pid = q.daemon_pid().unwrap();
+    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    wait_until(|| q.dlog().contains("signal_left_shutdown_armed"), 10, "WARNING event logged");
+    assert!(q.dlog().contains("\"warning\""), "{}", q.dlog());
+    let status = d.wait().unwrap();
+    assert_eq!(status.code(), Some(143), "signal exit code");
+    assert!(q.root.join("shutdown_on_idle").exists(), "flag stays armed for a restarted daemon");
+    assert!(!fired.exists(), "must not power off with pending work");
+    assert_eq!(q.tasks("pending").len(), 1, "queued task survives for the next daemon");
+}

@@ -99,7 +99,7 @@ On startup:
 4. Log `daemon start`.
 5. Run `requeue_orphans` (§3.6).
 
-On TERM/INT/HUP: log, remove `daemon.pid` and the registry entry, send TERM to every tracked task pgid, wait 2 s, send KILL to any survivors, exit 143.
+On TERM/INT/HUP: log, send TERM to every tracked task pgid, wait 2 s, send KILL to any survivors, reap them into `failed/`, then exit 143 after removing `daemon.pid` and the registry entry — with one exception mirroring §3.10: if `shutdown_on_idle` is armed and `pending/` is empty, the daemon first honors the flag (grace countdown, then fire), because exiting without firing would orphan it just as in the STOP path; the pidfile and registry entry are kept for the countdown, and a further signal during it cancels the countdown and exits promptly. If `pending/` is non-empty the flag stays armed — powering off would strand queued work — and a `signal_left_shutdown_armed` WARNING is logged so the orphaning is loud; a restarted daemon drains the queue and honors the flag naturally. (TERM arriving as part of an external poweroff needs no special case: firing the shutdown command again is harmless.)
 
 ### 3.6 Orphan requeue (at-least-once core)
 
