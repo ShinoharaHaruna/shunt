@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -81,7 +82,7 @@ fn now_iso() -> String {
 /// Append one event line to `events.jsonl`. A single `write_all`
 /// under O_APPEND is atomic for lines well under PIPE_BUF, which is
 /// all the two writers (dispatcher push, `task show` observe) ever
-/// produce.
+/// produce — so the JSON and its `\n` go out in ONE write, never two.
 fn append_event(fields: serde_json::Value) -> Result<()> {
     let path = events_path()?;
     if let Some(d) = path.parent() {
@@ -89,9 +90,12 @@ fn append_event(fields: serde_json::Value) -> Result<()> {
     }
     let mut line = serde_json::json!({ "ts": now_iso() });
     line.as_object_mut().unwrap().extend(fields.as_object().cloned().unwrap_or_default());
-    let mut f = fs::OpenOptions::new().append(true).create(true).open(&path)?;
-    f.write_all(serde_json::to_string(&line)?.as_bytes())?;
-    f.write_all(b"\n")?;
+    let mut buf = serde_json::to_string(&line)?;
+    buf.push('\n');
+    let mut f = fs::OpenOptions::new().append(true).create(true).mode(0o600).open(&path)?;
+    f.write_all(buf.as_bytes())?;
+    // Re-tighten a pre-existing loose file (mode above only applies
+    // at creation).
     fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     Ok(())
 }

@@ -54,10 +54,15 @@ pub fn deploy_key(entry: &ClientEntry) -> Result<bool> {
     // the mux master — later key-based execs would ride a session
     // authenticated the wrong way.
     let script = "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; k=$(cat); grep -qxF \"$k\" ~/.ssh/authorized_keys || echo \"$k\" >> ~/.ssh/authorized_keys";
-    let mut child = std::process::Command::new("sshpass").args(["-p", &entry.ssh.password, "ssh", "-p", &entry.ssh.port.to_string(), "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no", "-o", "NumberOfPasswordPrompts=1", "-o", "StrictHostKeyChecking=accept-new", "-o", &format!("UserKnownHostsFile={kh}"), "-o", "ControlPath=none", "-o", &format!("ConnectTimeout={}", entry.ssh_timeout_s.unwrap_or(15)), &format!("{}@{}", entry.ssh.user, entry.ssh.host), script]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().context("spawn sshpass ssh")?;
+    // `sshpass -e` reads the password from the SSHPASS env var — `-p`
+    // would expose it in local /proc/*/cmdline.
+    let mut child = std::process::Command::new("sshpass").args(["-e", "ssh", "-p", &entry.ssh.port.to_string(), "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no", "-o", "NumberOfPasswordPrompts=1", "-o", "StrictHostKeyChecking=accept-new", "-o", &format!("UserKnownHostsFile={kh}"), "-o", "ControlPath=none", "-o", &format!("ConnectTimeout={}", entry.ssh_timeout_s.unwrap_or(15)), &format!("{}@{}", entry.ssh.user, entry.ssh.host), script]).env("SSHPASS", &entry.ssh.password).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().context("spawn sshpass ssh")?;
     use std::io::Write;
     child.stdin.as_mut().context("stdin piped")?.write_all(pub_key.as_bytes())?;
     drop(child.stdin.take());
     let st = child.wait().context("wait sshpass")?;
+    if !st.success() {
+        eprintln!("warning: sshpass key deploy failed (rc {:?}) — bootstrap will likely fail; deploy {}.pub manually", st.code(), entry.ssh.key);
+    }
     Ok(st.success())
 }

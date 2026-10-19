@@ -78,3 +78,23 @@ fn registry_files_are_private() {
     assert_eq!(mode(&tmp.join("state/box.fail")), 0o600, "fail file");
     std::fs::remove_dir_all(&tmp).ok();
 }
+
+/// Registry names become filenames under $SHUNT_HOME — the charset
+/// gate is what keeps `client add ../x` or `project add -rf` from
+/// escaping their dirs or parsing as a flag downstream.
+#[test]
+fn registry_name_charset() {
+    for ok in ["box-1", "gpu.a", "a_b", "localhost", "x9"] {
+        assert!(valid_name(ok).is_ok(), "{ok:?} should be valid");
+    }
+    for bad in ["", ".", "..", "../x", "a/b", "a b", "-rf", "a$()", "a;b"] {
+        assert!(valid_name(bad).is_err(), "{bad:?} must be rejected");
+    }
+    // The io layer enforces it too: load/save/remove reject bad names.
+    let _g = HOME_LOCK.lock().unwrap();
+    let tmp = std::env::temp_dir().join(format!("shunt-test-name-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &tmp);
+    assert!(load_client("../x").is_err());
+    assert!(remove("clients", "../../victim").is_err());
+    std::fs::remove_dir_all(&tmp).ok();
+}

@@ -13,6 +13,9 @@ use anyhow::{Context, Result};
 /// Disabled rows rename too (we read the file directly, not
 /// load_client, which would reject them).
 pub fn rename(old: &str, new: &str) -> Result<()> {
+    // Names are filenames — validate before any path is built.
+    registry::valid_name(old)?;
+    registry::valid_name(new)?;
     anyhow::ensure!(old != "localhost" && new != "localhost", "localhost is the reserved loopback name");
     let home = registry::shunt_home()?;
     let old_row = home.join("clients").join(format!("{old}.toml"));

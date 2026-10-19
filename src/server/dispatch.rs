@@ -32,7 +32,14 @@ fn probe_client(t: &dyn Transport, client: &registry::ClientEntry) -> Reach {
     match t.exec(client, &wire_argv(client, &["status", "--json"]), None) {
         Ok(out) => match crate::proto::wire::parse::<StatusReport>(&out) {
             Ok(rep) => Reach::Up { daemon_alive: rep.daemon.alive },
-            Err(_) => Reach::Up { daemon_alive: false },
+            // An unparseable reply is protocol drift (binary version
+            // skew), not a dead daemon — folding it into Up{false}
+            // would `start` the drifted binary and mask the real
+            // error. Surface it once and treat as Down this sweep.
+            Err(e) => {
+                eprintln!("dispatch: {} status reply unparseable (protocol drift?): {e:#}", client.name);
+                Reach::Down
+            }
         },
         Err(_) => Reach::Down,
     }

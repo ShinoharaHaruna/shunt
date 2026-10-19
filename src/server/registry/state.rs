@@ -4,6 +4,7 @@ use super::paths::shunt_home;
 use crate::server::fsutil::{private_dir, write_private};
 use anyhow::Result;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 /// Consecutive ssh-level connect failures before the escalation hint
@@ -32,11 +33,18 @@ pub fn conn_fail_bump(name: &str) -> u32 {
     n
 }
 
-/// A successful ssh exec clears the streak.
+/// A successful ssh exec clears the streak — and re-tightens the
+/// per-client known_hosts, which `StrictHostKeyChecking=accept-new`
+/// may have just created at umask permissions.
 pub fn conn_fail_reset(name: &str) {
     if let Ok(p) = conn_fail_path(name) {
         if p.exists() {
             let _ = fs::remove_file(p);
+        }
+    }
+    if let Ok(kh) = super::paths::known_hosts_path(name) {
+        if kh.exists() {
+            let _ = fs::set_permissions(&kh, fs::Permissions::from_mode(0o600));
         }
     }
 }

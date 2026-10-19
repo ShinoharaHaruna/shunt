@@ -232,9 +232,23 @@ pub fn list() -> Result<Vec<SpoolEntry>> {
     Ok(out)
 }
 
+/// Task ids are filenames under spool/ — reject anything that is
+/// not `[A-Za-z0-9_-]+`: a `../`-carrying id (CLI-supplied or
+/// planted in a parsed entry) would escape the spool dir.
+fn valid_task_id(id: &str) -> Result<()> {
+    anyhow::ensure!(!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')), "bad task id {id:?}");
+    Ok(())
+}
+
 fn read_entry(dir: &std::path::Path, name: &str) -> Result<SpoolEntry> {
     let text = fs::read_to_string(dir.join(name)).with_context(|| format!("cannot read spool entry {name}"))?;
-    serde_json::from_str(&text).with_context(|| format!("bad JSON in spool/{name}"))
+    let e: SpoolEntry = serde_json::from_str(&text).with_context(|| format!("bad JSON in spool/{name}"))?;
+    // The parsed id feeds body()/remove() paths — it must be a safe
+    // filename and equal to the entry's own stem, or a planted
+    // `"id":"../../x"` would read/delete outside spool/.
+    let stem = name.strip_suffix(".json").unwrap_or(name);
+    anyhow::ensure!(valid_task_id(&e.id).is_ok() && e.id == stem, "spool/{name}: id {:?} is unsafe or does not match its filename", e.id);
+    Ok(e)
 }
 
 /// Rename a bad entry's files to `*.bad` so listings skip them but
@@ -253,12 +267,14 @@ fn quarantine(dir: &std::path::Path, id: &str) {
 
 /// Read the staged task body for an entry.
 pub fn body(task_id: &str) -> Result<String> {
+    valid_task_id(task_id)?;
     let path = spool_dir()?.join(format!("{task_id}.sh"));
     fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))
 }
 
 /// Remove an entry after a clean enqueue ack (both files).
 pub fn remove(task_id: &str) -> Result<()> {
+    valid_task_id(task_id)?;
     let dir = spool_dir()?;
     for ext in ["json", "sh"] {
         match fs::remove_file(dir.join(format!("{task_id}.{ext}"))) {

@@ -13,6 +13,16 @@ pub fn shunt_home() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".config/shunt"))
 }
 
+/// Registry names become filenames under $SHUNT_HOME (clients/,
+/// keys/, cm/, known_hosts/, tunnels/, state/) — restrict them to a
+/// safe charset so no name escapes its dir: nonempty
+/// `[A-Za-z0-9_.-]`, never `.`/`..`, no leading `-` (would parse as
+/// a flag where names reach argv).
+pub fn valid_name(name: &str) -> Result<()> {
+    anyhow::ensure!(!name.is_empty() && name != "." && name != ".." && !name.starts_with('-') && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')), "invalid registry name {name:?}");
+    Ok(())
+}
+
 /// Dedicated keypair for a client: `$SHUNT_HOME/keys/<name>`[.pub].
 /// `client add`/`bootstrap` generate it on demand (design.md §4.1).
 pub fn client_key_path(name: &str) -> Result<PathBuf> {

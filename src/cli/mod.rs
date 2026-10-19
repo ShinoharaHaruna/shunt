@@ -210,6 +210,7 @@ pub fn run(cli: Cli) -> Result<()> {
 
         Command::Project(c) => match c.action {
             ProjectAction::Add { name, repo, desc } => {
+                registry::valid_name(&name)?;
                 let e = registry::ProjectEntry { name: name.clone(), desc: desc.unwrap_or_default(), repo: repo.unwrap_or_default(), defaults: Default::default(), bind: Vec::new() };
                 let p = registry::save_project(&e)?;
                 println!("wrote {}", p.display());

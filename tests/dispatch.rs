@@ -23,11 +23,13 @@ struct FakeTransport {
     /// Extra `done_recent` rows in the `status` answer, for the
     /// ledger's lazy-outcome path.
     done_recent: Vec<(String, i32)>,
+    /// `status` replies with non-wire garbage (protocol drift).
+    drift: bool,
     calls: Mutex<Vec<String>>,
 }
 
 fn fake(pending: &Path) -> FakeTransport {
-    FakeTransport { pending: pending.to_path_buf(), fail_enqueue: false, down: false, done_recent: Vec::new(), calls: Mutex::new(Vec::new()) }
+    FakeTransport { pending: pending.to_path_buf(), fail_enqueue: false, down: false, done_recent: Vec::new(), drift: false, calls: Mutex::new(Vec::new()) }
 }
 
 impl Transport for FakeTransport {
@@ -38,6 +40,9 @@ impl Transport for FakeTransport {
         }
         match argv.get(1).map(String::as_str) {
             Some("status") => {
+                if self.drift {
+                    return Ok("shunt v9.9 ready\n".into());
+                }
                 let done: Vec<String> = self.done_recent.iter().map(|(n, rc)| format!(r#"{{"name":"{n}","rc":{rc}}}"#)).collect();
                 // Wire answers are one compact JSON object line
                 // (design.md §5); extract() line-scans for it.
@@ -277,5 +282,28 @@ fn submit_rejects_dash_slug() -> Result<()> {
     assert!(e.is_err(), "dash slug spooled");
     assert!(e.unwrap_err().to_string().contains("bad slug"));
     assert!(spool::list()?.is_empty(), "rejected submit must not stage");
+    Ok(())
+}
+
+/// A `status` reply that fails wire::parse is protocol drift, not a
+/// dead daemon: it must NOT trigger the auto-heal `start` (which
+/// would run the drifted binary) — the client is treated as Down for
+/// the sweep and the spool entry is retained.
+#[test]
+fn drifted_status_skips_start_and_push() -> Result<()> {
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, _client) = fixture("drift")?;
+    let pending = home.join("pending");
+    std::fs::create_dir_all(&pending)?;
+
+    spool::stage(&entry("t1", "a-t1"), "echo t1\n")?;
+    let t = FakeTransport { drift: true, ..fake(&pending) };
+    assert_eq!(dispatch::sweep_with(&t)?, 0);
+    let calls = t.calls.lock().unwrap();
+    assert_eq!(calls.as_slice(), ["status"], "probe only — no start, no enqueue");
+    drop(calls);
+    assert_eq!(spool::list()?.len(), 1, "entry retained for the next sweep");
+
+    std::fs::remove_dir_all(&home).ok();
     Ok(())
 }

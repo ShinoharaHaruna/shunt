@@ -4,7 +4,7 @@
 //! plus `scp` for `copy_to`. ControlMaster mux per client under
 //! `$SHUNT_HOME/cm/` (design.md §4.1).
 
-use super::{cm_dir, join_argv, wait_deadline};
+use super::{cm_dir, join_argv, shell_quote, wait_deadline};
 use crate::server::registry::ClientEntry;
 use anyhow::{Context, Result};
 use std::io::Write;
@@ -165,7 +165,10 @@ impl super::Transport for SshTransport {
         let mut args = vec!["-P".into(), client.ssh.port.to_string()];
         args.extend(Self::base_args(client).into_iter().skip(2));
         args.push(local.display().to_string());
-        args.push(format!("{}@{}:{}", client.ssh.user, client.ssh.host, remote_path));
+        // The remote side of scp runs through the remote login
+        // shell — the qroot-derived path must be quoted or spaces /
+        // `$()` / backticks break (or inject) the remote command.
+        args.push(format!("{}@{}:{}", client.ssh.user, client.ssh.host, shell_quote(remote_path)));
         // Same contract as exec: retry rc-255 flaps, bounded by the
         // hard deadline (a hang is not a flap — bail without retry or
         // streak bump), feed the drift counter only on exhaustion.
@@ -317,6 +320,28 @@ mod tests {
         std::fs::write(&local, "x").unwrap();
         SshTransport.copy_to(&ssh_client(), &local, "/remote/shunt").unwrap();
         assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "3", "two 255 flaps retried inside the call");
+        std::env::remove_var("SHUNT_HOME");
+        restore_path();
+    }
+
+    #[test]
+    fn scp_remote_path_is_shell_quoted() {
+        let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-scp-home3-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let dir = std::env::temp_dir().join(format!("shunt-fakescp-out3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let argfile = dir.join("lastarg");
+        std::env::set_var("FAKE_ARGV", &argfile);
+        fake_scp("for a in \"$@\"; do last=$a; done; printf %s \"$last\" > \"$FAKE_ARGV\"; exit 0");
+        let local = dir.join("bin");
+        std::fs::write(&local, "x").unwrap();
+        // A qroot-derived path with spaces and `$` must reach scp
+        // quoted — the remote shell would otherwise split/expand it.
+        SshTransport.copy_to(&ssh_client(), &local, "/root/my dir/$(id)").unwrap();
+        assert_eq!(std::fs::read_to_string(&argfile).unwrap(), "u@127.0.0.1:'/root/my dir/$(id)'");
+        std::env::remove_var("FAKE_ARGV");
         std::env::remove_var("SHUNT_HOME");
         restore_path();
     }

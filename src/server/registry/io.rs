@@ -11,6 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn load<T: for<'de> Deserialize<'de>>(dir: &str, name: &str) -> Result<T> {
+    super::paths::valid_name(name)?;
     let path = shunt_home()?.join(dir).join(format!("{name}.toml"));
     let text = fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
     toml::from_str(&text).with_context(|| format!("bad TOML in {}", path.display()))
@@ -47,6 +48,7 @@ const PROJECT_HEADER: &str = "\
 #\n";
 
 fn save_with_header<T: Serialize>(dir: &str, name: &str, value: &T, header: &str) -> Result<PathBuf> {
+    super::paths::valid_name(name)?;
     let path = shunt_home()?.join(dir).join(format!("{name}.toml"));
     if let Some(parent) = path.parent() {
         private_dir(parent)?;
@@ -159,6 +161,7 @@ pub fn list_names(dir: &str) -> Result<Vec<String>> {
 }
 
 pub fn remove(dir: &str, name: &str) -> Result<()> {
+    super::paths::valid_name(name)?;
     let path = shunt_home()?.join(dir).join(format!("{name}.toml"));
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),

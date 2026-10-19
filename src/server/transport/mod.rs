@@ -47,13 +47,15 @@ pub fn shunt_bin(client: &ClientEntry) -> String {
 /// own queue root. Tail args already carrying `--root` are respected.
 pub fn wire_argv(client: &ClientEntry, tail: &[&str]) -> Vec<String> {
     let mut v = vec![shunt_bin(client)];
-    if tail.contains(&"--root") {
+    // `--root` must precede a `--` separator or it lands in the
+    // positional tail itself and the qroot flag is lost — so an
+    // existing `--root` only suppresses injection when it sits
+    // BEFORE `--` (after `--` it is positional data, not the flag).
+    let i = tail.iter().position(|s| *s == "--").unwrap_or(tail.len());
+    if tail[..i].contains(&"--root") {
         v.extend(tail.iter().map(|s| s.to_string()));
         return v;
     }
-    // `--root` must precede a `--` separator or it lands in the
-    // positional tail itself and the qroot flag is lost.
-    let i = tail.iter().position(|s| *s == "--").unwrap_or(tail.len());
     v.extend(tail[..i].iter().map(|s| s.to_string()));
     v.push("--root".into());
     v.push(client.qroot.clone());
@@ -174,5 +176,14 @@ mod tests {
         assert_eq!(v, vec!["/tmp/qt/bin/shunt", "status", "--json", "--root", "/tmp/qt"]);
         let v2 = wire_argv(&c, &["init", "--root", "/other"]);
         assert_eq!(v2.iter().filter(|a| *a == "--root").count(), 1);
+    }
+
+    #[test]
+    fn wire_argv_root_after_separator_is_positional() {
+        let c = super::local_client();
+        // `--root` behind `--` is positional data, not the qroot flag
+        // — injection must still happen, ahead of the separator.
+        let v = wire_argv(&c, &["enqueue", "--", "-", "--root"]);
+        assert_eq!(v, vec!["/tmp/qt/bin/shunt", "enqueue", "--root", "/tmp/qt", "--", "-", "--root"]);
     }
 }

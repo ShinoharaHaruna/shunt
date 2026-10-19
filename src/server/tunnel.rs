@@ -16,7 +16,7 @@
 use crate::server::registry::{self, ClientEntry};
 use crate::server::transport::{ssh_conn_args, Transport};
 use anyhow::{Context, Result};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -64,8 +64,22 @@ fn read_pid(dir: &Path, name: &str) -> Option<u32> {
     s.trim().parse().ok()
 }
 
+/// NUL-separated `/proc/<pid>/cmdline` → our tunnel when argv[0]'s
+/// basename is `ssh` and some whole argv element is `-R` (`ssh -N -R
+/// <port>` is this tunnel's signature). Whole-element matching, same
+/// discipline as the daemon's `is_daemon_cmdline` (design.md §3.4).
+fn is_tunnel_cmdline(cmdline: &[u8]) -> bool {
+    let mut argv = cmdline.split(|&b| b == 0).filter(|a| !a.is_empty());
+    let Some(argv0) = argv.next() else { return false };
+    let base = argv0.rsplit(|&b| b == b'/').next().unwrap_or(argv0);
+    base == b"ssh" && argv.any(|a| a == b"-R")
+}
+
 fn pid_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    // Cmdline identity, not bare /proc existence: a recycled pid must
+    // not pass for a live tunnel (status lies, `up` early-bails, and
+    // `down` would signal a foreign process).
+    std::fs::read(format!("/proc/{pid}/cmdline")).ok().is_some_and(|c| is_tunnel_cmdline(&c))
 }
 
 /// A tunnel was set up for `name` at some point: a pid or port
@@ -125,7 +139,11 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
     }
     let port = port.unwrap_or(DEFAULT_SOCKS_PORT);
     crate::server::fsutil::private_dir(&dir)?;
-    let log = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(dir.join(format!("{}.log", client.name)))?;
+    let log_path = dir.join(format!("{}.log", client.name));
+    let log = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&log_path)?;
+    // mode(0o600) only applies at creation — re-tighten a pre-existing
+    // loose file.
+    let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
     let err = log.try_clone()?;
 
     let mut args = vec!["ssh".to_string()];
@@ -173,7 +191,11 @@ pub enum Heal {
 /// dead box never reaches this (env cannot be edited anyway).
 pub fn heal(t: &dyn Transport, client: &ClientEntry) -> Result<Heal> {
     let dir = tunnels_dir()?;
-    heal_in(&dir, t, client, |t, c| up(t, c, None))
+    // Reconnect on the recorded port, not the default: a tunnel
+    // brought up with `--port 2080` must self-heal onto 2080 — the
+    // port file and the box's ALL_PROXY both name it.
+    let port = std::fs::read_to_string(port_path(&dir, &client.name)).ok().and_then(|s| s.trim().parse::<u16>().ok());
+    heal_in(&dir, t, client, |t, c| up(t, c, port))
 }
 
 /// The decision logic, with the state dir and the reconnect action
@@ -202,8 +224,12 @@ fn heal_in(dir: &Path, t: &dyn Transport, client: &ClientEntry, reconnect: impl 
 pub fn down(t: &dyn Transport, client: &ClientEntry) -> Result<()> {
     let dir = tunnels_dir()?;
     if let Some(pid) = read_pid(&dir, &client.name) {
+        // pid_alive already cmdline-verified the pid as our ssh, so
+        // this can never signal a recycled pid. The tunnel spawned
+        // with process_group(0) — pid == pgid — so TERM the whole
+        // group and any children go with the leader.
         if pid_alive(pid) {
-            let _ = Command::new("kill").args([&pid.to_string()]).status();
+            let _ = crate::agent::exec::signal_pgid(pid, "TERM");
         }
     }
     let _ = std::fs::remove_file(pid_path(&dir, &client.name));

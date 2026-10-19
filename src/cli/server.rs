@@ -140,7 +140,13 @@ pub(crate) struct ClientAddOpts {
 }
 
 pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result<()> {
-    use crate::server::registry::{ClientEntry, SshEndpoint};
+    use crate::server::registry::{valid_name, ClientEntry, SshEndpoint};
+
+    valid_name(name)?;
+    // `add` is create-only: silently overwriting would clobber
+    // hand-edited fields and regenerate the dedicated keypair.
+    let row = crate::server::registry::shunt_home()?.join("clients").join(format!("{name}.toml"));
+    anyhow::ensure!(!row.exists(), "client '{name}' already exists (use `client update` or `client rm` first)");
 
     let mut entry = match template {
         Some(t) => load_vendor_template(t)?,
