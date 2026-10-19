@@ -12,6 +12,14 @@ use std::collections::BTreeMap;
 
 const DEFAULT_POLL_S: u64 = 15;
 
+/// Dead-box probe backoff (design.md §4.5): once a client's ssh
+/// conn_fail streak reaches `CONN_FAIL_ESCALATE` it is probed only
+/// every Nth sweep instead of every sweep, so one dead box (~45s of
+/// connect retries) stops head-of-line blocking live clients behind
+/// it in the entry order. A recovered box clears the streak on its
+/// first periodic probe and resumes full service.
+const PROBE_BACKOFF_EVERY: u64 = 4;
+
 /// Per-client reachability for one sweep.
 enum Reach {
     /// status --json answered; carries daemon liveness.
@@ -51,15 +59,25 @@ fn push(t: &dyn Transport, client: &registry::ClientEntry, entry: &crate::proto:
 /// Transport is resolved per client (`ssh` or the `localhost`
 /// loopback). Returns ids successfully delivered.
 pub fn sweep() -> Result<usize> {
-    sweep_inner(None)
+    sweep_inner(None, 0)
 }
 
 /// Same sweep with a forced transport — tests inject a fake here.
 pub fn sweep_with(t: &dyn Transport) -> Result<usize> {
-    sweep_inner(Some(t))
+    sweep_inner(Some(t), 0)
 }
 
-fn sweep_inner(forced: Option<&dyn Transport>) -> Result<usize> {
+/// Forced-transport sweep at an explicit sweep index — tests the
+/// probe-backoff path without running the dispatcher loop.
+#[doc(hidden)]
+pub fn sweep_at(t: &dyn Transport, idx: u64) -> Result<usize> {
+    sweep_inner(Some(t), idx)
+}
+
+/// `idx` counts sweeps since dispatcher start; it drives dead-box
+/// probe backoff (`PROBE_BACKOFF_EVERY`). Sweep 0 (single-shot
+/// `dispatch --once`, tests) always probes.
+fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
     let entries = spool::list()?;
     let mut clients: BTreeMap<String, registry::ClientEntry> = BTreeMap::new();
     let mut reach: BTreeMap<String, Reach> = BTreeMap::new();
@@ -81,7 +99,13 @@ fn sweep_inner(forced: Option<&dyn Transport>) -> Result<usize> {
         let t: &dyn Transport = forced.unwrap_or_else(|| owned.as_ref());
 
         if let std::collections::btree_map::Entry::Vacant(v) = reach.entry(entry.client.clone()) {
-            let r = probe_client(t, client);
+            let r = if registry::conn_fail_read(&client.name) >= registry::CONN_FAIL_ESCALATE && !idx.is_multiple_of(PROBE_BACKOFF_EVERY) {
+                // Known-dead box between periodic probes: skip the
+                // connect entirely this sweep.
+                Reach::Down
+            } else {
+                probe_client(t, client)
+            };
             if let Reach::Up { daemon_alive: false } = r {
                 // Auto-heal: ssh works but shuntd is dead; start it once.
                 match t.exec(client, &wire_argv(client, &["start"]), None) {
@@ -114,14 +138,16 @@ fn sweep_inner(forced: Option<&dyn Transport>) -> Result<usize> {
 pub fn run(once: bool) -> Result<()> {
     let cfg = registry::load_server_config()?;
     let interval = cfg.poll_interval_s.unwrap_or(DEFAULT_POLL_S);
+    let mut idx = 0u64;
     loop {
         if once {
             sweep()?;
             return Ok(());
         }
-        if let Err(e) = sweep() {
+        if let Err(e) = sweep_inner(None, idx) {
             eprintln!("dispatch: sweep failed, retrying next poll: {e:#}");
         }
+        idx = idx.wrapping_add(1);
         std::thread::sleep(std::time::Duration::from_secs(interval));
     }
 }

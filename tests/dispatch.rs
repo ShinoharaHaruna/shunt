@@ -101,6 +101,37 @@ fn dispatch_ack_deletes_failure_retains() -> Result<()> {
     Ok(())
 }
 
+/// A client whose conn_fail streak hit CONN_FAIL_ESCALATE is probed
+/// only every PROBE_BACKOFF_EVERY sweeps — dead boxes stop costing a
+/// connect timeout on every poll (head-of-line fix).
+#[test]
+fn dead_box_probe_backs_off() -> Result<()> {
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, _client) = fixture("backoff")?;
+    let pending = home.join("pending");
+    std::fs::create_dir_all(&pending)?;
+
+    spool::stage(&entry("t1", "a-t1"), "echo t1\n")?;
+    for _ in 0..registry::CONN_FAIL_ESCALATE {
+        registry::conn_fail_bump("fake-a");
+    }
+
+    let t = FakeTransport { pending: pending.clone(), fail_enqueue: false, down: false, calls: Mutex::new(Vec::new()) };
+    // Sweeps 1..=3 skip the probe entirely: no exec, entry retained.
+    for idx in 1..4 {
+        assert_eq!(dispatch::sweep_at(&t, idx)?, 0);
+    }
+    assert!(t.calls.lock().unwrap().is_empty());
+    assert_eq!(spool::list()?.len(), 1);
+
+    // Sweep 4 probes again; the box is back, delivery proceeds.
+    assert_eq!(dispatch::sweep_at(&t, 4)?, 1);
+    assert!(spool::list()?.is_empty());
+
+    std::fs::remove_dir_all(&home).ok();
+    Ok(())
+}
+
 /// A corrupt spool file must not wedge the sweep: it is quarantined
 /// to `*.bad` and the healthy entry still dispatches.
 #[test]

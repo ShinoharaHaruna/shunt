@@ -303,6 +303,8 @@ Fault isolation: a spool file that fails to read or parse is quarantined — `<i
 
 Auto-heal: if the box answers but the daemon liveness check fails, the dispatcher runs `shunt start --root <qroot>` once before pushing (this is the "power on → claims work" link; box-side autostart remains optional sugar). If the transport fails entirely (box off), the entry stays in spool.
 
+Dead-box probe backoff: the sweep walks entries in order, so a single dead box (a full `ConnectTimeout` × retry stretch) would head-of-line block every live client behind it. Once a client's conn_fail streak reaches `CONN_FAIL_ESCALATE`, the dispatcher probes it only every 4th sweep and treats it as down in between; a recovered box clears the streak on its first periodic probe and resumes full service. `dispatch --once` (sweep 0) always probes.
+
 ## 5. Wire protocol
 
 The remote interface is `shunt <subcmd> --json` on the client. Every response is a single compact JSON object line with `"protocol": 1`. Errors exit nonzero with `{"protocol":1,"ok":false,"error":"..."}`.
@@ -330,6 +332,8 @@ Transport is chosen per client row: `ssh` (default) execs over SSH; `local` (`lo
 | `init`                                   | `--qroot`                      | `{ok}` creates dirs                                                                                                                  |
 
 All argv crossing SSH is shell-quoted with `%q`-equivalent escaping on the server side; quoting is centralized in the transport layer, never hand-rolled per call site.
+
+Every ssh exec is bounded twice, because `ConnectTimeout` covers only the handshake: `ServerAliveInterval=15`/`ServerAliveCountMax=2` kills a half-open TCP session in ~30s, and a 120s hard deadline (`SHUNT_SSH_EXEC_TIMEOUT_S` override) kills a live-but-hung remote command — a deadline hit bails without retry and without bumping the conn_fail streak (a hang is not a flap). The SOCKS5 tunnel sets its own ServerAlive policy and is unaffected. `status --all` probes clients in parallel (one std::thread each), so a dead box costs its own timeout rather than a serial slot; output order stays the registry's sorted order.
 
 ## 6. Rust mapping table
 

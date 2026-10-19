@@ -90,18 +90,37 @@ pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
 /// Aggregate every registered client plus the built-in `localhost`.
 /// Transport resolves per client (ssh / loopback). `--json` emits one
 /// object; otherwise a table — the server status a human asked for.
+///
+/// Probes run in parallel (std::thread, one per client): a dead box
+/// costs its own ssh timeout, not a serial slot ahead of every live
+/// client behind it. Output order stays the registry's sorted order
+/// regardless of join timing.
 pub fn run_all(json: bool) -> Result<()> {
     let names = registry::list_clients()?;
+    let clients = names.iter().map(|n| registry::load_client(n)).collect::<Result<Vec<_>>>()?;
+    // Scoped threads borrow `clients`; each builds its own transport
+    // (`Box<dyn Transport>` is not Sync, and transports are cheap).
+    let statuses: Vec<ClientStatus> = std::thread::scope(|s| {
+        clients
+            .iter()
+            .map(|c| {
+                s.spawn(move || {
+                    let t = transport_for(c);
+                    query(t.as_ref(), c)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().expect("status probe thread panicked"))
+            .collect()
+    });
     let mut out = serde_json::Map::new();
     let mut rows: Vec<Vec<String>> = Vec::new();
-    for name in &names {
-        let client = registry::load_client(name)?;
-        let t = transport_for(&client);
-        let st = query(t.as_ref(), &client);
+    for (client, st) in clients.iter().zip(statuses) {
         if !json {
-            rows.push(row_for(&client, &st));
+            rows.push(row_for(client, &st));
         }
-        out.insert(name.clone(), serde_json::to_value(&st)?);
+        out.insert(client.name.clone(), serde_json::to_value(&st)?);
     }
     let staged = crate::server::spool::list()?;
     if json {
