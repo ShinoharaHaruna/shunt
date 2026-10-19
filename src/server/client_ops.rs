@@ -531,8 +531,14 @@ pub fn bootstrap(t: &dyn Transport, name: &str) -> Result<()> {
     let bindir = bin.rsplit_once('/').map(|(d, _)| d).unwrap_or("").to_string();
     t.exec(&entry, &["mkdir".into(), "-p".into(), bindir.clone()], None).context("mkdir remote bin dir")?;
     let local = std::env::current_exe().context("current_exe")?;
-    t.copy_to(&entry, &local, &bin).context("copy shunt binary")?;
-    t.exec(&entry, &["chmod".into(), "+x".into(), bin.clone()], None)?;
+    // Stage-then-mv: scp truncates the destination in place, which
+    // fails ETXTBSY while the daemon runs the old binary. Bootstrap
+    // doubles as the binary upgrade path (init/start are idempotent),
+    // so it must be safe to re-run on a live box.
+    let staged = format!("{bin}.new");
+    t.copy_to(&entry, &local, &staged).context("copy shunt binary")?;
+    t.exec(&entry, &["chmod".into(), "+x".into(), staged.clone()], None)?;
+    t.exec(&entry, &["mv".into(), "-f".into(), staged, bin.clone()], None).context("install shunt binary")?;
 
     t.exec(&entry, &[bin.clone(), "init".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt init")?;
     t.exec(&entry, &[bin.clone(), "start".into(), "--root".into(), entry.qroot.clone()], None).context("remote shunt start")?;

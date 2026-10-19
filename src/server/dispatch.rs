@@ -35,7 +35,10 @@ fn probe_client(t: &dyn Transport, client: &registry::ClientEntry) -> Reach {
 /// (spool::submit); the remote uses it for the pending filename.
 fn push(t: &dyn Transport, client: &registry::ClientEntry, entry: &crate::proto::task::SpoolEntry, body: &str) -> Result<String> {
     let out = t.exec(client, &wire_argv(client, &["enqueue", "-", &entry.meta.slug, "--json"]), Some(body))?;
-    let v = crate::proto::wire::extract(&out).unwrap_or(serde_json::Value::Null);
+    // Propagate extract failures (no wire line, protocol mismatch):
+    // the entry stays spooled and the error names the cause instead
+    // of degrading to a generic "enqueue rejected".
+    let v = crate::proto::wire::extract(&out).map_err(|e| anyhow::anyhow!("enqueue on {}: {e:#}", client.name))?;
     if v.get("ok").and_then(|o| o.as_bool()) == Some(true) {
         Ok(v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string())
     } else {

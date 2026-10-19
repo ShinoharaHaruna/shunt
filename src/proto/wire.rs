@@ -12,19 +12,38 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// `.bashrc` echoes, motd, or conda-init banners can precede the
 /// answer. Responses are one compact JSON object line (`jprint`
 /// serializes with `to_string`); scan lines from the end and take
-/// the first that parses as an object carrying `"protocol"`.
-/// Returns the object, or an error when no wire line is present.
+/// the first that parses as an object carrying `"protocol"`, then
+/// check that field against `PROTOCOL_VERSION` — a wrong version or
+/// a JSON answer with no `protocol` at all means the box's binary
+/// drifted from this build (design.md §5), and the error says so.
 pub fn extract(out: &str) -> anyhow::Result<serde_json::Value> {
+    let mut saw_object = false;
     for line in out.lines().rev() {
         let line = line.trim();
         if !line.starts_with('{') {
             continue;
         }
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if v.get("protocol").is_some() {
+            if !v.is_object() {
+                continue;
+            }
+            saw_object = true;
+            if let Some(p) = v.get("protocol") {
+                let n = p.as_u64().unwrap_or(u64::MAX);
+                anyhow::ensure!(
+                    n == u64::from(PROTOCOL_VERSION),
+                    "wire protocol mismatch: remote answered protocol={p}, this build speaks {PROTOCOL_VERSION} \
+                     — the box's shunt binary is stale; re-run `shunt client bootstrap <name>` to push the current binary"
+                );
                 return Ok(v);
             }
         }
+    }
+    if saw_object {
+        anyhow::bail!(
+            "remote answered JSON without a \"protocol\" field — its shunt binary predates wire v{PROTOCOL_VERSION}; \
+             re-run `shunt client bootstrap <name>` to push the current binary"
+        );
     }
     anyhow::bail!("no wire JSON object in remote output")
 }
@@ -166,5 +185,25 @@ mod tests {
     fn extract_no_wire_line() {
         assert!(extract("just a banner\nnot json at all\n").is_err());
         assert!(extract("").is_err());
+    }
+
+    #[test]
+    fn extract_protocol_mismatch_is_named() {
+        // A newer (or older) wire version must fail loudly, not be
+        // silently consumed — the error steers to the upgrade path.
+        let err = extract("{\"protocol\":2,\"ok\":true}\n").unwrap_err().to_string();
+        assert!(err.contains("protocol mismatch"), "{err}");
+        assert!(err.contains("client bootstrap"), "{err}");
+        // Non-numeric protocol counts as mismatch, not as valid.
+        assert!(extract("{\"protocol\":\"one\"}\n").is_err());
+    }
+
+    #[test]
+    fn extract_missing_protocol_names_binary_drift() {
+        // JSON without `protocol` is a pre-v1 remote binary, not a
+        // format error — the error distinguishes it from noise.
+        let err = extract("banner\n{\"ok\":true}\n").unwrap_err().to_string();
+        assert!(err.contains("protocol"), "{err}");
+        assert!(err.contains("client bootstrap"), "{err}");
     }
 }
