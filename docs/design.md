@@ -456,7 +456,9 @@ shunt/
     main.rs          # clap entry; calls cli::run
     cli/             # clap command tree (args.rs), dispatch (mod.rs,
                      # server.rs, agent.rs)
-    server/          # registry, spool, dispatcher, ssh transport, status
+    server/          # registry, spool, dispatcher, ssh transport, status,
+                     # client_ops/ (key, lifecycle, update, hygiene, env,
+                     # probe, bootstrap)
     agent/           # daemon loop, FS queue ops, exec, reap, shutdown, probe
     proto/           # task format, wire JSON types (shared)
   etc/vendors/autodl.toml

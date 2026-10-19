@@ -1,0 +1,254 @@
+//! Client deregistration: `rename` and `rm --purge` move/teardown
+//! every piece of state a row name is load-bearing for.
+
+use super::hygiene::rekey;
+use crate::server::registry::{self, ClientEntry};
+use crate::server::transport::{self, Transport};
+use anyhow::{Context, Result};
+
+/// `shunt client rename <old> <new>`: registry names are
+/// load-bearing — the row file, its `name` field, the dedicated
+/// keypair, mux socket, conn-fail streak, tunnel state, queued
+/// spool entries, and every project `[[bind]]` all move together.
+/// Disabled rows rename too (we read the file directly, not
+/// load_client, which would reject them).
+pub fn rename(old: &str, new: &str) -> Result<()> {
+    anyhow::ensure!(old != "localhost" && new != "localhost", "localhost is the reserved loopback name");
+    let home = registry::shunt_home()?;
+    let old_row = home.join("clients").join(format!("{old}.toml"));
+    let new_row = home.join("clients").join(format!("{new}.toml"));
+    let text = std::fs::read_to_string(&old_row).with_context(|| format!("no client row {}", old_row.display()))?;
+    let mut e: ClientEntry = toml::from_str(&text).with_context(|| format!("bad TOML in {}", old_row.display()))?;
+    anyhow::ensure!(!new_row.exists(), "client {new} already exists");
+
+    // Dedicated keypair moves only when ssh.key points at the managed
+    // default path; a user-supplied key path stays untouched.
+    let old_key = registry::client_key_path(old)?;
+    if e.ssh.key == old_key.display().to_string() && old_key.exists() {
+        let nk = registry::client_key_path(new)?;
+        std::fs::rename(&old_key, &nk)?;
+        let (old_pub, new_pub) = (old_key.with_extension("pub"), nk.with_extension("pub"));
+        if old_pub.exists() {
+            std::fs::rename(&old_pub, &new_pub)?;
+        }
+        e.ssh.key = nk.display().to_string();
+    }
+
+    e.name = new.into();
+    let written = registry::save_client(&e)?; // writes clients/<new>.toml
+    std::fs::remove_file(&old_row)?;
+
+    // A live mux master still answers on the old socket path — kill
+    // it; the next exec opens a fresh master under the new name.
+    let old_sock = crate::server::transport::cm_dir()?.join(format!("{old}.sock"));
+    if old_sock.exists() {
+        let _ = std::process::Command::new("ssh").args(["-S", &old_sock.display().to_string(), "-O", "exit", "x"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        let _ = std::fs::remove_file(&old_sock);
+    }
+    // Conn-fail streak and tunnel state follow the identity, as does
+    // the per-client known_hosts file.
+    for (dir, ext) in [("state", "fail"), ("tunnels", "pid"), ("tunnels", "port"), ("tunnels", "log")] {
+        let (from, to) = (home.join(dir).join(format!("{old}.{ext}")), home.join(dir).join(format!("{new}.{ext}")));
+        if from.exists() {
+            let _ = std::fs::rename(&from, &to);
+        }
+    }
+    let (kh_from, kh_to) = (home.join("known_hosts").join(old), home.join("known_hosts").join(new));
+    if kh_from.exists() {
+        let _ = std::fs::rename(&kh_from, &kh_to);
+    }
+    // Undelivered spool entries and project [[bind]] refs.
+    for mut se in crate::server::spool::list()? {
+        if se.client == old {
+            se.client = new.into();
+            let body = crate::server::spool::body(&se.id).unwrap_or_default();
+            crate::server::spool::stage(&se, &body)?;
+        }
+    }
+    // Delivered-task ledger records point at the live row too.
+    crate::server::tasks::retarget_client(old, new);
+    for pname in registry::list_names("projects")? {
+        let mut pj = registry::load_project(&pname)?;
+        let mut touched = false;
+        for b in &mut pj.bind {
+            if b.client == old {
+                b.client = new.into();
+                touched = true;
+            }
+        }
+        if touched {
+            registry::save_project(&pj)?;
+        }
+    }
+    println!("renamed {old} -> {new} ({})", written.display());
+    Ok(())
+}
+
+/// `shunt client rm <name> [--purge]` — deregister a box.
+///
+/// Remote side (best-effort, skipped for local/unreachable boxes):
+/// stop the daemon, pull our pubkey from authorized_keys — matched
+/// by the key blob, not the comment, so a renamed client still
+/// revokes correctly — and with --purge, `rm -rf <qroot>` wipes the
+/// queue state, env files, and the deployed binary. Bound workdirs
+/// are printed for the human to decide; we never rm task data.
+///
+/// Local side (always): kill tunnel + mux master, then row file,
+/// managed keypair, known_hosts entries, conn-fail streak, tunnel
+/// state, queued spool entries, and every project [[bind]] ref.
+/// An unreachable box warns but never wedges the deregistration.
+pub fn remove(name: &str, purge: bool) -> Result<()> {
+    anyhow::ensure!(name != "localhost", "localhost is the reserved loopback name");
+    let home = registry::shunt_home()?;
+    let row = home.join("clients").join(format!("{name}.toml"));
+    let text = std::fs::read_to_string(&row).with_context(|| format!("no client row {}", row.display()))?;
+    let e: ClientEntry = toml::from_str(&text).with_context(|| format!("bad TOML in {}", row.display()))?;
+
+    // --- remote decommission (best-effort) ---
+    if !e.local && !e.ssh.host.is_empty() {
+        let t = transport::transport_for(&e);
+        let _ = crate::server::tunnel::down(t.as_ref(), &e); // kill the -R forward if it is up
+        if !e.qroot.is_empty() {
+            let bin = format!("{}/bin/shunt", e.qroot);
+            if let Err(err) = t.exec(&e, &[bin, "stop".into(), "--root".into(), e.qroot.clone()], None) {
+                eprintln!("warn: remote stop failed ({err}); continuing deregistration");
+            }
+        }
+        // Revoke our key by blob match — comments track the name at
+        // keygen time, which a `client rename` leaves behind. The
+        // blob rides stdin (fixed-string `grep -vF`): base64 blobs
+        // legitimately contain `/`, which turns a `sed '/blob/d'`
+        // address into garbage — sed then exits 0 having done
+        // nothing, leaving our key in place.
+        let pub_path = std::path::PathBuf::from(&e.ssh.key).with_extension("pub");
+        if let Ok(pubkey) = std::fs::read_to_string(&pub_path) {
+            if let Some(blob) = pubkey.split_whitespace().nth(1) {
+                if let Err(err) = revoke_key_blob(t.as_ref(), &e, blob) {
+                    eprintln!("warn: could not revoke authorized_keys ({err})");
+                }
+            }
+        }
+        if purge && !e.qroot.is_empty() {
+            let script = format!("rm -rf {}", crate::server::transport::join_argv(std::slice::from_ref(&e.qroot)));
+            if let Err(err) = t.exec(&e, &["sh".into(), "-c".into(), script], None) {
+                eprintln!("warn: purge of {} failed ({err})", e.qroot);
+            }
+        }
+        // Task data lives in bind workdirs — report, never delete.
+        for pname in registry::list_names("projects")? {
+            let pj = registry::load_project(&pname)?;
+            for b in pj.bind.iter().filter(|b| b.client == name) {
+                eprintln!("note: project {pname} bound workdir {} on {name} — task files left in place", b.workdir);
+            }
+        }
+    }
+
+    // --- local teardown ---
+    if !e.local {
+        rekey(&e)?; // drops OUR known_hosts entries + kills the mux master
+    }
+    std::fs::remove_file(&row)?;
+    let default_key = registry::client_key_path(name)?;
+    if e.ssh.key == default_key.display().to_string() {
+        let _ = std::fs::remove_file(&default_key);
+        let _ = std::fs::remove_file(default_key.with_extension("pub"));
+    }
+    for (dir, ext) in [("state", "fail"), ("tunnels", "pid"), ("tunnels", "port"), ("tunnels", "log")] {
+        let _ = std::fs::remove_file(home.join(dir).join(format!("{name}.{ext}")));
+    }
+    let _ = std::fs::remove_file(registry::known_hosts_path(name)?);
+    for se in crate::server::spool::list()? {
+        if se.client == name {
+            let _ = crate::server::spool::remove(&se.id);
+        }
+    }
+    for pname in registry::list_names("projects")? {
+        let mut pj = registry::load_project(&pname)?;
+        let before = pj.bind.len();
+        pj.bind.retain(|b| b.client != name);
+        if pj.bind.len() != before {
+            registry::save_project(&pj)?;
+            eprintln!("project {pname}: unbound {name}");
+        }
+    }
+    println!("removed {name}");
+    Ok(())
+}
+
+/// The remote revoke snippet, factored out for testing. Reads the
+/// key blob on stdin (no quoting surface at all), drops every
+/// authorized_keys line containing it via fixed-string grep, and
+/// rewrites through a temp file. `grep -vF` exits 1 when the output
+/// is empty — that still means "revoked", so only rc≥2 (e.g.
+/// missing file) propagates; rc 0/1 move the temp file in place.
+fn revoke_key_blob(t: &dyn Transport, e: &ClientEntry, blob: &str) -> Result<()> {
+    t.exec(e, &["sh".into(), "-c".into(), REVOKE_SCRIPT.into()], Some(blob))?;
+    Ok(())
+}
+
+/// See `revoke_key_blob`. `b=$(cat)` takes the blob on stdin.
+const REVOKE_SCRIPT: &str = r#"
+f=~/.ssh/authorized_keys
+b=$(cat)
+[ -f "$f" ] || exit 0
+grep -vF -- "$b" "$f" > "$f.tmp"
+rc=$?
+if [ "$rc" -le 1 ]; then
+    mv "$f.tmp" "$f"
+else
+    rm -f "$f.tmp"
+    exit "$rc"
+fi
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::REVOKE_SCRIPT;
+
+    /// Run REVOKE_SCRIPT against a fake HOME holding the given
+    /// authorized_keys content; returns (rc, resulting file). The
+    /// child's HOME env carries the sandbox — no set_var needed.
+    fn run_revoke(home: &std::path::Path, key_file: Option<&str>, blob: &str) -> (i32, String) {
+        let ssh_dir = home.join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+        if let Some(content) = key_file {
+            std::fs::write(ssh_dir.join("authorized_keys"), content).unwrap();
+        }
+        use std::io::Write;
+        let mut child = std::process::Command::new("sh").args(["-c", REVOKE_SCRIPT]).env("HOME", home).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        child.stdin.as_mut().unwrap().write_all(blob.as_bytes()).unwrap();
+        drop(child.stdin.take());
+        let st = child.wait().unwrap();
+        let after = std::fs::read_to_string(ssh_dir.join("authorized_keys")).unwrap_or_default();
+        (st.code().unwrap_or(-1), after)
+    }
+
+    #[test]
+    fn revoke_removes_blob_with_slash() {
+        // ed25519 base64 blobs legitimately contain `/` — the old
+        // `sed '/blob/d'` truncated its regex at the slash and
+        // silently left the key (rc 0, garbage written instead).
+        let home = std::env::temp_dir().join(format!("shunt-revoke-{}-a", std::process::id()));
+        let blob = "AAAAC3NzaC1lZDI1NTE5AAAAIAb/ab/cd+ef1234";
+        let (rc, after) = run_revoke(&home, Some(&format!("ssh-ed25519 {blob} shunt-test\nssh-rsa otherkey user@host\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOther shunt-other\n")), blob);
+        assert_eq!(rc, 0);
+        assert_eq!(after, "ssh-rsa otherkey user@host\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOther shunt-other\n");
+        assert!(!home.join(".ssh/authorized_keys.tmp").exists());
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn revoke_last_line_and_missing_file() {
+        let home = std::env::temp_dir().join(format!("shunt-revoke-{}-b", std::process::id()));
+        let blob = "AAAAC3NzaC1lZDI1NTE5AAAAIX";
+        // Only our line present: grep -vF outputs nothing (rc 1) —
+        // that still means revoked.
+        let (rc, after) = run_revoke(&home, Some(&format!("ssh-ed25519 {blob} shunt-test\n")), blob);
+        assert_eq!(rc, 0);
+        assert_eq!(after, "");
+        // Missing authorized_keys is a no-op, not an error.
+        let (rc, _) = run_revoke(&home.join("nohome"), None, blob);
+        assert_eq!(rc, 0);
+        std::fs::remove_dir_all(&home).ok();
+    }
+}
