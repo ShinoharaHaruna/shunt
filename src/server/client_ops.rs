@@ -280,12 +280,15 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
             }
         }
         // Revoke our key by blob match — comments track the name at
-        // keygen time, which a `client rename` leaves behind.
+        // keygen time, which a `client rename` leaves behind. The
+        // blob rides stdin (fixed-string `grep -vF`): base64 blobs
+        // legitimately contain `/`, which turns a `sed '/blob/d'`
+        // address into garbage — sed then exits 0 having done
+        // nothing, leaving our key in place.
         let pub_path = std::path::PathBuf::from(&e.ssh.key).with_extension("pub");
         if let Ok(pubkey) = std::fs::read_to_string(&pub_path) {
             if let Some(blob) = pubkey.split_whitespace().nth(1) {
-                let script = format!("sed -i '/{blob}/d' ~/.ssh/authorized_keys");
-                if let Err(err) = t.exec(&e, &["sh".into(), "-c".into(), script], None) {
+                if let Err(err) = revoke_key_blob(t.as_ref(), &e, blob) {
                     eprintln!("warn: could not revoke authorized_keys ({err})");
                 }
             }
@@ -335,6 +338,32 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
     println!("removed {name}");
     Ok(())
 }
+
+/// The remote revoke snippet, factored out for testing. Reads the
+/// key blob on stdin (no quoting surface at all), drops every
+/// authorized_keys line containing it via fixed-string grep, and
+/// rewrites through a temp file. `grep -vF` exits 1 when the output
+/// is empty — that still means "revoked", so only rc≥2 (e.g.
+/// missing file) propagates; rc 0/1 move the temp file in place.
+fn revoke_key_blob(t: &dyn Transport, e: &ClientEntry, blob: &str) -> Result<()> {
+    t.exec(e, &["sh".into(), "-c".into(), REVOKE_SCRIPT.into()], Some(blob))?;
+    Ok(())
+}
+
+/// See `revoke_key_blob`. `b=$(cat)` takes the blob on stdin.
+const REVOKE_SCRIPT: &str = r#"
+f=~/.ssh/authorized_keys
+b=$(cat)
+[ -f "$f" ] || exit 0
+grep -vF -- "$b" "$f" > "$f.tmp"
+rc=$?
+if [ "$rc" -le 1 ]; then
+    mv "$f.tmp" "$f"
+else
+    rm -f "$f.tmp"
+    exit "$rc"
+fi
+"#;
 
 /// `ssh-keygen -R <spec>` scoped to shunt's own known_hosts. The
 /// spec is `host` on port 22 else `[host]:port` — OpenSSH's stored
@@ -524,7 +553,54 @@ pub fn bootstrap(t: &dyn Transport, name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_probe;
+    use super::{parse_probe, REVOKE_SCRIPT};
+
+    /// Run REVOKE_SCRIPT against a fake HOME holding the given
+    /// authorized_keys content; returns (rc, resulting file). The
+    /// child's HOME env carries the sandbox — no set_var needed.
+    fn run_revoke(home: &std::path::Path, key_file: Option<&str>, blob: &str) -> (i32, String) {
+        let ssh_dir = home.join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+        if let Some(content) = key_file {
+            std::fs::write(ssh_dir.join("authorized_keys"), content).unwrap();
+        }
+        use std::io::Write;
+        let mut child = std::process::Command::new("sh").args(["-c", REVOKE_SCRIPT]).env("HOME", home).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        child.stdin.as_mut().unwrap().write_all(blob.as_bytes()).unwrap();
+        drop(child.stdin.take());
+        let st = child.wait().unwrap();
+        let after = std::fs::read_to_string(ssh_dir.join("authorized_keys")).unwrap_or_default();
+        (st.code().unwrap_or(-1), after)
+    }
+
+    #[test]
+    fn revoke_removes_blob_with_slash() {
+        // ed25519 base64 blobs legitimately contain `/` — the old
+        // `sed '/blob/d'` truncated its regex at the slash and
+        // silently left the key (rc 0, garbage written instead).
+        let home = std::env::temp_dir().join(format!("shunt-revoke-{}-a", std::process::id()));
+        let blob = "AAAAC3NzaC1lZDI1NTE5AAAAIAb/ab/cd+ef1234";
+        let (rc, after) = run_revoke(&home, Some(&format!("ssh-ed25519 {blob} shunt-test\nssh-rsa otherkey user@host\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOther shunt-other\n")), blob);
+        assert_eq!(rc, 0);
+        assert_eq!(after, "ssh-rsa otherkey user@host\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOther shunt-other\n");
+        assert!(!home.join(".ssh/authorized_keys.tmp").exists());
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn revoke_last_line_and_missing_file() {
+        let home = std::env::temp_dir().join(format!("shunt-revoke-{}-b", std::process::id()));
+        let blob = "AAAAC3NzaC1lZDI1NTE5AAAAIX";
+        // Only our line present: grep -vF outputs nothing (rc 1) —
+        // that still means revoked.
+        let (rc, after) = run_revoke(&home, Some(&format!("ssh-ed25519 {blob} shunt-test\n")), blob);
+        assert_eq!(rc, 0);
+        assert_eq!(after, "");
+        // Missing authorized_keys is a no-op, not an error.
+        let (rc, _) = run_revoke(&home.join("nohome"), None, blob);
+        assert_eq!(rc, 0);
+        std::fs::remove_dir_all(&home).ok();
+    }
 
     #[test]
     fn parse_sample_output() {
