@@ -393,6 +393,11 @@ pub enum ClientAction {
     /// known_hosts entries, kills the mux master, clears the
     /// conn-fail streak, and tears down a recorded tunnel — things
     /// hand-editing the row would leave pinned to the dead endpoint.
+    /// Warns when another row already sits at the same host:port
+    /// (legal behind NAT, suspicious otherwise). Other row fields
+    /// (qroot, deploy_root, expire, env_setup) are not updatable
+    /// here — edit clients/<name>.toml directly; a moved qroot
+    /// means relocating the remote queue, not just a string.
     Update {
         name: String,
         /// New SSH host

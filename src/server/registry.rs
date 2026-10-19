@@ -154,10 +154,19 @@ pub fn client_key_path(name: &str) -> Result<PathBuf> {
     Ok(shunt_home()?.join("keys").join(name))
 }
 
-/// shunt-scoped known_hosts: TOFU (accept-new) keeps box keys out of
-/// the user's own ~/.ssh and needs no manual maintenance.
-pub fn known_hosts_path() -> Result<PathBuf> {
-    Ok(shunt_home()?.join("known_hosts"))
+/// shunt-scoped known_hosts, one file per client:
+/// `$SHUNT_HOME/known_hosts/<name>`. Per-client files are what make
+/// two rows pointing at the same host:port usable — different boxes
+/// behind one NAT endpoint carry different host keys, and a shared
+/// file would pin the first TOFU'd key against the second client
+/// forever (REMOTE HOST IDENTIFICATION HAS CHANGED deadlock). TOFU
+/// (accept-new) keeps box keys out of the user's own ~/.ssh and
+/// needs no manual maintenance. The dir is created here so callers
+/// never prep it before an ssh-keygen/-R or ssh accept-new write.
+pub fn known_hosts_path(name: &str) -> Result<PathBuf> {
+    let dir = shunt_home()?.join("known_hosts");
+    private_dir(&dir)?;
+    Ok(dir.join(name))
 }
 
 /// Consecutive ssh-level connect failures before the escalation hint
@@ -281,7 +290,11 @@ fn save_with_header<T: Serialize>(dir: &str, name: &str, value: &T, header: &str
         private_dir(parent)?;
     }
     let text = format!("{header}{}", toml::to_string_pretty(value)?);
-    write_private(&path, text)?;
+    // Temp-write + rename: a concurrent `dispatch --once` sweep
+    // reading the row mid-update must never see a truncated TOML.
+    let tmp = path.with_extension("toml.tmp");
+    write_private(&tmp, text)?;
+    fs::rename(&tmp, &path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(path)
 }
 
@@ -395,11 +408,14 @@ pub fn remove(dir: &str, name: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // SHUNT_HOME is process-global: tests that set it serialize here.
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // SHUNT_HOME is process-global and set_var races cross module
+    // boundaries — every test in the crate that touches it must hold
+    // this one lock.
+    pub(crate) static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn client_roundtrip() {

@@ -134,7 +134,11 @@ impl SshTransport {
     /// key, user@host, mux). Shared by exec, scp, and the tunnel
     /// manager.
     pub(crate) fn base_args(client: &ClientEntry) -> Vec<String> {
-        let kh = crate::server::registry::known_hosts_path().map(|p| p.display().to_string()).unwrap_or_else(|_| "/dev/null".into());
+        // Per-client TOFU store: two rows can legitimately share one
+        // host:port behind a NAT gateway while the boxes carry
+        // different host keys — a shared file would deadlock the
+        // second client on REMOTE HOST IDENTIFICATION HAS CHANGED.
+        let kh = crate::server::registry::known_hosts_path(&client.name).map(|p| p.display().to_string()).unwrap_or_else(|_| "/dev/null".into());
         // ControlMaster mux: every exec/scp rides one TCP session per
         // client. Boxes behind startup-limited proxies (`Exceeded
         // MaxStartups`) reject back-to-back handshakes — muxing is the
