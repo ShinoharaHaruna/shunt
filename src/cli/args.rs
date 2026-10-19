@@ -34,7 +34,7 @@ pub enum Command {
     #[command(arg_required_else_help = true)]
     Spool(SpoolCmd),
     /// Task ledger: what a spool id became on the box and how it
-    /// ended (design.md §4.6)
+    /// ended (design.md §4.5)
     #[command(arg_required_else_help = true)]
     Task(TaskCmd),
     /// Manage registered experiment boxes

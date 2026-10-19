@@ -1,4 +1,4 @@
-//! Dispatcher: drains spool/ into clients over SSH (design.md §4.5).
+//! Dispatcher: drains spool/ into clients over SSH (design.md §4.4).
 //! Two-phase, at-least-once end to end: push, ack, delete. Auto-heal
 //! restarts a dead client daemon before pushing. An unreachable box
 //! (powered off) is normal operation, never an error.
@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 const DEFAULT_POLL_S: u64 = 15;
 
-/// Dead-box probe backoff (design.md §4.5): once a client's ssh
+/// Dead-box probe backoff (design.md §4.4): once a client's ssh
 /// conn_fail streak reaches `CONN_FAIL_ESCALATE` it is probed only
 /// every Nth sweep instead of every sweep, so one dead box (~45s of
 /// connect retries) stops head-of-line blocking live clients behind
@@ -116,7 +116,7 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
                         Err(e) => eprintln!("dispatch: {} start failed: {e:#}", client.name),
                     }
                 }
-                // Tunnel self-heal (design.md §4.4): a dead tunnel ssh
+                // Tunnel self-heal (design.md §4.3): a dead tunnel ssh
                 // leaves ALL_PROXY pointing at a dead proxy, poisoning
                 // every task on a live box. Only runs when the probe
                 // actually happened — backoff-skipped probes above
@@ -139,7 +139,7 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
         match spool::body(&entry.id).and_then(|b| push(t, client, &entry, &b)) {
             Ok(name) => {
                 eprintln!("dispatch: {} -> {} as {name}", entry.id, client.name);
-                // Ledger (design.md §4.6): the spool id -> queue
+                // Ledger (design.md §4.5): the spool id -> queue
                 // name mapping survives only here once the spool
                 // entry is gone. Best-effort — a ledger failure
                 // must not make a delivered task look undelivered.

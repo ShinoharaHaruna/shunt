@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result};
 use super::args::Cli;
 
 /// outcome live from the box when none is recorded yet (lazy
-/// write-back, design.md §4.6). A unique id prefix is accepted.
+/// write-back, design.md §4.5). A unique id prefix is accepted.
 pub(crate) fn task_show(id: &str, json: bool) -> Result<()> {
     use crate::server::registry;
     use crate::server::tasks::{self, Observed};
@@ -90,7 +90,7 @@ pub(crate) fn rootless(root: &Option<String>) -> bool {
 
 /// Client for a server-only command (submit, tunnel): `-c` wins,
 /// else `server.toml` `default_client`; neither is an error
-/// (design.md §4.4).
+/// (design.md §4.1).
 pub(crate) fn required_client(flag: &Option<String>) -> Result<String> {
     if let Some(c) = flag {
         return Ok(c.clone());
@@ -102,7 +102,7 @@ pub(crate) fn required_client(flag: &Option<String>) -> Result<String> {
 /// wins; a known local root keeps the call local; only when there
 /// is nothing local to act on does `default_client` fill in — so a
 /// server shell needn't repeat `-c`, and a box's own queue ops are
-/// never hijacked by a stray server.toml (design.md §4.4).
+/// never hijacked by a stray server.toml (design.md §4.1).
 pub(crate) fn resolve_client(flag: &Option<String>, root: &Option<String>) -> Result<Option<String>> {
     if let Some(c) = flag {
         return Ok(Some(c.clone()));

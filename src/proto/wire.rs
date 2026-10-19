@@ -76,12 +76,12 @@ impl WireResult {
     }
 }
 
-/// `shunt enqueue -` ack (design.md §4.5 step 3).
+/// `shunt enqueue -` ack (design.md §4.4 step 3).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EnqueueResult {
     pub protocol: u32,
     pub ok: bool,
-    /// Installed pending name, e.g. `0103_train-v2-ab12.sh`.
+    /// Installed pending entry name, e.g. `0103_train-v2-ab12`.
     pub name: String,
 }
 
@@ -116,7 +116,7 @@ pub struct WorkersState {
 /// A finished task as reported by `status`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExitRecord {
-    /// Task filename, e.g. `0103_train-v2.sh`.
+    /// Task entry name, e.g. `0103_train-v2`.
     pub name: String,
     pub rc: i32,
 }
@@ -168,9 +168,9 @@ mod tests {
     #[test]
     fn extract_skips_login_noise() {
         // banner / motd / conda-init lines before AND after the answer
-        let out = "Welcome to AutoDL\n>>> conda initialize >>>\n{\"protocol\":1,\"ok\":true,\"name\":\"x.sh\"}\ntrailing junk\n";
+        let out = "Welcome to AutoDL\n>>> conda initialize >>>\n{\"protocol\":1,\"ok\":true,\"name\":\"0100_x\"}\ntrailing junk\n";
         let v: EnqueueResult = parse(out).unwrap();
-        assert_eq!(v.name, "x.sh");
+        assert_eq!(v.name, "0100_x");
     }
 
     #[test]

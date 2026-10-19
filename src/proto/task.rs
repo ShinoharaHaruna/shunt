@@ -1,12 +1,13 @@
-//! Task file model. A task on disk is `NNNN_<slug>.sh`; the metadata
-//! here is what the generator (`shunt new`/`mktask`) and the spool
-//! carry, not a file format of its own.
+//! Task file model. A task on disk is a `NNNN_<slug>/` entry dir
+//! holding `task.sh` (design.md §3.1); the metadata here is what the
+//! generator (`shunt new`/`mktask`) and the spool carry, not a file
+//! format of its own.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Metadata for one task, as carried in the server spool entry and
-/// used to render the task body (design.md §3.13, §4.5).
+/// used to render the task body (design.md §3.13, §4.4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskMeta {
     /// Human label; sanitized to `[A-Za-z0-9_.-]` before use.

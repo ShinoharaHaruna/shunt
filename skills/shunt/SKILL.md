@@ -150,14 +150,16 @@ Queue-level runner env lives in the `env` dotenv file under `qroot` (`WORKDIR`, 
 
 `daemon.log` is JSONL, one `{ts, event, ...}` per line:
 
-| event                         | meaning                                                                                                                 |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `daemon start`                | daemon up; orphan requeue ran first                                                                                     |
-| `dispatch <task>`             | claimed pending → running, pgid recorded                                                                                |
-| `finish <task> rc=N -> track` | finalized to `done/` (rc 0) or `failed/`                                                                                |
-| orphan-requeue WARNING        | a `running/` entry had a live pgid at startup; the task was requeued anyway and its guard must absorb the duplicate run |
-| `IDLE-SHUTDOWN ARMED`         | countdown started; cancels on new pending, flag rm, or STOP                                                             |
-| `daemon stop` / signal events | TERM/INT/HUP received; tracked pgids get TERM→KILL                                                                      |
+| event                                                           | meaning                                                                                                             |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `daemon_start`                                                  | daemon up; orphan requeue ran first                                                                                 |
+| `start`                                                         | task claimed pending → running, pgid + slots recorded                                                               |
+| `finish`                                                        | task finalized (`{task, rc, dest}` → `done`/`failed`); a `timeout` field marks budget death                         |
+| `task_timeout`/`..._kill`                                       | a task exceeded its `# shunt:timeout_s=` budget: TERM at the deadline, KILL after a 10 s grace                      |
+| `orphan_live_pgid`                                              | WARNING: a `running/` entry had a live pgid at startup; requeued anyway and its guard must absorb the duplicate run |
+| `idle_shutdown_armed`                                           | countdown started; `idle_shutdown_cancelled`/`_blocked`/`_exec`/`_exec_failed`/`_aborted` trace how it ended        |
+| `signal` / `stop_drained`                                       | TERM/INT/HUP received (tracked pgids get TERM→KILL) / STOP drain finished, daemon exiting                           |
+| `claim_failed`/`finalize_failed`/`requeue_failed`/`ghost_entry` | entry move/quarantine failures — anything persistent here means a permissions or disk problem on the box            |
 
 Interpretation cheats: `daemon.alive=false` with nonempty `pending/` means nothing will run until the dispatcher auto-heals or someone runs `shunt start` on the box. `stop=true` means draining. A task absent from all lists but present in `spool ls` has not been delivered yet.
 

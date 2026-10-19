@@ -81,7 +81,7 @@ The daemon only manages tasks it dequeued itself, tracked via `running/*/pid`. O
 
 1. Slug is sanitized to `[A-Za-z0-9_.-]` (anything else → `-`); an empty result — or one starting with `-` — is an error (the slug rides in remote argv where a leading dash would parse as a flag). The same check runs at `submit`/`new`/`mktask`/`enqueue`.
 2. Take the `.seq` lock, increment, write back, release.
-3. Install the task file into `pending/` with mode 0755 via write-temp-then-`mv` inside `pending/` (atomic on the same filesystem). A remote `scp` + `mv` is _not_ atomic across filesystems; never install directly to the final name from an off-queue temp.
+3. Install a `NNNN_<slug>/` entry dir holding `task.sh` (mode 0755) into `pending/` via a temp dir + `mv` inside `pending/` (atomic on the same filesystem). A remote `scp` + `mv` is _not_ atomic across filesystems; never install directly to the final name from an off-queue temp.
 
 ### 3.4 Daemon liveness
 
@@ -97,7 +97,7 @@ On startup:
 1. Create the four track dirs.
 2. Write `daemon.pid`.
 3. Register the qroot in the box-level registry (§3.11).
-4. Log `daemon start`.
+4. Log `daemon_start`.
 5. Run `requeue_orphans` (§3.6).
 
 On TERM/INT/HUP: log, send TERM to every tracked task pgid, wait 2 s, send KILL to any survivors, reap them into `failed/`, then exit 143 after removing `daemon.pid` and the registry entry — with one exception mirroring §3.10: if `shutdown_on_idle` is armed and `pending/` is empty, the daemon first honors the flag (grace countdown, then fire), because exiting without firing would orphan it just as in the STOP path; the pidfile and registry entry are kept for the countdown, and a further signal during it cancels the countdown and exits promptly. If `pending/` is non-empty the flag stays armed — powering off would strand queued work — and a `signal_left_shutdown_armed` WARNING is logged so the orphaning is loud; a restarted daemon drains the queue and honors the flag naturally. (TERM arriving as part of an external poweroff needs no special case: firing the shutdown command again is harmless.)
@@ -106,7 +106,7 @@ On TERM/INT/HUP: log, send TERM to every tracked task pgid, wait 2 s, send KILL 
 
 Any `running/` entry present at daemon start means a previous daemon died mid-flight. For each:
 
-1. If its `pid` file exists and `kill -0 -- -<pgid>` succeeds, the task process group is _still alive_ — log a WARNING and requeue anyway. The task's own guard makes the rerun a no-op. (This happens when the daemon dies but a detached task survives.)
+1. If its `pid` file exists and `kill -0 -- -<pgid>` succeeds, the task process group is _still alive_ — log an `orphan_live_pgid` WARNING and requeue anyway. The task's own guard makes the rerun a no-op. (This happens when the daemon dies but a detached task survives.)
 2. Strip any stacked `0000_requeued_` prefixes from the basename in a loop — a task requeued twice must not accumulate prefixes.
 3. `mv` the task to `pending/0000_requeued_<clean>` (front of queue).
 4. Its `log` moves to `failed/<clean>.interrupted.<unixts>.log`.
@@ -145,7 +145,7 @@ Re-read every cycle. One resolution path serves the daemon loop and `status`/`wo
   - `mv` the whole entry dir to `done/` if rc 0, else `failed/` (legacy flat entries are normalized into the dir layout here);
   - write `<rc>` to `<name>/exit`;
   - if the task exceeded its `# shunt:timeout_s=` budget (§3.13): it lands in `failed/` even on a clean-exit race, the log gains a `=== timeout: exceeded wall-clock limit <n>s` line, and a `timeout` marker file carrying the limit is written beside `exit` so agents can tell budget death from a plain non-zero rc;
-  - log `finish <base> rc=<rc> -> done|failed`.
+  - log `finish` (`{task, rc, dest}`).
 - If the finalize `mv` fails, the entry is quarantined to `failed/` with a `shunt_error` note and a `finalize_failed` event is logged — same rule as §3.6: no pid-less ghosts in `running/`. If quarantine itself fails, a `ghost_entry` WARNING is logged.
 - Terminal tracks are capped: after each finalize, when `done/` or `failed/` exceeds `SHUNT_TRACK_KEEP` (default 500) entries, the oldest by name sort (sequence order) move to `<track>/.archive/` — dot-prefixed, invisible to every listing, preserved on disk. Without the cap a long-lived queue makes every `status` readdir grow without bound.
 
@@ -161,7 +161,7 @@ If `STOP` exists: no new dispatches. When the running set empties, the daemon re
 
 When `shutdown_on_idle` exists AND `running/` is empty AND `pending/` is empty:
 
-1. Arm: log `IDLE-SHUTDOWN ARMED` with the grace length.
+1. Arm: log `idle_shutdown_armed` with the grace length.
 2. Count down `shutdown_grace_s` (file > default 60) one second at a time. Each second, re-check: flag removed → cancel; a new `pending/` entry → cancel; `STOP` sentinel → cancel and disarm (flag removed — without the disarm the STOP-drain honoring path below would fire it anyway). Exception: when the countdown is running as part of STOP-drain honoring, §3.10, `STOP` is already consumed and does not apply. Also each second: a busy sibling daemon → abort the countdown (`idle_shutdown_blocked`) _without_ disarming — the poll loop re-arms and retries once the box drains. Log every 10 s and for the final 5 s.
 
    A signal during the countdown ends it early: the daemon returns to the poll loop and the normal signal path runs — which, with the flag still armed and `pending/` empty, re-enters honoring through §3.5.
@@ -260,23 +260,23 @@ Registry files are human-editable TOML and safe to keep in git (minus key paths)
 
 `clients/<name>.toml`:
 
-| field                                                         | meaning                                                                                                                                                      |
-| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `name`                                                        | registry key                                                                                                                                                 |
-| `local`                                                       | loopback transport instead of ssh (localhost and any `client add --local` row)                                                                               |
-| `local_bin`                                                   | local transport: binary to exec (default: the running `shunt`)                                                                                               |
-| `timeout_s`                                                   | local transport: exec timeout; on expiry the child is killed                                                                                                 |
-| `ssh_timeout_s`                                               | ssh transport: ConnectTimeout override (default 15)                                                                                                          |
-| `shutdown_cmd`                                                | poweroff command pushed to `<qroot>/shutdown_cmd` at `shutdown on` arm time — point at `true` or a marker script in test envs                                |
-| `disabled`                                                    | opt-out: row stays on disk but is not a usable client (skipped by listings, rejected by load)                                                                |
-| `ssh.host`, `ssh.port`, `ssh.user`, `ssh.key`, `ssh.password` | exec endpoint; `password` feeds the one-time `sshpass ssh-copy-id` key deploy                                                                                |
-| `qroot`                                                       | queue dir on the box                                                                                                                                         |
-| `deploy_root`                                                 | vendor work root (AutoDL: `/root/autodl-tmp`)                                                                                                                |
-| `facts`                                                       | table filled by `probe`/`bootstrap`: `gpu`, `cuda`, `driver`, `cores`, `mem_gb`, `disk_free_gb`, `python`, `can_root`, `shutdown_cmd` (poweroff candidate)   |
-| `expire`                                                      | billing lifetime: `unlimited` (owned box, localhost), `metered` (pay-as-you-go until balance), or an ISO-8601 deadline; empty = unknown                      |
-| `env_setup`, `shell`                                          | task preamble: snippet sourced before every task + the shell it runs under (default bash); pushed to `<qroot>/env_setup`/`shell` by `client env`/`bootstrap` |
-| `endpoint_rotates`                                            | vendor reassigns IP/port across restarts (AutoDL does not); steers the escalation hint after `CONN_FAIL_ESCALATE` consecutive ssh failures                   |
-| `billing.hourly`, `billing.currency`                          | cost metadata surfaced to the agent                                                                                                                          |
+| field                                                         | meaning                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`                                                        | registry key                                                                                                                                                                                                                                                       |
+| `local`                                                       | loopback transport instead of ssh (localhost and any `client add --local` row)                                                                                                                                                                                     |
+| `local_bin`                                                   | local transport: binary to exec (default: the running `shunt`)                                                                                                                                                                                                     |
+| `timeout_s`                                                   | local transport: exec timeout; on expiry the child is killed                                                                                                                                                                                                       |
+| `ssh_timeout_s`                                               | ssh transport: ConnectTimeout override (default 15)                                                                                                                                                                                                                |
+| `shutdown_cmd`                                                | poweroff command pushed to `<qroot>/shutdown_cmd` at `shutdown on` arm time — point at `true` or a marker script in test envs                                                                                                                                      |
+| `disabled`                                                    | opt-out: row stays on disk but is not a usable client (skipped by listings, rejected by load)                                                                                                                                                                      |
+| `ssh.host`, `ssh.port`, `ssh.user`, `ssh.key`, `ssh.password` | exec endpoint; `password` feeds the one-time `sshpass ssh-copy-id` key deploy                                                                                                                                                                                      |
+| `qroot`                                                       | queue dir on the box                                                                                                                                                                                                                                               |
+| `deploy_root`                                                 | vendor work root (AutoDL: `/root/autodl-tmp`)                                                                                                                                                                                                                      |
+| `facts`                                                       | table filled by `probe`/`bootstrap`: `gpu`, `cuda`, `driver`, `cores`, `mem_gb`, `disk_free_gb`, `python`, `can_root`, `shutdown_cmd` (poweroff candidate)                                                                                                         |
+| `expire`                                                      | billing lifetime: `unlimited` (owned box, localhost), `metered` (pay-as-you-go until balance), or an ISO-8601 deadline — write it WITH an offset (`+08:00`/`Z`): a bare datetime has no zone, so `status` cannot turn it into `expires_in_s` (§9). Empty = unknown |
+| `env_setup`, `shell`                                          | task preamble: snippet sourced before every task + the shell it runs under (default bash); pushed to `<qroot>/env_setup`/`shell` by `client env`/`bootstrap`                                                                                                       |
+| `endpoint_rotates`                                            | vendor reassigns IP/port across restarts (AutoDL does not); steers the escalation hint after `CONN_FAIL_ESCALATE` consecutive ssh failures                                                                                                                         |
+| `billing.hourly`, `billing.currency`                          | cost metadata surfaced to the agent                                                                                                                                                                                                                                |
 
 `projects/<name>.toml`:
 
@@ -304,13 +304,13 @@ workdir = "/data/RiboWorld"
 
 A vendor template is a plain client-row TOML used as a seed for `client add` — no special syntax, FILL markers are just comments. Search order, first hit wins: `$SHUNT_VENDOR_DIR`, then `$SHUNT_HOME/vendors/` (user-supplied templates live with the registry they seed), then the repo's `etc/vendors/` (a compile-time path that only resolves for builds from the source tree). `shunt client add --template autodl` seeds `ssh.user=root`, `deploy_root=/root/autodl-tmp`, `qroot=/root/autodl-tmp/queue`, leaving only `ssh.host`, `ssh.port` (and optionally `ssh.password`, `billing`) to fill — `ssh.key` is generated automatically. Templates are defaults for the row file, nothing more — after `add`, the client row stands alone. A bad name errors out listing every template the search dirs actually contain.
 
-### 4.4 Box-side SOCKS5 tunnel
+### 4.3 Box-side SOCKS5 tunnel
 
 Boxes with poor international connectivity (mainland-China GPU vendors) get their work done through a reverse dynamic forward: `ssh -N -R <port>` opens `127.0.0.1:<port>` as a SOCKS5 listener **on the box**, tunneled back to exit via the dev machine's network. `shunt tunnel up -c <name> [--port 1080]` spawns that ssh detached (pidfile + log under `tunnels/`), then upserts `ALL_PROXY=socks5h://127.0.0.1:<port>` into the box's `<qroot>/env` — tasks pick the proxy up with zero task-level edits, because the runner strips ambient proxy vars and then injects the env file. `tunnel down` kills the ssh and removes the env line; `tunnel status` reports liveness and the port. The `h` in `socks5h` makes DNS resolve remotely too, which is the point — a poisoned resolver stays unused. ssh-side prerequisites: OpenSSH ≥7.6 client and `AllowTcpForwarding` on the box's sshd (on by default).
 
 **Self-heal.** The tunnel's own ServerAlive policy kills a half-open ssh in ~90s, which is the common death: the ssh dies while the box and its queue daemon stay up — and `ALL_PROXY` left in `<qroot>/env` then poisons every subsequent task into a dead proxy (failures surface as generic network errors). So the dispatcher sweep treats a recorded tunnel as a liveness responsibility alongside the daemon: on any sweep where the client probe succeeded (`Reach::Up`), a recorded-but-dead tunnel triggers one reconnect attempt via `tunnel up`; if the reconnect fails, ALL_PROXY is stripped from the env file (fail-over to direct egress) while the state files stay, so the next successful-probe sweep retries. Sweeps where the probe is skipped by conn-fail backoff also skip the tunnel check — the throttling is never bypassed — and a dead box is untouched entirely (an env edit needs ssh anyway, and no tasks can run). `tunnel status` reports this intermediate state as `stale`: pid dead, state files present, env possibly still poisoned.
 
-### 4.5 Spool and dispatcher
+### 4.4 Spool and dispatcher
 
 `submit` lands a task in `spool/` as `spool/<task-id>.json` (metadata: project, client, slug, guard, argv, submitted_at) + `<task-id>.sh` (rendered task body). Persisted before returning, so submitting while the box is off is normal operation.
 
@@ -331,7 +331,7 @@ Auto-heal: if the box answers but the daemon liveness check fails, the dispatche
 
 Dead-box probe backoff: the sweep walks entries in order, so a single dead box (a full `ConnectTimeout` × retry stretch) would head-of-line block every live client behind it. Once a client's conn_fail streak reaches `CONN_FAIL_ESCALATE`, the dispatcher probes it only every 4th sweep and treats it as down in between; a recovered box clears the streak on its first periodic probe and resumes full service. `dispatch --once` (sweep 0) always probes.
 
-### 4.6 Task ledger and events
+### 4.5 Task ledger and events
 
 A clean enqueue ack deletes the spool entry, so without a ledger the spool id → queue-name mapping would be lost and an agent could only grep `done/`/`failed/` by shortid. On every successful push the dispatcher writes `tasks/<id>.json` (one file per task, same write-temp-then-rename discipline as the spool): `{id, project, client, slug, queue_name, submitted_at, pushed_at, outcome}`. `queue_name` is the box-side handle (`NNNN_<slug>`) for `logs`/`kill`/`cancel`. A ledger write failure warns but never makes a delivered task look undelivered.
 
@@ -347,23 +347,25 @@ The `protocol` field is validated, not just located: an answer whose `protocol` 
 
 Transport is chosen per client row: `ssh` (default) execs over SSH; `local` (`local = true` in a row, including the pre-registered `localhost`) spawns the same argv via the local `shunt` binary — the wire surface is identical and the loopback needs no network, no key. Every wire call appends `--root <qroot>` from the client row, so the registry is the single source of truth for where the queue lives; ops that read state also pass `--json`.
 
-| op                                       | request                               | response sketch                                                                                                                      |
-| ---------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `enqueue`                                | task body on stdin; `--slug`          | `{ok, name}`                                                                                                                         |
-| `new`                                    | `--slug`, `--guard`, `--` argv        | `{ok, name}`                                                                                                                         |
-| `mktask`                                 | same as `new`                         | task body on stdout                                                                                                                  |
-| `status`                                 | —                                     | `{daemon:{alive,pid}, workers:{value,source}, running[], pending[], done_recent[], failed_recent[], stop, shutdown:{armed,grace_s}}` |
-| `cancel`                                 | pattern                               | `{ok, name}` or error on 0/multi match                                                                                               |
-| `prio`                                   | pattern, n                            | `{ok, from, to}`; error if target exists                                                                                             |
-| `kill`                                   | pattern                               | `{ok, pgid, escalated}`; `{ok, gone}` when the recorded leader is dead/recycled — nothing was signaled                               |
-| `workers get` / `workers set N`          | —                                     | `{workers, source}`                                                                                                                  |
-| `shutdown on [grace]` / `off` / `status` | —                                     | `{armed, grace_s, running, pending}`                                                                                                 |
-| `probe`                                  | —                                     | `{gpu, driver, cuda, cores, mem_gb, disk_free_gb, python}`                                                                           |
-| `logs`                                   | `-n N` and/or `-- pat`; bare = daemon | text stream (`-f` is local-only: ssh exec is collected under the §5 deadline, so wire follow is refused, not streamed)               |
-| `start` / `stop` / `daemon`              | —                                     | `{ok, pid}` / `{ok}` / runs the loop (foreground; `start` daemonizes)                                                                |
-| `init`                                   | `--qroot`                             | `{ok}` creates dirs                                                                                                                  |
+| op                                       | request                               | response sketch                                                                                                                          |
+| ---------------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `enqueue`                                | task body on stdin; `--slug`          | `{ok, name}`                                                                                                                             |
+| `new`                                    | `--slug`, `--guard`, `--` argv        | `{ok, name}`                                                                                                                             |
+| `mktask`                                 | same as `new`                         | task body on stdout                                                                                                                      |
+| `status`                                 | —                                     | `{daemon:{alive,pid}, workers:{value,source}, running[], pending[], done_recent[], failed_recent[], stop, shutdown:{armed,grace_s,cmd}}` |
+| `cancel`                                 | pattern                               | `{ok, name}` or error on 0/multi match                                                                                                   |
+| `prio`                                   | pattern, n                            | `{ok, from, to}`; error if target exists                                                                                                 |
+| `kill`                                   | pattern                               | `{ok, pgid, escalated}`; `{ok, gone}` when the recorded leader is dead/recycled — nothing was signaled                                   |
+| `workers get` / `workers set N`          | —                                     | `{workers, source}`                                                                                                                      |
+| `shutdown on [grace]` / `off` / `status` | —                                     | `{armed, grace_s, running, pending}`                                                                                                     |
+| `probe`                                  | —                                     | `{gpu, driver, cuda, cores, mem_gb, disk_free_gb, python}`                                                                               |
+| `logs`                                   | `-n N` and/or `-- pat`; bare = daemon | text stream (`-f` is local-only: ssh exec is collected under the §5 deadline, so wire follow is refused, not streamed)                   |
+| `start` / `stop` / `daemon`              | —                                     | `{ok, pid}` / `{ok}` / runs the loop (foreground; `start` daemonizes)                                                                    |
+| `init`                                   | `--qroot`                             | `{ok}` creates dirs                                                                                                                      |
 
 All argv crossing SSH is shell-quoted with `%q`-equivalent escaping on the server side; quoting is centralized in the transport layer, never hand-rolled per call site.
+
+`workers` is the one op with two spellings: the CLI form `shunt workers [N]` (positional) for interactive use, and the wire form `workers get` / `workers set N` the server builds when forwarding (`shunt workers -c x 4` → `workers set 4`), so remote argv stays unambiguous.
 
 Every ssh exec is bounded twice, because `ConnectTimeout` covers only the handshake: `ServerAliveInterval=15`/`ServerAliveCountMax=2` kills a half-open TCP session in ~30s, and a 120s hard deadline (`SHUNT_SSH_EXEC_TIMEOUT_S` override) kills a live-but-hung remote command — a deadline hit bails without retry and without bumping the conn_fail streak (a hang is not a flap). The SOCKS5 tunnel sets its own ServerAlive policy and is unaffected. `status --all` probes clients in parallel (one std::thread each), so a dead box costs its own timeout rather than a serial slot; output order stays the registry's sorted order.
 
@@ -410,27 +412,28 @@ Facts are advisory registry data for agent-side matching, not enforced constrain
 
 ## 10. CLI surface
 
-| command                                                        | side   | purpose                     |
-| -------------------------------------------------------------- | ------ | --------------------------- |
-| `shunt submit -p proj -c client [--guard p] -- cmd...`         | server | spool a task                |
-| `shunt submit -c client file.sh`                               | server | spool a script file         |
-| `shunt status [--all] [--json]`                                | server | aggregate client states     |
-| `shunt spool ls\|rm`                                           | server | inspect staging             |
-| `shunt task ls\|show <id>\|events`                             | server | task ledger + outcomes      |
-| `shunt client add\|update\|ls\|show\|bootstrap\|probe\|remove` | server | registry                    |
-| `shunt project add\|bind\|ls\|show`                            | server | registry                    |
-| `shunt dispatch [--once]`                                      | server | run the dispatcher loop     |
-| `shunt daemon`                                                 | client | run queue loop (foreground) |
-| `shunt init`                                                   | client | create queue dirs           |
-| `shunt start` / `shunt stop`                                   | client | daemon lifecycle            |
-| `shunt enqueue [file\|-] [slug]`                               | client | install into pending        |
-| `shunt new` / `shunt mktask`                                   | client | wrap argv as task (guard)   |
-| `shunt status`                                                 | client | queue summary               |
-| `shunt cancel` / `prio` / `kill`                               | client | pending/running ops         |
-| `shunt workers [N]`                                            | client | pool size get/set           |
-| `shunt shutdown on\|off\|status`                               | client | idle poweroff               |
-| `shunt logs [-n N] [-f] [pat]` / `shunt dlog`                  | client | task/daemon logs            |
-| `shunt probe`                                                  | client | machine facts JSON          |
+| command                                                                                           | side   | purpose                     |
+| ------------------------------------------------------------------------------------------------- | ------ | --------------------------- |
+| `shunt submit -p proj -c client [--guard p] -- cmd...`                                            | server | spool a task                |
+| `shunt submit -c client file.sh`                                                                  | server | spool a script file         |
+| `shunt status [--all] [--json]`                                                                   | server | aggregate client states     |
+| `shunt spool ls\|rm`                                                                              | server | inspect staging             |
+| `shunt task ls\|show <id>\|events`                                                                | server | task ledger + outcomes      |
+| `shunt client add\|update\|ls\|show\|bootstrap\|probe\|env\|templates\|hostkey\|rename\|exec\|rm` | server | registry                    |
+| `shunt project add\|bind\|unbind\|ls\|show\|rm`                                                   | server | registry                    |
+| `shunt dispatch [--once]`                                                                         | server | run the dispatcher loop     |
+| `shunt tunnel up\|down\|status -c client`                                                         | server | box-side SOCKS5 tunnel      |
+| `shunt daemon`                                                                                    | client | run queue loop (foreground) |
+| `shunt init`                                                                                      | client | create queue dirs           |
+| `shunt start` / `shunt stop`                                                                      | client | daemon lifecycle            |
+| `shunt enqueue [file\|-] [slug]`                                                                  | client | install into pending        |
+| `shunt new` / `shunt mktask`                                                                      | client | wrap argv as task (guard)   |
+| `shunt status`                                                                                    | client | queue summary               |
+| `shunt cancel` / `prio` / `kill`                                                                  | client | pending/running ops         |
+| `shunt workers [N]` (wire: `workers get`\|`set N`)                                                | client | pool size get/set           |
+| `shunt shutdown on\|off\|status`                                                                  | client | idle poweroff               |
+| `shunt logs [-n N] [-f] [pat]` / `shunt dlog`                                                     | client | task/daemon logs            |
+| `shunt probe`                                                                                     | client | machine facts JSON          |
 
 ## 11. Testing strategy
 
@@ -462,10 +465,11 @@ shunt/
     main.rs          # clap entry; calls cli::run
     cli/             # clap command tree (args.rs), dispatch (mod.rs,
                      # server.rs, agent.rs)
-    server/          # registry/ (types, paths, privacy, state, io),
-                     # spool, dispatcher, transport/ (ssh + local),
+    server/          # registry/ (types, paths, state, io),
+                     # fsutil (0700/0600 privacy), spool, dispatcher,
+                     # tasks (ledger), tunnel, transport/ (ssh + local),
                      # status,
-                     # client_ops/ (key, lifecycle, update, hygiene, env,
+                     # client_ops/ (keys, lifecycle, update, hygiene, env,
                      # probe, bootstrap)
     agent/           # FS queue ops, exec, shutdown flags, probe;
                      # daemon/ = poll loop (core), lifecycle, workers,
@@ -477,5 +481,5 @@ shunt/
   tests/             # tmp-SHUNT_ROOT integration suite
   reference/         # bash oracle (read-only archive)
   task_template.sh
-  README.md  LICENSE(MIT)  install.sh
+  README.md  LICENSE(MIT)
 ```
