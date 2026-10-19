@@ -321,6 +321,20 @@ impl Daemon {
 /// Run the queue loop in the foreground.
 pub fn run(root: &Path) -> Result<()> {
     queue::init(root)?;
+    // Startup mutex (§3.4): an flock on daemon.lock held for the
+    // daemon's whole lifetime serializes the alive() check + pidfile
+    // write — two concurrent `shunt start`/`shunt daemon` can no
+    // longer both pass and spawn twin daemons that fight over the
+    // shared pidfile and registry entry. Fail fast on a held lock:
+    // it means a live daemon (unlike .seq.lock there is nothing to
+    // wait out). flock auto-releases on process death, so a crashed
+    // daemon never wedges the next start.
+    let _lock = std::fs::OpenOptions::new().create(true).append(true).open(root.join("daemon.lock")).context("cannot open daemon.lock")?;
+    match fs2::FileExt::try_lock_exclusive(&_lock) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => anyhow::bail!("daemon already running (daemon.lock held)"),
+        Err(e) => return Err(e).context("flock daemon.lock failed"),
+    }
     if let Some(pid) = alive(root)? {
         anyhow::bail!("daemon already running (pid {pid})");
     }
@@ -398,5 +412,26 @@ fn run_registered(root: &Path) -> Result<()> {
             }
         }
         std::thread::sleep(poll);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fs2::FileExt;
+
+    /// Startup mutex (§3.4): a held daemon.lock means a live daemon —
+    /// run() must bail "already running" immediately rather than
+    /// proceeding to the pidfile and spawning a twin. flock releases
+    /// on process death, so the failed start leaves nothing behind.
+    #[test]
+    fn held_daemon_lock_bails_already_running() {
+        let root = std::env::temp_dir().join(format!("shunt-dlock-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let lock = std::fs::OpenOptions::new().create(true).append(true).open(root.join("daemon.lock")).unwrap();
+        lock.try_lock_exclusive().unwrap();
+        let err = super::run(&root).unwrap_err();
+        assert!(format!("{err:#}").contains("daemon already running"), "unexpected error: {err:#}");
+        drop(lock);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -125,6 +125,13 @@ pub fn start(root: &Path) -> Result<u32> {
             return Ok(pid);
         }
         if let Ok(Some(_)) = spawned.try_wait() {
+            // Under a start race the loser exits early (daemon.lock
+            // held) while the winner's pidfile may land just after
+            // our alive() probe above — re-check before reporting a
+            // failure; the surviving daemon's pid is the right answer.
+            if let Some(pid) = alive(root)? {
+                return Ok(pid);
+            }
             anyhow::bail!("daemon exited during startup; check {}", root.join("daemon.log").display());
         }
         std::thread::sleep(Duration::from_millis(50));
