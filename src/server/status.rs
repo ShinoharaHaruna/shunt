@@ -79,7 +79,7 @@ pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
     let connect_failures = (fails > 0).then_some(fails);
     let endpoint_rotates = client.endpoint_rotates;
     match t.exec(client, &wire_argv(client, &["status", "--json"]), None) {
-        Ok(out) => match serde_json::from_str::<serde_json::Value>(out.trim()) {
+        Ok(out) => match crate::proto::wire::extract(&out) {
             Ok(v) => ClientStatus { reachable: true, report: Some(v), error: None, billing: client.billing.clone(), expire, expires_in_s, connect_failures, endpoint_rotates, facts: (!client.facts.is_empty()).then(|| client.facts.clone()) },
             Err(e) => ClientStatus { reachable: true, report: None, error: Some(format!("bad status JSON: {e}")), billing: client.billing.clone(), expire, expires_in_s, connect_failures, endpoint_rotates, facts: None },
         },

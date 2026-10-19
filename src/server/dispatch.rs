@@ -22,7 +22,7 @@ enum Reach {
 
 fn probe_client(t: &dyn Transport, client: &registry::ClientEntry) -> Reach {
     match t.exec(client, &wire_argv(client, &["status", "--json"]), None) {
-        Ok(out) => match serde_json::from_str::<StatusReport>(out.trim()) {
+        Ok(out) => match crate::proto::wire::parse::<StatusReport>(&out) {
             Ok(rep) => Reach::Up { daemon_alive: rep.daemon.alive },
             Err(_) => Reach::Up { daemon_alive: false },
         },
@@ -35,7 +35,7 @@ fn probe_client(t: &dyn Transport, client: &registry::ClientEntry) -> Reach {
 /// (spool::submit); the remote uses it for the pending filename.
 fn push(t: &dyn Transport, client: &registry::ClientEntry, entry: &crate::proto::task::SpoolEntry, body: &str) -> Result<String> {
     let out = t.exec(client, &wire_argv(client, &["enqueue", "-", &entry.meta.slug, "--json"]), Some(body))?;
-    let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap_or(serde_json::Value::Null);
+    let v = crate::proto::wire::extract(&out).unwrap_or(serde_json::Value::Null);
     if v.get("ok").and_then(|o| o.as_bool()) == Some(true) {
         Ok(v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string())
     } else {

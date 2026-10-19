@@ -299,7 +299,9 @@ Auto-heal: if the box answers but the daemon liveness check fails, the dispatche
 
 ## 5. Wire protocol
 
-The remote interface is `shunt <subcmd> --json` on the client. Every response is a single JSON object with `"protocol": 1`. Errors exit nonzero with `{"protocol":1,"ok":false,"error":"..."}`.
+The remote interface is `shunt <subcmd> --json` on the client. Every response is a single compact JSON object line with `"protocol": 1`. Errors exit nonzero with `{"protocol":1,"ok":false,"error":"..."}`.
+
+Remote stdout is not guaranteed clean: ssh runs the login shell, so `.bashrc` echoes, motd, or conda-init banners can surround the answer. The server never whole-parses stdout — it scans lines from the end and takes the first that parses as a JSON object carrying `"protocol"` (`wire::extract`). Non-JSON responses (`logs`, `mktask` bodies, `KEY=value` probes) are unaffected.
 
 Transport is chosen per client row: `ssh` (default) execs over SSH; `local` (`local = true` in a row, including the pre-registered `localhost`) spawns the same argv via the local `shunt` binary — the wire surface is identical and the loopback needs no network, no key. Every wire call appends `--root <qroot>` from the client row, so the registry is the single source of truth for where the queue lives; ops that read state also pass `--json`.
 

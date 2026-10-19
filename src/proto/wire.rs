@@ -1,11 +1,39 @@
 //! Wire protocol types (design.md §5). Every client subcommand answers
 //! `--json` with one JSON object carrying `"protocol": 1`.
 
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Wire protocol version, embedded in every JSON response.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Extract the wire response from remote stdout that may carry
+/// login-shell noise — `ssh <box> 'cmd'` runs the user's shell, so
+/// `.bashrc` echoes, motd, or conda-init banners can precede the
+/// answer. Responses are one compact JSON object line (`jprint`
+/// serializes with `to_string`); scan lines from the end and take
+/// the first that parses as an object carrying `"protocol"`.
+/// Returns the object, or an error when no wire line is present.
+pub fn extract(out: &str) -> anyhow::Result<serde_json::Value> {
+    for line in out.lines().rev() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if v.get("protocol").is_some() {
+                return Ok(v);
+            }
+        }
+    }
+    anyhow::bail!("no wire JSON object in remote output")
+}
+
+/// `extract` + deserialize into a concrete wire type.
+pub fn parse<T: DeserializeOwned>(out: &str) -> anyhow::Result<T> {
+    let v = extract(out)?;
+    Ok(serde_json::from_value(v)?)
+}
 
 /// Generic success/error envelope for ops that return small results.
 #[derive(Debug, Serialize, Deserialize)]
@@ -106,4 +134,37 @@ pub struct ProbeReport {
     /// row's `shutdown_cmd` field is unset.
     #[serde(default)]
     pub shutdown_cmd: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_clean_line() {
+        let v = extract("{\"protocol\":1,\"ok\":true}\n").unwrap();
+        assert_eq!(v["ok"], true);
+    }
+
+    #[test]
+    fn extract_skips_login_noise() {
+        // banner / motd / conda-init lines before AND after the answer
+        let out = "Welcome to AutoDL\n>>> conda initialize >>>\n{\"protocol\":1,\"ok\":true,\"name\":\"x.sh\"}\ntrailing junk\n";
+        let v: EnqueueResult = parse(out).unwrap();
+        assert_eq!(v.name, "x.sh");
+    }
+
+    #[test]
+    fn extract_ignores_json_looking_noise() {
+        // a banner line that happens to be JSON but is not wire
+        let out = "{\"tips\":\"buy more gpu\"}\n{\"protocol\":1,\"ok\":false,\"error\":\"no\"}\n";
+        let v = extract(out).unwrap();
+        assert_eq!(v["error"], "no");
+    }
+
+    #[test]
+    fn extract_no_wire_line() {
+        assert!(extract("just a banner\nnot json at all\n").is_err());
+        assert!(extract("").is_err());
+    }
 }
