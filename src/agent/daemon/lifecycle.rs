@@ -10,11 +10,14 @@ use std::time::Duration;
 use crate::agent::queue;
 
 /// NUL-separated `/proc/<pid>/cmdline` → this is our daemon when
-/// argv[0]'s basename equals this binary's basename AND some argv
-/// element is exactly `queue::DAEMON_IDENTITY` (the subcommand).
-/// Basename + whole-element beats a substring test: a binary
-/// installed as `shuntd`/`shunt-1.2` still matches itself, while an
-/// unrelated `foo-shunt daemon` cannot false-match (design.md §3.4).
+/// argv[0]'s basename equals this binary's basename AND argv[1] —
+/// the subcommand slot; this CLI has no pre-subcommand global flags —
+/// is exactly `queue::DAEMON_IDENTITY`. Anchoring at argv[1] keeps a
+/// recycled pid running `shunt logs daemon`/`kill daemon` (pattern
+/// positional) from false-identifying as the daemon. Basename +
+/// whole-element beats a substring test: a binary installed as
+/// `shuntd`/`shunt-1.2` still matches itself, while an unrelated
+/// `foo-shunt daemon` cannot false-match (design.md §3.4).
 fn is_daemon_cmdline(cmdline: &[u8], exe_name: &str) -> bool {
     let mut argv = cmdline.split(|&b| b == 0).filter(|a| !a.is_empty());
     let Some(argv0) = argv.next() else {
@@ -24,27 +27,71 @@ fn is_daemon_cmdline(cmdline: &[u8], exe_name: &str) -> bool {
     if base != exe_name.as_bytes() {
         return false;
     }
-    argv.any(|a| a == queue::DAEMON_IDENTITY.as_bytes())
+    argv.next().is_some_and(|a| a == queue::DAEMON_IDENTITY.as_bytes())
 }
 
-/// Daemon liveness: pidfile + `/proc/<pid>` + cmdline identity check
-/// (`is_daemon_cmdline`). Never pgrep (design.md §3.4). Stale
-/// pidfiles are removed.
-pub fn alive(root: &Path) -> Result<Option<u32>> {
+/// Probe outcome for one pid (design.md §3.4). `Dead` is PROOF of
+/// death only: the process is gone (`/proc/<pid>` absent) or its
+/// cmdline was read and does not match (pid recycled — our daemon is
+/// provably gone). A cmdline READ FAILURE (EACCES on a different-uid
+/// process, transient proc pressure) is `Unknown` — inconclusive, so
+/// the fail-safe is to report the daemon alive and touch nothing.
+#[derive(Debug, PartialEq, Eq)]
+enum Probe {
+    Dead,
+    Live,
+    Unknown,
+}
+
+fn probe_pid(pid: u32, exe_name: &str, read_cmdline: impl Fn(u32) -> std::io::Result<Vec<u8>>) -> Probe {
+    if !Path::new(&format!("/proc/{pid}")).exists() {
+        return Probe::Dead;
+    }
+    match read_cmdline(pid) {
+        Ok(c) if is_daemon_cmdline(&c, exe_name) => Probe::Live,
+        Ok(_) => Probe::Dead, // read succeeded, identity mismatch: pid recycled
+        Err(_) => Probe::Unknown,
+    }
+}
+
+/// Shared liveness core. `evict_stale`: remove `daemon.pid` on PROOF
+/// of death (`alive`, which owns its own qroot) vs never touch the
+/// file (`check_alive`, used on peers — the peer daemon owns its
+/// pidfile). `Unknown` never removes and reports alive: fail-safe
+/// against double-spawn and against deleting live state.
+fn alive_impl(root: &Path, evict_stale: bool, read_cmdline: impl Fn(u32) -> std::io::Result<Vec<u8>>) -> Result<Option<u32>> {
     let pidf = root.join("daemon.pid");
     let pid: u32 = match std::fs::read_to_string(&pidf).ok().and_then(|s| s.trim().parse().ok()) {
         Some(p) => p,
         None => return Ok(None),
     };
-    let exe_name = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
-    let hit = exe_name.as_deref().is_some_and(|n| std::fs::read(format!("/proc/{pid}/cmdline")).ok().is_some_and(|c| is_daemon_cmdline(&c, n)));
-    if hit {
-        Ok(Some(pid))
-    } else {
-        // stale or foreign pidfile
-        let _ = std::fs::remove_file(&pidf);
-        Ok(None)
+    let Some(exe_name) = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())) else {
+        // cannot determine own identity → cannot prove anything
+        return Ok(Some(pid));
+    };
+    match probe_pid(pid, &exe_name, read_cmdline) {
+        Probe::Live | Probe::Unknown => Ok(Some(pid)),
+        Probe::Dead => {
+            if evict_stale {
+                let _ = std::fs::remove_file(&pidf);
+            }
+            Ok(None)
+        }
     }
+}
+
+/// Daemon liveness: pidfile + `/proc/<pid>` + cmdline identity check
+/// (`is_daemon_cmdline`). Never pgrep (design.md §3.4). Removes the
+/// pidfile only on proof of death; a cmdline read failure reports the
+/// daemon alive and leaves the file.
+pub fn alive(root: &Path) -> Result<Option<u32>> {
+    alive_impl(root, true, |pid| std::fs::read(format!("/proc/{pid}/cmdline")))
+}
+
+/// Read-only liveness for sibling qroots (`busy_peers`): identical
+/// probe, but never removes `daemon.pid` — the peer daemon owns it.
+pub fn check_alive(root: &Path) -> Result<Option<u32>> {
+    alive_impl(root, false, |pid| std::fs::read(format!("/proc/{pid}/cmdline")))
 }
 
 /// Total wait for the daemon's pidfile after spawn. A 5 s ceiling
@@ -93,7 +140,7 @@ pub fn stop(root: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_daemon_cmdline;
+    use super::{alive_impl, is_daemon_cmdline, Probe};
 
     fn argv(parts: &[&str]) -> Vec<u8> {
         let mut v = Vec::new();
@@ -104,19 +151,74 @@ mod tests {
         v
     }
 
-    /// Identity = argv[0] basename == our exe basename + a whole
-    /// `daemon` argv element (design.md §3.4): renamed binaries
-    /// self-match, unrelated `foo-shunt daemon` does not.
+    /// Identity = argv[0] basename == our exe basename + argv[1] ==
+    /// `daemon` (design.md §3.4): renamed binaries self-match,
+    /// unrelated `foo-shunt daemon` does not, and `daemon` at any
+    /// other argv position (pattern positional of `logs`/`kill`/
+    /// `cancel`) must not match.
     #[test]
     fn cmdline_identity_basename_plus_element() {
         assert!(is_daemon_cmdline(&argv(&["/usr/bin/shunt", "daemon", "--root", "/q"]), "shunt"));
+        assert!(is_daemon_cmdline(&argv(&["shunt", "daemon", "--root", "/q"]), "shunt"));
         // same binary installed under another basename
         assert!(is_daemon_cmdline(&argv(&["shuntd", "daemon", "--root", "/q"]), "shuntd"));
         // basename mismatch: foreign binary must not match
         assert!(!is_daemon_cmdline(&argv(&["/usr/bin/foo-shunt", "daemon"]), "shunt"));
+        // `daemon` at a later argv position is a pattern, not the subcommand
+        assert!(!is_daemon_cmdline(&argv(&["shunt", "logs", "daemon"]), "shunt"));
+        assert!(!is_daemon_cmdline(&argv(&["shunt", "kill", "daemon"]), "shunt"));
         // `daemon` only as a substring of an argv element
         assert!(!is_daemon_cmdline(&argv(&["shunt", "daemonesque"]), "shunt"));
         assert!(!is_daemon_cmdline(&argv(&["shunt", "--root", "/q"]), "shunt"));
         assert!(!is_daemon_cmdline(&[], "shunt"));
+    }
+
+    /// A live pid whose cmdline cannot be read (EACCES, transient
+    /// proc pressure) is inconclusive: `alive` reports the daemon up
+    /// and must NOT remove its pidfile — deleting live state is how
+    /// duplicate daemons get spawned.
+    #[test]
+    fn unreadable_cmdline_keeps_pidfile() {
+        let root = std::env::temp_dir().join(format!("shunt-alive-test-{}-u", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pidf = root.join("daemon.pid");
+        // our own pid: /proc/<pid> exists
+        std::fs::write(&pidf, format!("{}", std::process::id())).unwrap();
+        let unreadable = |_| -> std::io::Result<Vec<u8>> { Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "EACCES")) };
+        let got = alive_impl(&root, true, unreadable).unwrap();
+        assert_eq!(got, Some(std::process::id()));
+        assert!(pidf.exists(), "inconclusive probe must not remove the pidfile");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Read-succeeded-but-mismatched cmdline is proof of death (pid
+    /// recycled): the pidfile is stale and gets removed.
+    #[test]
+    fn mismatched_cmdline_removes_pidfile() {
+        let root = std::env::temp_dir().join(format!("shunt-alive-test-{}-m", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pidf = root.join("daemon.pid");
+        std::fs::write(&pidf, format!("{}", std::process::id())).unwrap();
+        let foreign = |_| -> std::io::Result<Vec<u8>> { Ok(argv(&["sleep", "30"])) };
+        let got = alive_impl(&root, true, foreign).unwrap();
+        assert_eq!(got, None);
+        assert!(!pidf.exists(), "proven-dead pidfile must be removed");
+        // read-only variant (check_alive path) reports dead but keeps the file
+        std::fs::write(&pidf, format!("{}", std::process::id())).unwrap();
+        let got = alive_impl(&root, false, foreign).unwrap();
+        assert_eq!(got, None);
+        assert!(pidf.exists(), "check_alive must never remove a peer's pidfile");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn probe_dead_when_proc_absent() {
+        // pid 2^22-ish: pick a pid guaranteed absent by scanning
+        let mut pid = 4_000_000u32;
+        while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            pid += 1;
+        }
+        let probe = super::probe_pid(pid, "shunt", |_| Ok(vec![]));
+        assert_eq!(probe, Probe::Dead);
     }
 }

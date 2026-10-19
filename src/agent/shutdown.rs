@@ -128,12 +128,20 @@ pub fn deregister_qroot(root: &Path) {
 /// Sibling daemons that still have work: registered qroots whose daemon
 /// is live (`daemon.pid` + cmdline check) AND whose queue holds pending
 /// or running entries. Stale entries (dead or vanished daemon) are
-/// swept as they are found.
+/// swept as they are found. Liveness here is strictly read-only
+/// (`check_alive`): the peer daemon owns its `daemon.pid`, and an
+/// unverifiable-but-alive pid must not cost the peer its pidfile or
+/// its registry entry.
 pub fn busy_peers(root: &Path) -> Vec<PathBuf> {
-    let dir = registry_dir();
+    busy_peers_in(&registry_dir(), root)
+}
+
+/// `busy_peers` over an explicit registry dir (test hook: avoids
+/// mutating process-global `SHUNT_STATE`).
+fn busy_peers_in(dir: &Path, root: &Path) -> Vec<PathBuf> {
     let self_key = registry_key(root);
     let mut busy = Vec::new();
-    let rd = match std::fs::read_dir(&dir) {
+    let rd = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return busy,
     };
@@ -146,7 +154,7 @@ pub fn busy_peers(root: &Path) -> Vec<PathBuf> {
             Ok(s) => PathBuf::from(s.trim()),
             Err(_) => continue,
         };
-        match crate::agent::daemon::alive(&peer) {
+        match crate::agent::daemon::check_alive(&peer) {
             Ok(Some(_)) if pending_nonempty(&peer) || queue::running_list(&peer).map(|v| !v.is_empty()).unwrap_or(false) => {
                 busy.push(peer);
             }
@@ -179,5 +187,33 @@ mod tests {
         assert_eq!(st.grace_s, DEFAULT_GRACE_S);
         assert_eq!(grace(&root), 60);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `busy_peers` is strictly read-only on the peer's qroot: a peer
+    /// whose `daemon.pid` names an alive-but-foreign pid (recycled —
+    /// our test binary's cmdline cannot match `daemon` at argv[1]) is
+    /// proven dead, so its registry entry is swept, but the pidfile
+    /// itself is NEVER removed — the peer daemon owns it.
+    #[test]
+    fn busy_peers_never_removes_peer_pidfile() {
+        let base = std::env::temp_dir().join(format!("shunt-peers-test-{}", std::process::id()));
+        let reg = base.join("qroots");
+        let self_root = base.join("self-q");
+        let peer = base.join("peer-q");
+        std::fs::create_dir_all(&reg).unwrap();
+        std::fs::create_dir_all(&self_root).unwrap();
+        std::fs::create_dir_all(peer.join("pending")).unwrap();
+        let pidf = peer.join("daemon.pid");
+        std::fs::write(&pidf, format!("{}", std::process::id())).unwrap();
+        // pending work so a wrong "alive" verdict would show up in `busy`
+        std::fs::create_dir_all(peer.join("pending/t1")).unwrap();
+        let canon = std::fs::canonicalize(&peer).unwrap();
+        std::fs::write(reg.join(registry_key(&canon)), format!("{}\n", canon.display())).unwrap();
+
+        let busy = busy_peers_in(&reg, &self_root);
+        assert!(busy.is_empty());
+        assert!(pidf.exists(), "busy_peers must not delete the peer's daemon.pid");
+        assert!(reg.read_dir().unwrap().next().is_none(), "proven-dead peer entry should be swept");
+        std::fs::remove_dir_all(&base).ok();
     }
 }

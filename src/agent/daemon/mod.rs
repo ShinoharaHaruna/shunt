@@ -21,7 +21,7 @@ mod reap;
 mod workers;
 
 pub use core::run;
-pub use lifecycle::{alive, start, stop};
+pub use lifecycle::{alive, check_alive, start, stop};
 pub use workers::resolve_workers;
 
 /// Event fields helper: json! object -> Map for dlog.
