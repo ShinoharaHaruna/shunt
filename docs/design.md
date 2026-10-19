@@ -456,7 +456,8 @@ shunt/
     main.rs          # clap entry; calls cli::run
     cli/             # clap command tree (args.rs), dispatch (mod.rs,
                      # server.rs, agent.rs)
-    server/          # registry, spool, dispatcher, ssh transport, status,
+    server/          # registry/ (types, paths, privacy, state, io),
+                     # spool, dispatcher, ssh transport, status,
                      # client_ops/ (key, lifecycle, update, hygiene, env,
                      # probe, bootstrap)
     agent/           # FS queue ops, exec, shutdown flags, probe;
