@@ -457,7 +457,8 @@ shunt/
     cli/             # clap command tree (args.rs), dispatch (mod.rs,
                      # server.rs, agent.rs)
     server/          # registry/ (types, paths, privacy, state, io),
-                     # spool, dispatcher, ssh transport, status,
+                     # spool, dispatcher, transport/ (ssh + local),
+                     # status,
                      # client_ops/ (key, lifecycle, update, hygiene, env,
                      # probe, bootstrap)
     agent/           # FS queue ops, exec, shutdown flags, probe;
