@@ -17,17 +17,20 @@ use crate::agent::shutdown;
 /// on success it execs the shutdown command and never returns.
 /// `stop_consumed`: caller already removed the STOP sentinel, so it
 /// must not cancel this countdown (STOP drain honoring an armed flag).
-/// `abort_at`: `(signal counter, base)` — a further signal past `base`
-/// cancels the countdown, so a second TERM during signal-path honoring
-/// still kills the daemon promptly.
-pub(crate) fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bool, abort_at: Option<(&Arc<AtomicUsize>, usize)>) {
+/// `abort_at`: signal counter — a signal arriving during the countdown
+/// ends it early so the daemon returns to the poll loop and lets the
+/// signal path run promptly (a second TERM during signal-path honoring
+/// still kills the daemon; a TERM during an idle countdown re-enters
+/// honoring through §3.5).
+pub(crate) fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bool, abort_at: Option<&Arc<AtomicUsize>>) {
     let flag = root.join("shutdown_on_idle");
     let grace = shutdown::grace(root);
+    let base = abort_at.map(|c| c.load(Ordering::SeqCst));
     dlog(root, "idle_shutdown_armed", ev(json!({"grace_s": grace})));
     eprintln!("[shunt] IDLE-SHUTDOWN ARMED: poweroff in {grace}s (cancel: shunt shutdown off / shunt stop / enqueue a task)");
     for i in (1..=grace).rev() {
         std::thread::sleep(Duration::from_secs(1));
-        if let Some((count, base)) = abort_at {
+        if let (Some(count), Some(base)) = (abort_at, base) {
             if count.load(Ordering::SeqCst) > base {
                 dlog(root, "idle_shutdown_cancelled", ev(json!({"why": "signal during honoring countdown"})));
                 return;
