@@ -176,6 +176,15 @@ fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bool) {
             dlog(root, "idle_shutdown_cancelled", ev(json!({"why": "pending task arrived"})));
             return;
         }
+        // A sibling daemon on this box with pending/running work must
+        // not be powered off mid-flight. The flag stays armed; the
+        // poll loop re-arms the countdown and retries once the box
+        // drains (design.md §3.11).
+        let peers = shutdown::busy_peers(root);
+        if !peers.is_empty() {
+            dlog(root, "idle_shutdown_blocked", ev(json!({"peers": peers.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()})));
+            return;
+        }
         if !stop_consumed && root.join("STOP").exists() {
             // STOP during a countdown is the operator's cancel: disarm
             // too, or the drain-exit path would just re-honor the flag
@@ -189,10 +198,12 @@ fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bool) {
         }
     }
     // final re-check immediately before exec
-    if flag.exists() && !shutdown::pending_nonempty(root) && running_empty {
+    let peers = shutdown::busy_peers(root);
+    if flag.exists() && !shutdown::pending_nonempty(root) && running_empty && peers.is_empty() {
         let cmd = shutdown::resolve_cmd(root);
         dlog(root, "idle_shutdown_exec", ev(json!({"cmd": cmd})));
         let _ = std::fs::remove_file(root.join("daemon.pid"));
+        shutdown::deregister_qroot(root);
         let err = Command::new("sh").arg("-c").arg(&cmd).exec();
         dlog(root, "idle_shutdown_exec_failed", ev(json!({"error": err.to_string()})));
     } else {
@@ -277,6 +288,7 @@ impl Daemon {
     fn on_term(&self) -> ! {
         dlog(&self.root, "signal", ev(json!({"forwarded_to": self.runpids.len()})));
         let _ = std::fs::remove_file(self.root.join("daemon.pid"));
+        shutdown::deregister_qroot(&self.root);
         for pid in self.runpids.keys() {
             exec::signal_pgid(*pid, "TERM");
         }
@@ -295,6 +307,7 @@ pub fn run(root: &Path) -> Result<()> {
         anyhow::bail!("daemon already running (pid {pid})");
     }
     std::fs::write(root.join("daemon.pid"), format!("{}\n", std::process::id()))?;
+    shutdown::register_qroot(root);
 
     let got_signal = Arc::new(AtomicBool::new(false));
     {
@@ -333,6 +346,7 @@ pub fn run(root: &Path) -> Result<()> {
                     maybe_shutdown(&d.root, true, true);
                 }
                 let _ = std::fs::remove_file(d.root.join("daemon.pid"));
+                shutdown::deregister_qroot(&d.root);
                 return Ok(());
             }
             // STOP set while tasks run: no new dispatches, drain only

@@ -95,10 +95,11 @@ On startup:
 
 1. Create the four track dirs.
 2. Write `daemon.pid`.
-3. Log `daemon start`.
-4. Run `requeue_orphans` (§3.6).
+3. Register the qroot in the box-level registry (§3.11).
+4. Log `daemon start`.
+5. Run `requeue_orphans` (§3.6).
 
-On TERM/INT/HUP: log, remove `daemon.pid`, send TERM to every tracked task pgid, wait 2 s, send KILL to any survivors, exit 143.
+On TERM/INT/HUP: log, remove `daemon.pid` and the registry entry, send TERM to every tracked task pgid, wait 2 s, send KILL to any survivors, exit 143.
 
 ### 3.6 Orphan requeue (at-least-once core)
 
@@ -150,8 +151,11 @@ If `STOP` exists: no new dispatches. When the running set empties, the daemon re
 When `shutdown_on_idle` exists AND `running/` is empty AND `pending/` is empty:
 
 1. Arm: log `IDLE-SHUTDOWN ARMED` with the grace length.
-2. Count down `shutdown_grace_s` (file > default 60) one second at a time. Each second, re-check: flag removed → cancel; a new `pending/` entry → cancel; `STOP` sentinel → cancel and disarm (flag removed — without the disarm the STOP-drain honoring path below would fire it anyway). Exception: when the countdown is running as part of STOP-drain honoring, §3.10, `STOP` is already consumed and does not apply. Log every 10 s and for the final 5 s.
-3. After the countdown, re-check once more: flag still present, pending still empty, running set empty. Only then exec the shutdown command.
+2. Count down `shutdown_grace_s` (file > default 60) one second at a time. Each second, re-check: flag removed → cancel; a new `pending/` entry → cancel; `STOP` sentinel → cancel and disarm (flag removed — without the disarm the STOP-drain honoring path below would fire it anyway). Exception: when the countdown is running as part of STOP-drain honoring, §3.10, `STOP` is already consumed and does not apply. Also each second: a busy sibling daemon → abort the countdown (`idle_shutdown_blocked`) _without_ disarming — the poll loop re-arms and retries once the box drains. Log every 10 s and for the final 5 s.
+
+   **Box-level qroot registry.** Several daemons with different qroots can share one box (a second `--root` started by hand, future local multi-queue); the idle check must not power off while a sibling still has work. At start the daemon registers its canonical qroot path in a shared registry dir (`$SHUNT_STATE/qroots/` > `$XDG_STATE_HOME/shunt/qroots/` > `~/.local/state/shunt/qroots/` > `/tmp/shunt-$USER/qroots/`), one file per qroot keyed by a hash of its path, and removes the entry on every exit path (drain exit, signal, fire). A registered peer _blocks_ firing only when its daemon is live (§3.4 pidfile + cmdline discipline) **and** its queue holds pending or running entries; an idle live daemon does not block — a forgotten idle daemon must not pin the box up forever — and a stale entry is swept when met. The residual race mirrors the existing one: a sibling enqueue landing after the final re-check can still lose to poweroff.
+
+3. After the countdown, re-check once more: flag still present, pending still empty, running set empty, no busy peers. Only then exec the shutdown command.
 4. Resolve the command at the last moment: `shutdown_cmd` file > `$SHUTDOWN_CMD` env > `/usr/bin/shutdown`. Last-moment resolution is what lets a test redirect the command to a marker — a test must never reach the real `/usr/bin/shutdown`. The `shutdown_cmd` file is written by `shunt shutdown on --cmd`, and the server-side arm (`shutdown -c <name> on`) pushes the client row's `shutdown_cmd` field every time, so the registry stays the source of truth — copy a row to a test env and its placeholder command comes along. `shutdown status` reports the resolved command before anything fires.
 
 Residual race, documented in the bash source and retained: an enqueue in flight during the final instant (or an scp mid-copy) can still lose to poweroff. The last re-check narrows but cannot close it.

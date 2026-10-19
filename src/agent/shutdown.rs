@@ -4,7 +4,9 @@
 //! env > `/usr/bin/shutdown`).
 
 use anyhow::Result;
-use std::path::Path;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 
 use crate::agent::queue::{self, DEFAULT_GRACE_S};
 
@@ -67,4 +69,88 @@ pub fn resolve_cmd(root: &Path) -> String {
 /// True when pending/ has at least one `.sh` file.
 pub fn pending_nonempty(root: &Path) -> bool {
     queue::pending_list(root).map(|v| !v.is_empty()).unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
+// Box-level qroot registry (design.md §3.11): several daemons may run
+// different qroots on one box; idle-shutdown must not power off while a
+// sibling daemon still has work. Each daemon registers its qroot here at
+// start, deregisters on every exit path, and the fire path checks peers.
+// ---------------------------------------------------------------------------
+
+/// Registry dir: `$SHUNT_STATE/qroots` > `$XDG_STATE_HOME/shunt/qroots` >
+/// `~/.local/state/shunt/qroots` > `/tmp/shunt-$USER/qroots`. Box-level
+/// by construction — it must not live under any single qroot.
+pub fn registry_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("SHUNT_STATE") {
+        return PathBuf::from(d).join("qroots");
+    }
+    if let Ok(d) = std::env::var("XDG_STATE_HOME") {
+        return PathBuf::from(d).join("shunt").join("qroots");
+    }
+    if let Ok(h) = std::env::var("HOME") {
+        return PathBuf::from(h).join(".local/state/shunt/qroots");
+    }
+    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
+    PathBuf::from(format!("/tmp/shunt-{user}/qroots"))
+}
+
+/// Registry file name for a qroot: a stable hash of the canonical path.
+fn registry_key(root: &Path) -> String {
+    let canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut h = DefaultHasher::new();
+    canon.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// Register this daemon's qroot in the box-level registry. Content is
+/// the canonical qroot path; liveness is read from `<qroot>/daemon.pid`
+/// at check time (same discipline as §3.4).
+pub fn register_qroot(root: &Path) {
+    let dir = registry_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let _ = std::fs::write(dir.join(registry_key(&canon)), format!("{}\n", canon.display()));
+}
+
+/// Remove this daemon's registry entry (every exit path calls this).
+pub fn deregister_qroot(root: &Path) {
+    let _ = std::fs::remove_file(registry_dir().join(registry_key(root)));
+}
+
+/// Sibling daemons that still have work: registered qroots whose daemon
+/// is live (`daemon.pid` + cmdline check) AND whose queue holds pending
+/// or running entries. Stale entries (dead or vanished daemon) are
+/// swept as they are found.
+pub fn busy_peers(root: &Path) -> Vec<PathBuf> {
+    let dir = registry_dir();
+    let self_key = registry_key(root);
+    let mut busy = Vec::new();
+    let rd = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(_) => return busy,
+    };
+    for ent in rd.flatten() {
+        let name = ent.file_name().to_string_lossy().into_owned();
+        if name == self_key {
+            continue;
+        }
+        let peer: PathBuf = match std::fs::read_to_string(ent.path()) {
+            Ok(s) => PathBuf::from(s.trim()),
+            Err(_) => continue,
+        };
+        match crate::agent::daemon::alive(&peer) {
+            Ok(Some(_)) if pending_nonempty(&peer) || queue::running_list(&peer).map(|v| !v.is_empty()).unwrap_or(false) => {
+                busy.push(peer);
+            }
+            Ok(Some(_)) => {}
+            // dead daemon or unverifiable qroot: sweep the entry
+            _ => {
+                let _ = std::fs::remove_file(ent.path());
+            }
+        }
+    }
+    busy
 }

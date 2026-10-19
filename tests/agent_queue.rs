@@ -51,16 +51,25 @@ impl Q {
     /// Spawn a foreground `shunt daemon` we can signal directly.
     /// The returned Child is owned by the caller; Drop cleans up via
     /// the pidfile if a test panics before joining it.
+    ///
+    /// `SHUNT_STATE` isolates the box-level qroot registry per test:
+    /// daemons from parallel tests must not see each other as peers.
     fn daemon(&self) -> Child {
+        self.daemon_state(&self.root.join("boxstate"))
+    }
+
+    /// Same as `daemon()` but with an explicit shared `SHUNT_STATE` —
+    /// two queues on one "box" for peer-coordination tests.
+    fn daemon_state(&self, state: &Path) -> Child {
         let mut c = Command::new(bin());
-        c.args(["daemon", "--root"]).arg(&self.root).env("POLL", "0.1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        c.args(["daemon", "--root"]).arg(&self.root).env("POLL", "0.1").env("SHUNT_STATE", state).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         c.spawn().expect("spawn daemon")
     }
 
     /// `shunt start` (self-daemonizing path).
     fn start(&self) -> String {
         let mut c = Command::new(bin());
-        c.args(["start", "--root"]).arg(&self.root).env("POLL", "0.1");
+        c.args(["start", "--root"]).arg(&self.root).env("POLL", "0.1").env("SHUNT_STATE", self.root.join("boxstate"));
         let o = c.output().expect("shunt start failed");
         assert!(o.status.success(), "start failed: {}", String::from_utf8_lossy(&o.stderr));
         String::from_utf8_lossy(&o.stdout).into_owned()
@@ -476,6 +485,40 @@ fn stop_drain_honored_shutdown_still_cancellable() {
     assert!(!fired.exists());
     let status = d.wait().unwrap();
     assert!(status.success());
+}
+
+#[test]
+fn idle_shutdown_blocked_by_busy_sibling_qroot() {
+    // design.md §3.11: two qroots sharing one box coordinate via the
+    // box-level registry — a drained daemon must not power off while
+    // a sibling daemon still has work in flight.
+    let state = std::env::temp_dir().join(format!("shunt-test-boxstate-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst)));
+    let qa = Q::new("peerA");
+    let qb = Q::new("peerB");
+    // Sibling daemon with a task held on a release marker.
+    let release = qb.root.join("release");
+    let done_b = qb.root.join("b-done");
+    qb.enqueue_script("held", &format!("#!/usr/bin/env bash\nwhile [ ! -f {} ]; do sleep 0.2; done\ntouch {}\n", release.display(), done_b.display()));
+    let mut db = qb.daemon_state(&state);
+    wait_until(|| !qb.tasks("running").is_empty(), 10, "sibling task running");
+
+    let fired = qa.root.join("FIRED");
+    std::fs::write(qa.root.join("shutdown_cmd"), format!("touch {}", fired.display())).unwrap();
+    qa.run_ok(&["shutdown", "on", "2"]);
+    let mut da = qa.daemon_state(&state);
+    wait_until(|| qa.dlog().contains("idle_shutdown_blocked"), 15, "blocked by busy peer");
+    assert!(!fired.exists(), "must not power off while a sibling runs");
+
+    // The sibling finishes; a live-but-idle daemon does NOT block —
+    // a forgotten idle daemon must not pin the box up forever.
+    std::fs::write(&release, b"").unwrap();
+    wait_until(|| done_b.exists(), 15, "sibling task finished");
+    wait_until(|| fired.exists(), 15, "fires once the box drains");
+    assert!(qa.dlog().contains("idle_shutdown_exec"));
+    let _ = da.wait();
+    qb.stop();
+    let _ = db.wait();
+    let _ = std::fs::remove_dir_all(&state);
 }
 
 #[test]
