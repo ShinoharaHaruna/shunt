@@ -45,6 +45,28 @@ fn wait_deadline(mut child: std::process::Child, timeout_s: u64, what: &str) -> 
     }
 }
 
+/// rc-255 retries per call so one flap never surfaces; an exhausted
+/// streak feeds the endpoint-drift counter (design.md §4.1).
+const RETRY: u32 = 3;
+
+/// Build the final error for an ssh-level failure (rc 255): bumps
+/// the conn_fail streak and appends the endpoint-drift hint at
+/// `CONN_FAIL_ESCALATE`. Shared by exec and copy_to so a flap over
+/// either channel counts the same way.
+fn unreachable_err(client: &ClientEntry, stderr: &str) -> anyhow::Error {
+    let n = crate::server::registry::conn_fail_bump(&client.name);
+    let hint = if n >= crate::server::registry::CONN_FAIL_ESCALATE {
+        if client.endpoint_rotates {
+            format!(" [{n} consecutive connect failures — vendor may have reassigned IP/port on restart; check the console, then `shunt client update {} --host … --port …`]", client.name)
+        } else {
+            format!(" [{n} consecutive connect failures — vendor keeps stable endpoints; box is likely off, asleep, or its sshd is down]")
+        }
+    } else {
+        String::new()
+    };
+    anyhow::anyhow!("ssh {}@{}:{} unreachable rc=255: {}{}", client.ssh.user, client.ssh.host, client.ssh.port, stderr, hint)
+}
+
 fn cm_sock(client: &ClientEntry) -> String {
     cm_dir().map(|d| d.join(format!("{}.sock", client.name)).display().to_string()).unwrap_or_else(|_| "/dev/null".into())
 }
@@ -101,7 +123,6 @@ impl super::Transport for SshTransport {
         // MaxStartups` flap). Retry a few times inside the call so a
         // single flap never bubbles up; only an exhausted streak
         // bumps the endpoint-drift counter (design.md §4.1).
-        const RETRY: u32 = 3;
         for attempt in 1..=RETRY {
             let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("spawn ssh")?;
             if let Some(body) = stdin {
@@ -120,17 +141,7 @@ impl super::Transport for SshTransport {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             if rc != 255 || attempt == RETRY {
                 if rc == 255 {
-                    let n = crate::server::registry::conn_fail_bump(&client.name);
-                    let hint = if n >= crate::server::registry::CONN_FAIL_ESCALATE {
-                        if client.endpoint_rotates {
-                            format!(" [{n} consecutive connect failures — vendor may have reassigned IP/port on restart; check the console, then `shunt client update {} --host … --port …`]", client.name)
-                        } else {
-                            format!(" [{n} consecutive connect failures — vendor keeps stable endpoints; box is likely off, asleep, or its sshd is down]")
-                        }
-                    } else {
-                        String::new()
-                    };
-                    anyhow::bail!("ssh {}@{}:{} unreachable rc={}: {}{}", client.ssh.user, client.ssh.host, client.ssh.port, rc, stderr, hint);
+                    return Err(unreachable_err(client, &stderr));
                 }
                 anyhow::bail!("ssh {}@{}:{} rc={}: {}", client.ssh.user, client.ssh.host, client.ssh.port, rc, stderr);
             }
@@ -151,11 +162,29 @@ impl super::Transport for SshTransport {
         args.extend(Self::base_args(client).into_iter().skip(2));
         args.push(local.display().to_string());
         args.push(format!("{}@{}:{}", client.ssh.user, client.ssh.host, remote_path));
-        let out = Command::new("scp").args(&args).stdin(Stdio::null()).output().context("spawn scp")?;
-        if !out.status.success() {
-            anyhow::bail!("scp to {} failed: {}", client.name, String::from_utf8_lossy(&out.stderr).trim());
+        // Same contract as exec: retry rc-255 flaps, bounded by the
+        // hard deadline (a hang is not a flap — bail without retry or
+        // streak bump), feed the drift counter only on exhaustion.
+        // Bootstrap pushes the binary through here, so a single
+        // `Exceeded MaxStartups` flap must not fail the copy.
+        for attempt in 1..=RETRY {
+            let child = Command::new("scp").args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("spawn scp")?;
+            let out = wait_deadline(child, exec_timeout_s(), "scp")?;
+            if out.status.success() {
+                crate::server::registry::conn_fail_reset(&client.name);
+                return Ok(());
+            }
+            let rc = out.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if rc != 255 || attempt == RETRY {
+                if rc == 255 {
+                    return Err(unreachable_err(client, &stderr));
+                }
+                anyhow::bail!("scp to {} failed rc={}: {}", client.name, rc, stderr);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1500));
         }
-        Ok(())
+        unreachable!("retry loop always returns");
     }
 }
 
@@ -226,6 +255,59 @@ mod tests {
         let err = SshTransport.exec(&ssh_client(), &["status".into(), "--json".into()], None).unwrap_err();
         assert!(err.to_string().contains("timed out"), "{err}");
         std::env::remove_var("SHUNT_SSH_EXEC_TIMEOUT_S");
+        restore_path();
+    }
+
+    /// Install a fake `scp` ahead on PATH (same pattern as `fake_ssh`).
+    fn fake_scp(script: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("shunt-fakescp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scp");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let old = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{old}", dir.display()));
+        dir
+    }
+
+    #[test]
+    fn scp_retries_255_flaps_then_succeeds() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-scp-home-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let dir = std::env::temp_dir().join(format!("shunt-fakescp-out-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let count = dir.join("count");
+        fake_scp(&format!("n=$(cat {0} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {0}; [ $n -lt 3 ] && exit 255; exit 0", count.display()));
+        let local = dir.join("bin");
+        std::fs::write(&local, "x").unwrap();
+        SshTransport.copy_to(&ssh_client(), &local, "/remote/shunt").unwrap();
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "3", "two 255 flaps retried inside the call");
+        std::env::remove_var("SHUNT_HOME");
+        restore_path();
+    }
+
+    #[test]
+    fn scp_deadline_bails_without_retry() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-scp-home2-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        std::env::set_var("SHUNT_SSH_EXEC_TIMEOUT_S", "1");
+        let dir = std::env::temp_dir().join(format!("shunt-fakescp-out2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let count = dir.join("count");
+        fake_scp(&format!("n=$(cat {0} 2>/dev/null || echo 0); echo $((n+1)) > {0}; sleep 30", count.display()));
+        let local = dir.join("bin");
+        std::fs::write(&local, "x").unwrap();
+        let err = SshTransport.copy_to(&ssh_client(), &local, "/remote/shunt").unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1", "a hang is not a flap: no retry");
+        std::env::remove_var("SHUNT_SSH_EXEC_TIMEOUT_S");
+        std::env::remove_var("SHUNT_HOME");
         restore_path();
     }
 }
