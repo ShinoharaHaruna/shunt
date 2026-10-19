@@ -178,21 +178,39 @@ pub fn remove_pending(root: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Atomic claim: pending/<name> -> running/<name>. Returns false
-/// when the entry vanished under us (a concurrent cancel/claim) —
-/// the rename itself is the claim, never a prior existence test.
-pub fn claim(root: &Path, name: &str) -> bool {
+/// Atomic claim: pending/<name> -> running/<name>. Ok(false) when the
+/// entry vanished under us (a concurrent cancel/claim) — the rename
+/// itself is the recheck, never a prior existence test. Err means the
+/// entry still exists but cannot be claimed (name collision in
+/// running/, permissions): the caller quarantines it to failed/
+/// rather than spinning on the same unclaimable head every poll.
+pub fn claim(root: &Path, name: &str) -> Result<bool> {
     let pending = root.join("pending");
     let dst = root.join("running").join(name);
     if pending.join(name).is_dir() {
-        return std::fs::rename(pending.join(name), &dst).is_ok();
+        if dst.exists() {
+            anyhow::bail!("cannot claim {name}: running/{name} already exists");
+        }
+        return match std::fs::rename(pending.join(name), &dst) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e).with_context(|| format!("cannot claim {name}")),
+        };
     }
     // Legacy flat file: normalize into the dir layout on claim.
     let src = pending.join(format!("{name}.sh"));
-    if !src.exists() || dst.exists() {
-        return false;
+    if !src.exists() {
+        return Ok(false);
     }
-    std::fs::create_dir_all(&dst).is_ok() && std::fs::rename(&src, dst.join("task.sh")).is_ok()
+    if dst.exists() {
+        anyhow::bail!("cannot claim {name}: running/{name} already exists");
+    }
+    std::fs::create_dir_all(&dst).with_context(|| format!("cannot claim {name}"))?;
+    match std::fs::rename(&src, dst.join("task.sh")) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("cannot claim {name}")),
+    }
 }
 
 /// Pending entries whose name contains `pat`, sorted.

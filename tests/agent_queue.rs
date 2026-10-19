@@ -784,3 +784,31 @@ fn slug_leading_dash_rejected() {
     assert!(!o.status.success(), "new must reject dash slug");
     assert!(q.names("pending").is_empty(), "rejected slugs must not enqueue: {:?}", q.names("pending"));
 }
+
+#[test]
+fn unclaimable_pending_entry_quarantined_not_spun() {
+    // A pending entry that cannot be renamed into running/ (name
+    // collision with a leftover non-empty running dir) must be
+    // quarantined and skipped — spinning on it would wedge the whole
+    // dispatch loop and starve the tasks behind it.
+    let q = Q::new("claimfail");
+    let ran = q.root.join("next-ran");
+    let mut d = q.daemon();
+    // Wait for the startup sweep to finish, then create the
+    // collision — requeue_orphans only runs at daemon start.
+    wait_until(|| q.dlog().contains("workers_now"), 10, "daemon startup done");
+    std::fs::create_dir_all(q.root.join("running/0050_stuck")).unwrap();
+    std::fs::write(q.root.join("running/0050_stuck/task.sh"), sleep_task()).unwrap();
+    std::fs::create_dir_all(q.root.join("pending/0050_stuck")).unwrap();
+    std::fs::write(q.root.join("pending/0050_stuck/task.sh"), sleep_task()).unwrap();
+    q.enqueue_script("next", &marker_task(&ran));
+    wait_until(|| ran.exists(), 15, "task behind the stuck head still dispatched");
+    wait_until(|| q.dlog().contains("claim_failed"), 10, "claim_failed event logged");
+    assert!(q.tasks("pending").is_empty(), "stuck entry must leave pending/: {:?}", q.tasks("pending"));
+    let quarantined = q.root.join("failed/0050_stuck");
+    assert!(quarantined.is_dir(), "stuck entry quarantined to failed/");
+    assert!(quarantined.join("shunt_error").exists(), "quarantine note written");
+    assert!(q.daemon_pid().is_some(), "daemon still alive");
+    q.stop();
+    let _ = d.wait();
+}

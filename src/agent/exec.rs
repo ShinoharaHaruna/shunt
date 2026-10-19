@@ -153,6 +153,32 @@ pub fn kill_task(root: &Path, task_name: &str) -> Result<(u32, bool)> {
     Ok((pgid, true))
 }
 
+/// Quarantine: move a stuck entry to `failed/` with a `shunt_error`
+/// note — the catch-all exit for entries that can neither run nor be
+/// left invisible (claim collisions, failed finalize/requeue
+/// renames). A same-name failed/ entry gets a timestamped suffix
+/// rather than being clobbered.
+pub fn quarantine(root: &Path, track: &str, name: &str, note: &str) -> Result<()> {
+    let failed = root.join("failed");
+    std::fs::create_dir_all(&failed)?;
+    let mut dest = failed.join(name);
+    if dest.exists() || failed.join(format!("{name}.sh")).exists() {
+        dest = failed.join(format!("{name}.quarantined.{}", queue::unix_now()));
+    }
+    let src_dir = root.join(track).join(name);
+    if src_dir.is_dir() {
+        std::fs::rename(&src_dir, &dest).with_context(|| format!("cannot quarantine {name}"))?;
+    } else {
+        std::fs::create_dir_all(&dest)?;
+        let flat = root.join(track).join(format!("{name}.sh"));
+        if flat.exists() {
+            std::fs::rename(&flat, dest.join("task.sh")).with_context(|| format!("cannot quarantine {name}"))?;
+        }
+    }
+    let _ = std::fs::write(dest.join("shunt_error"), format!("{note}\n"));
+    Ok(())
+}
+
 /// Finalize a reaped task: `=== exit` trailer, `exit` file, move the
 /// entry dir to done/ (rc 0) or failed/. Legacy flat entries are
 /// normalized into the dir layout here, so old queues converge.

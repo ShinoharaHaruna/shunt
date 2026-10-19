@@ -257,16 +257,36 @@ impl Daemon {
             dlog(&self.root, "workers_now", ev(json!({"workers": workers})));
             self.last_workers = Some(workers);
         }
-        while self.runpids.len() < workers as usize {
-            let next = match queue::pending_list(&self.root).ok().and_then(|v| v.into_iter().next()) {
-                Some(n) => n,
-                None => break,
-            };
+        // Snapshot the candidate list once per cycle: iterating the
+        // head and `continue`ing on a failed claim would hot-spin on
+        // the same unclaimable entry for the whole poll.
+        let candidates = queue::pending_list(&self.root).unwrap_or_default();
+        for next in candidates {
+            if self.runpids.len() >= workers as usize {
+                break;
+            }
             // claim by mv; a concurrent cancel winning the race is the
             // recheck, not a prior existence test. Dir entries rename
             // whole; legacy flat files are normalized into dirs here.
-            if !queue::claim(&self.root, &next) {
-                continue;
+            match queue::claim(&self.root, &next) {
+                Ok(false) => continue, // lost a cancel race; next candidate
+                Err(e) => {
+                    // The entry still exists but cannot be claimed
+                    // (name collision in running/, permissions).
+                    // Quarantine it rather than letting it poison
+                    // every future poll's head-of-queue.
+                    dlog(&self.root, "claim_failed", ev(json!({"task": next, "error": format!("{e:#}")})));
+                    if let Err(e2) = exec::quarantine(&self.root, "pending", &next, &format!("claim failed: {e:#}")) {
+                        dlog(
+                            &self.root,
+                            "claim_quarantine_failed",
+                            ev(json!({"task": next, "error": e2.to_string(),
+                               "warning": "unclaimable pending entry could not be moved to failed/"})),
+                        );
+                    }
+                    continue;
+                }
+                Ok(true) => {}
             }
             #[cfg(unix)]
             {
