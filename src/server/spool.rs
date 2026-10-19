@@ -37,6 +37,73 @@ pub fn render_task_body(meta: &TaskMeta) -> String {
     out
 }
 
+/// Merge the binding's directives into a `--file` task body
+/// (design.md §4.5): `# shunt:workdir=` / `# shunt-env:` lines are
+/// injected at the top of the comment head so the file's own
+/// directives — scanned later by the runner — override them per key
+/// (the file is the task author speaking; the binding is context).
+/// An explicit `--guard` is injected as a guard line ahead of the
+/// first code line; it runs before any file-embedded check, so the
+/// flag always wins.
+fn merge_file_directives(body: &str, meta: &TaskMeta) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    // Directive head starts after a shebang, if any.
+    let head_start = usize::from(lines.first().is_some_and(|l| l.starts_with("#!")));
+    let head_end = lines.iter().enumerate().skip(head_start).find_map(|(i, l)| if !l.starts_with('#') && !l.trim().is_empty() { Some(i) } else { None }).unwrap_or(lines.len());
+
+    // Directives already present in the file's comment head win over
+    // the binding (workdir by key presence, env per key).
+    let mut have_workdir = false;
+    let mut have_env: std::collections::BTreeSet<String> = Default::default();
+    for l in &lines[head_start..head_end] {
+        if l.starts_with("# shunt:workdir=") {
+            have_workdir = true;
+        } else if let Some(kv) = l.strip_prefix("# shunt-env:") {
+            if let Some((k, _)) = kv.split_once('=') {
+                have_env.insert(k.trim().to_string());
+            }
+        }
+    }
+
+    let mut inject_head = String::new();
+    if !have_workdir {
+        if let Some(w) = &meta.workdir {
+            inject_head.push_str(&format!("# shunt:workdir={w}\n"));
+        }
+    }
+    for (k, v) in &meta.env {
+        if !have_env.contains(k) {
+            inject_head.push_str(&format!("# shunt-env:{k}={v}\n"));
+        }
+    }
+    let guard_line = meta.guard.as_ref().map(|g| format!("if [ -e {} ]; then echo \"guard hit: {g} exists; skipping\"; exit 0; fi\n", shell_quote(g)));
+
+    let mut out = String::new();
+    for (i, l) in lines.iter().enumerate() {
+        if i == head_start {
+            out.push_str(&inject_head);
+        }
+        if i == head_end {
+            if let Some(g) = &guard_line {
+                out.push_str(g);
+            }
+        }
+        out.push_str(l);
+        out.push('\n');
+    }
+    // Edge cases: comment head runs to (or past) EOF — the loop
+    // never reached the insertion points.
+    if head_start >= lines.len() {
+        out.push_str(&inject_head);
+    }
+    if head_end >= lines.len() {
+        if let Some(g) = &guard_line {
+            out.push_str(g);
+        }
+    }
+    out
+}
+
 fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
@@ -112,7 +179,15 @@ pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slu
     let shortid: String = id.chars().take(8).collect();
     meta.slug = format!("{slug}-{shortid}");
 
-    let body = if file.is_some() { body } else { render_task_body(&meta) };
+    let body = if file.is_some() { merge_file_directives(&body, &meta) } else { render_task_body(&meta) };
+
+    // Guard contract (design.md §3.13): requeue reruns the body, so a
+    // task with no guard line — neither `--guard` nor an embedded
+    // check — double-runs on a lost ack or an orphan requeue. Warn
+    // loudly; naturally idempotent tasks are legitimate but rare.
+    if !body.contains("guard hit:") {
+        eprintln!("submit: WARNING: '{}' carries no guard; at-least-once requeue will run it twice (lost ack, orphan requeue). Pass --guard <path> unless the task is naturally idempotent.", meta.slug);
+    }
 
     let entry = SpoolEntry { id: id.clone(), project: project.unwrap_or("").to_string(), client: client.name.clone(), meta, submitted_at: iso_utc(now_unix()) };
     stage(&entry, &body)?;

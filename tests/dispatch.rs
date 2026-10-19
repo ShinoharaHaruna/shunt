@@ -162,6 +162,51 @@ fn bad_spool_entry_quarantined_good_delivers() -> Result<()> {
     Ok(())
 }
 
+/// `submit --file` injects the binding's workdir/env directives into
+/// the file's comment head (same contract as `submit -- cmd`), and
+/// an explicit `--guard` lands as a guard line ahead of the body.
+#[test]
+fn submit_file_merges_binding_directives() -> Result<()> {
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, _c) = fixture("filemerge")?;
+    registry::save_project(&registry::ProjectEntry { name: "p".into(), desc: String::new(), repo: String::new(), defaults: Default::default(), bind: vec![registry::Binding { client: "fake-a".into(), workdir: "/bound/wd".into(), env: BTreeMap::from([("K".into(), "bound".into())]) }] })?;
+
+    let f = home.join("t.sh");
+    std::fs::write(&f, "#!/usr/bin/env bash\necho hi\n")?;
+    let id = spool::submit("fake-a", Some("p"), Some("runs/g.json"), None, Some(f.to_str().unwrap()), &[])?;
+    let body = spool::body(&id)?;
+    let head_end = body.find("echo hi").unwrap();
+    let head = &body[..head_end];
+    assert!(head.contains("# shunt:workdir=/bound/wd\n"), "{body}");
+    assert!(head.contains("# shunt-env:K=bound\n"), "{body}");
+    assert!(head.contains("if [ -e runs/g.json ]; then"), "{body}");
+    Ok(())
+}
+
+/// File-local directives beat binding-injected ones per key: the
+/// binding's lines land above the file's own in the comment head, so
+/// the runner's last-one-wins scan picks the file's value.
+#[test]
+fn submit_file_own_directives_win() -> Result<()> {
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, _c) = fixture("filewin")?;
+    registry::save_project(&registry::ProjectEntry { name: "p".into(), desc: String::new(), repo: String::new(), defaults: Default::default(), bind: vec![registry::Binding { client: "fake-a".into(), workdir: "/bound/wd".into(), env: BTreeMap::from([("K".into(), "bound".into()), ("K2".into(), "b2".into())]) }] })?;
+
+    let f = home.join("t.sh");
+    std::fs::write(&f, "#!/bin/sh\n# shunt:workdir=/own/wd\n# shunt-env:K=own\nset -e\necho hi\n")?;
+    let id = spool::submit("fake-a", Some("p"), None, None, Some(f.to_str().unwrap()), &[])?;
+    let body = spool::body(&id)?;
+    // Binding workdir/K suppressed; K2 merged in above the file's lines.
+    assert_eq!(body.matches("# shunt:workdir=").count(), 1, "{body}");
+    assert!(body.contains("# shunt:workdir=/own/wd"));
+    assert_eq!(body.matches("# shunt-env:K=").count(), 1, "{body}");
+    assert!(body.contains("# shunt-env:K=own"));
+    let k2 = body.find("# shunt-env:K2=b2").unwrap();
+    let own = body.find("# shunt-env:K=own").unwrap();
+    assert!(k2 < own, "injected binding lines must precede file's own: {body}");
+    Ok(())
+}
+
 /// A dash-leading slug must be refused at submit time: on the wire it
 /// parses as a flag, the remote rejects it, and the spool entry would
 /// retry forever.

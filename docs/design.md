@@ -292,6 +292,10 @@ Boxes with poor international connectivity (mainland-China GPU vendors) get thei
 
 `submit` lands a task in `spool/` as `spool/<task-id>.json` (metadata: project, client, slug, guard, argv, submitted_at) + `<task-id>.sh` (rendered task body). Persisted before returning, so submitting while the box is off is normal operation.
 
+**`--file` submissions get the same binding injection as argv submissions.** The binding's `workdir`/`env` are merged into the file's comment head as `# shunt:workdir=` / `# shunt-env:` directives, injected _above_ the file's own directive block so the file's own directives win per key (the file is the task author speaking; the binding is context). An explicit `--guard` flag injects the guard line ahead of the file's first code line, so the flag always runs first — an embedded check still runs after it, harmlessly.
+
+**The guard contract is enforced by warning, not by flag.** A staged task whose body carries no guard check (no `--guard`, no embedded `guard hit:` line in a `--file`) triggers a loud stderr warning at submit: at-least-once means a lost ack, an orphan requeue, or a live-pgid requeue reruns the body, and an unguarded task then double-executes (double GPU burn, duplicated result writes). Naturally idempotent tasks are a legitimate unguarded case, so submit still proceeds.
+
 Two-phase dispatch, at-least-once end to end:
 
 1. Dispatcher (server-side loop, poll interval from `server.toml`) scans `spool/` oldest-first.
