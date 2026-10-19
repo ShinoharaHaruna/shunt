@@ -220,6 +220,9 @@ Both are optional and repeatable (`env`); scanning stops at the first non-commen
 
 ```text
 server.toml            # global defaults (poll interval, default client)
+                       # default_client fills in -c/--client: required for client-only
+                       # commands (submit, tunnel); for dual-mode commands it applies
+                       # only when no local queue is in scope (--root/$SHUNT_ROOT unset)
 clients/<name>.toml
 projects/<name>.toml
 keys/<name>[.pub]      # dedicated ed25519 keypair per ssh client
@@ -328,21 +331,21 @@ The `protocol` field is validated, not just located: an answer whose `protocol` 
 
 Transport is chosen per client row: `ssh` (default) execs over SSH; `local` (`local = true` in a row, including the pre-registered `localhost`) spawns the same argv via the local `shunt` binary — the wire surface is identical and the loopback needs no network, no key. Every wire call appends `--root <qroot>` from the client row, so the registry is the single source of truth for where the queue lives; ops that read state also pass `--json`.
 
-| op                                       | request                        | response sketch                                                                                                                      |
-| ---------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `enqueue`                                | task body on stdin; `--slug`   | `{ok, name}`                                                                                                                         |
-| `new`                                    | `--slug`, `--guard`, `--` argv | `{ok, name}`                                                                                                                         |
-| `mktask`                                 | same as `new`                  | task body on stdout                                                                                                                  |
-| `status`                                 | —                              | `{daemon:{alive,pid}, workers:{value,source}, running[], pending[], done_recent[], failed_recent[], stop, shutdown:{armed,grace_s}}` |
-| `cancel`                                 | pattern                        | `{ok, name}` or error on 0/multi match                                                                                               |
-| `prio`                                   | pattern, n                     | `{ok, from, to}`; error if target exists                                                                                             |
-| `kill`                                   | pattern                        | `{ok, pgid, escalated}`; `{ok, gone}` when the recorded leader is dead/recycled — nothing was signaled                               |
-| `workers get` / `workers set N`          | —                              | `{workers, source}`                                                                                                                  |
-| `shutdown on [grace]` / `off` / `status` | —                              | `{armed, grace_s, running, pending}`                                                                                                 |
-| `probe`                                  | —                              | `{gpu, driver, cuda, cores, mem_gb, disk_free_gb, python}`                                                                           |
-| `logs`                                   | `--task pat` or daemon         | text stream (may be non-JSON for `-f`)                                                                                               |
-| `start` / `stop` / `daemon`              | —                              | `{ok, pid}` / `{ok}` / runs the loop (foreground; `start` daemonizes)                                                                |
-| `init`                                   | `--qroot`                      | `{ok}` creates dirs                                                                                                                  |
+| op                                       | request                               | response sketch                                                                                                                      |
+| ---------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `enqueue`                                | task body on stdin; `--slug`          | `{ok, name}`                                                                                                                         |
+| `new`                                    | `--slug`, `--guard`, `--` argv        | `{ok, name}`                                                                                                                         |
+| `mktask`                                 | same as `new`                         | task body on stdout                                                                                                                  |
+| `status`                                 | —                                     | `{daemon:{alive,pid}, workers:{value,source}, running[], pending[], done_recent[], failed_recent[], stop, shutdown:{armed,grace_s}}` |
+| `cancel`                                 | pattern                               | `{ok, name}` or error on 0/multi match                                                                                               |
+| `prio`                                   | pattern, n                            | `{ok, from, to}`; error if target exists                                                                                             |
+| `kill`                                   | pattern                               | `{ok, pgid, escalated}`; `{ok, gone}` when the recorded leader is dead/recycled — nothing was signaled                               |
+| `workers get` / `workers set N`          | —                                     | `{workers, source}`                                                                                                                  |
+| `shutdown on [grace]` / `off` / `status` | —                                     | `{armed, grace_s, running, pending}`                                                                                                 |
+| `probe`                                  | —                                     | `{gpu, driver, cuda, cores, mem_gb, disk_free_gb, python}`                                                                           |
+| `logs`                                   | `-n N` and/or `-- pat`; bare = daemon | text stream (`-f` is local-only: ssh exec is collected under the §5 deadline, so wire follow is refused, not streamed)               |
+| `start` / `stop` / `daemon`              | —                                     | `{ok, pid}` / `{ok}` / runs the loop (foreground; `start` daemonizes)                                                                |
+| `init`                                   | `--qroot`                             | `{ok}` creates dirs                                                                                                                  |
 
 All argv crossing SSH is shell-quoted with `%q`-equivalent escaping on the server side; quoting is centralized in the transport layer, never hand-rolled per call site.
 
@@ -409,7 +412,7 @@ Facts are advisory registry data for agent-side matching, not enforced constrain
 | `shunt cancel` / `prio` / `kill`                               | client | pending/running ops         |
 | `shunt workers [N]`                                            | client | pool size get/set           |
 | `shunt shutdown on\|off\|status`                               | client | idle poweroff               |
-| `shunt logs [pat]` / `shunt dlog`                              | client | task/daemon logs            |
+| `shunt logs [-n N] [-f] [pat]` / `shunt dlog`                  | client | task/daemon logs            |
 | `shunt probe`                                                  | client | machine facts JSON          |
 
 ## 11. Testing strategy

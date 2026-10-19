@@ -90,8 +90,9 @@ pub struct SubmitArgs {
     #[arg(short, long)]
     pub project: Option<String>,
     /// Target client name from the registry
+    /// (default: server.toml `default_client`)
     #[arg(short, long)]
-    pub client: String,
+    pub client: Option<String>,
     /// Guard path: task exits 0 early if this exists at run time
     #[arg(long)]
     pub guard: Option<String>,
@@ -132,9 +133,12 @@ pub struct LogsArgs {
     /// Local queue root (client side)
     #[arg(long)]
     pub root: Option<String>,
-    /// Follow the log (client side; stream, not JSON)
+    /// Follow the log (client side only; refused over the wire)
     #[arg(short, long)]
     pub follow: bool,
+    /// Print only the last N lines
+    #[arg(short = 'n', long)]
+    pub tail: Option<usize>,
 }
 
 #[derive(Args)]
@@ -285,9 +289,9 @@ pub struct DispatchArgs {
 pub struct TunnelArgs {
     #[command(subcommand)]
     pub action: TunnelAction,
-    /// Client name
+    /// Client name (default: server.toml `default_client`)
     #[arg(short, long)]
-    pub client: String,
+    pub client: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -519,6 +523,31 @@ fn rootless(root: &Option<String>) -> bool {
     root.is_none() && std::env::var_os("SHUNT_ROOT").is_none()
 }
 
+/// Client for a server-only command (submit, tunnel): `-c` wins,
+/// else `server.toml` `default_client`; neither is an error
+/// (design.md §4.4).
+fn required_client(flag: &Option<String>) -> Result<String> {
+    if let Some(c) = flag {
+        return Ok(c.clone());
+    }
+    crate::server::registry::load_server_config()?.default_client.ok_or_else(|| anyhow::anyhow!("no -c/--client given and no default_client in server.toml"))
+}
+
+/// Client for a dual-mode command (`-c` or the local queue): `-c`
+/// wins; a known local root keeps the call local; only when there
+/// is nothing local to act on does `default_client` fill in — so a
+/// server shell needn't repeat `-c`, and a box's own queue ops are
+/// never hijacked by a stray server.toml (design.md §4.4).
+fn resolve_client(flag: &Option<String>, root: &Option<String>) -> Result<Option<String>> {
+    if let Some(c) = flag {
+        return Ok(Some(c.clone()));
+    }
+    if !rootless(root) {
+        return Ok(None);
+    }
+    Ok(crate::server::registry::load_server_config()?.default_client)
+}
+
 /// Bare invocations that cannot act print their own -h instead of
 /// dying on 'queue root unknown' — a lost user learns the flags.
 fn print_subhelp(sub: &str) -> Result<()> {
@@ -531,16 +560,17 @@ pub fn run(cli: Cli) -> Result<()> {
     use crate::server::registry;
     match cli.command {
         Command::Submit(a) => {
-            let id = crate::server::spool::submit(&a.client, a.project.as_deref(), a.guard.as_deref(), a.slug.as_deref(), a.file.as_deref(), &a.cmd)?;
+            let client = required_client(&a.client)?;
+            let id = crate::server::spool::submit(&client, a.project.as_deref(), a.guard.as_deref(), a.slug.as_deref(), a.file.as_deref(), &a.cmd)?;
             println!("spooled {id}");
             Ok(())
         }
         Command::Status(a) => {
-            if let Some(name) = &a.client {
-                return remote(name, &["status", "--json"], None);
-            }
             if a.all {
                 return crate::server::status::run_all(a.json);
+            }
+            if let Some(name) = resolve_client(&a.client, &a.root)? {
+                return remote(&name, &["status", "--json"], None);
             }
             if rootless(&a.root) {
                 return print_subhelp("status");
@@ -548,11 +578,16 @@ pub fn run(cli: Cli) -> Result<()> {
             agent_status(&a)
         }
         Command::Logs(a) => {
-            if let Some(name) = &a.client {
-                let pat = a.pattern.clone().unwrap_or_default();
-                // `--` keeps a dash-leading pattern positional on
-                // the remote instead of parsing as a flag.
-                return remote(name, &["logs", "--", &pat], None);
+            if let Some(name) = resolve_client(&a.client, &a.root)? {
+                // ssh exec is output-collected under a hard
+                // deadline (§5): a follow would buffer silently
+                // until the kill. Say so instead of swallowing -f.
+                if a.follow {
+                    anyhow::bail!("`logs -f` cannot follow over the wire; use -n/--tail and re-run, or `shunt client exec {name} -- tail -f <log>`");
+                }
+                let tail = logs_wire_tail(&a);
+                let refs: Vec<&str> = tail.iter().map(String::as_str).collect();
+                return remote(&name, &refs, None);
             }
             if rootless(&a.root) {
                 return print_subhelp("logs");
@@ -563,34 +598,35 @@ pub fn run(cli: Cli) -> Result<()> {
             if rootless(&a.root) {
                 return print_subhelp("dlog");
             }
-            agent_dlog(&a)
+            agent_dlog(&a, None)
         }
         Command::Dispatch(a) => crate::server::dispatch::run(a.once),
         Command::Tunnel(a) => {
             use crate::server::tunnel;
+            let name = required_client(&a.client)?;
             match &a.action {
                 TunnelAction::Up { port } => {
-                    let c = registry::load_client(&a.client)?;
+                    let c = registry::load_client(&name)?;
                     let t = crate::server::transport::transport_for(&c);
                     let pid = tunnel::up(t.as_ref(), &c, *port)?;
                     println!("tunnel up: {} pid {pid}", c.name);
                     Ok(())
                 }
                 TunnelAction::Down => {
-                    let c = registry::load_client(&a.client)?;
+                    let c = registry::load_client(&name)?;
                     let t = crate::server::transport::transport_for(&c);
                     tunnel::down(t.as_ref(), &c)?;
                     println!("tunnel down: {}", c.name);
                     Ok(())
                 }
                 TunnelAction::Status => {
-                    let st = tunnel::status(&a.client)?;
+                    let st = tunnel::status(&name)?;
                     if st.alive {
-                        println!("{}: up (socks5h://127.0.0.1:{})", a.client, st.port.map(|p| p.to_string()).unwrap_or_else(|| "?".into()));
+                        println!("{name}: up (socks5h://127.0.0.1:{})", st.port.map(|p| p.to_string()).unwrap_or_else(|| "?".into()));
                     } else if st.stale {
-                        println!("{}: down (stale state — the box's env may still export ALL_PROXY; `tunnel up` or `down` cleans it)", a.client);
+                        println!("{name}: down (stale state — the box's env may still export ALL_PROXY; `tunnel up` or `down` cleans it)");
                     } else {
-                        println!("{}: down", a.client);
+                        println!("{name}: down");
                     }
                     Ok(())
                 }
@@ -795,8 +831,8 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Cancel(a) => {
-            if let Some(name) = &a.client {
-                return remote(name, &["cancel", "--json", "--", &a.pattern], None);
+            if let Some(name) = resolve_client(&a.client, &a.root)? {
+                return remote(&name, &["cancel", "--json", "--", &a.pattern], None);
             }
             if rootless(&a.root) {
                 return print_subhelp("cancel");
@@ -804,9 +840,9 @@ pub fn run(cli: Cli) -> Result<()> {
             agent_cancel(&a)
         }
         Command::Prio(a) => {
-            if let Some(name) = &a.client {
+            if let Some(name) = resolve_client(&a.client, &a.root)? {
                 let n = a.n.to_string();
-                return remote(name, &["prio", "--json", "--", &a.pattern, &n], None);
+                return remote(&name, &["prio", "--json", "--", &a.pattern, &n], None);
             }
             if rootless(&a.root) {
                 return print_subhelp("prio");
@@ -814,8 +850,8 @@ pub fn run(cli: Cli) -> Result<()> {
             agent_prio(&a)
         }
         Command::Kill(a) => {
-            if let Some(name) = &a.client {
-                return remote(name, &["kill", "--json", "--", &a.pattern], None);
+            if let Some(name) = resolve_client(&a.client, &a.root)? {
+                return remote(&name, &["kill", "--json", "--", &a.pattern], None);
             }
             if rootless(&a.root) {
                 return print_subhelp("kill");
@@ -823,10 +859,10 @@ pub fn run(cli: Cli) -> Result<()> {
             agent_kill(&a)
         }
         Command::Workers(a) => {
-            if let Some(name) = &a.client {
+            if let Some(name) = resolve_client(&a.client, &a.root)? {
                 return match a.n {
-                    Some(n) => remote(name, &["workers", "set", &n.to_string(), "--json"], None),
-                    None => remote(name, &["workers", "get", "--json"], None),
+                    Some(n) => remote(&name, &["workers", "set", &n.to_string(), "--json"], None),
+                    None => remote(&name, &["workers", "get", "--json"], None),
                 };
             }
             if rootless(&a.root) {
@@ -835,7 +871,8 @@ pub fn run(cli: Cli) -> Result<()> {
             agent_workers(&a)
         }
         Command::Shutdown(a) => {
-            if let Some(name) = &a.client {
+            if let Some(name) = resolve_client(&a.client, &a.root)? {
+                let name = name.as_str();
                 return match a.action {
                     ShutdownAction::On { grace_s, cmd } => {
                         // Push the row's shutdown_cmd unless --cmd
@@ -1349,6 +1386,46 @@ fn find_logs(root: &std::path::Path, pat: &str) -> Vec<PathBuf> {
     out
 }
 
+/// Wire argv for a remote `logs`: `logs [-n N] [-- pat]`.
+/// The pattern goes only when present — an empty positional would
+/// parse as `Some("")` on the far end and match every task log
+/// instead of selecting the daemon log. `-f` never crosses: the
+/// caller bails on follow before building this.
+fn logs_wire_tail(a: &LogsArgs) -> Vec<String> {
+    let mut tail: Vec<String> = vec!["logs".into()];
+    if let Some(n) = a.tail {
+        tail.push("-n".into());
+        tail.push(n.to_string());
+    }
+    if let Some(pat) = &a.pattern {
+        // `--` keeps a dash-leading pattern positional on the
+        // remote instead of parsing as a flag.
+        tail.push("--".into());
+        tail.push(pat.clone());
+    }
+    tail
+}
+
+/// The last `n` newline-terminated lines of `bytes`. A trailing
+/// newline is a terminator, not an empty extra line; fewer than
+/// `n` lines returns the whole buffer.
+fn tail_bytes(bytes: &[u8], n: usize) -> &[u8] {
+    let mut end = bytes.len();
+    if end > 0 && bytes[end - 1] == b'\n' {
+        end -= 1;
+    }
+    let mut seen = 0;
+    for (i, &b) in bytes[..end].iter().enumerate().rev() {
+        if b == b'\n' {
+            seen += 1;
+            if seen == n {
+                return &bytes[i + 1..];
+            }
+        }
+    }
+    bytes
+}
+
 fn print_file(path: &std::path::Path) {
     use std::io::Write;
     match std::fs::read(path) {
@@ -1379,13 +1456,20 @@ fn follow_file(path: &std::path::Path) -> Result<()> {
 fn agent_logs(a: &LogsArgs) -> Result<()> {
     let root = agent_root(&a.root)?;
     match &a.pattern {
-        None => agent_dlog(&RootArgs { root: a.root.clone(), json: false }),
+        None => agent_dlog(&RootArgs { root: a.root.clone(), json: false }, a.tail),
         Some(pat) => {
             let m = find_logs(&root, pat);
             match m.len() {
                 0 => anyhow::bail!("no task log matches '{pat}'"),
                 1 => {
-                    print_file(&m[0]);
+                    match a.tail {
+                        Some(n) => {
+                            use std::io::Write;
+                            let bytes = std::fs::read(&m[0])?;
+                            let _ = std::io::stdout().write_all(tail_bytes(&bytes, n));
+                        }
+                        None => print_file(&m[0]),
+                    }
                     if a.follow {
                         follow_file(&m[0])?;
                     }
@@ -1403,12 +1487,15 @@ fn agent_logs(a: &LogsArgs) -> Result<()> {
     }
 }
 
-fn agent_dlog(a: &RootArgs) -> Result<()> {
+fn agent_dlog(a: &RootArgs, tail: Option<usize>) -> Result<()> {
     let root = agent_root(&a.root)?;
     let path = root.join("daemon.log");
     // Render JSONL human-readable: `[ts] event k=v`.
     if let Ok(text) = std::fs::read_to_string(&path) {
-        for line in text.lines() {
+        let lines: Vec<&str> = text.lines().collect();
+        let skip = tail.map_or(0, |n| lines.len().saturating_sub(n));
+        for line in &lines[skip..] {
+            let line = *line;
             match serde_json::from_str::<serde_json::Value>(line) {
                 Ok(v) if v.is_object() => {
                     let ts = v.get("ts").and_then(|t| t.as_str()).unwrap_or("");
@@ -1421,4 +1508,72 @@ fn agent_dlog(a: &RootArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::registry::tests::HOME_LOCK;
+
+    fn tmp_home(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("shunt-cli-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn tail_bytes_keeps_last_n_lines() {
+        assert_eq!(tail_bytes(b"a\nb\nc\n", 2), b"b\nc\n");
+        assert_eq!(tail_bytes(b"a\nb\nc\n", 5), b"a\nb\nc\n");
+        assert_eq!(tail_bytes(b"a\nb\nc", 1), b"c");
+        assert_eq!(tail_bytes(b"", 3), b"");
+        assert_eq!(tail_bytes(b"one\n", 1), b"one\n");
+    }
+
+    #[test]
+    fn logs_wire_tail_forwards_tail_and_pattern() {
+        let a = LogsArgs { pattern: Some("train".into()), client: None, root: None, follow: false, tail: Some(50) };
+        assert_eq!(logs_wire_tail(&a), vec!["logs", "-n", "50", "--", "train"]);
+        // Bare `logs` must not send an empty positional — that would
+        // match every task log instead of the daemon log.
+        let bare = LogsArgs { pattern: None, ..a };
+        assert_eq!(logs_wire_tail(&bare), vec!["logs", "-n", "50"]);
+    }
+
+    #[test]
+    fn required_client_falls_back_to_default() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let home = tmp_home("reqcli");
+        std::env::set_var("SHUNT_HOME", &home);
+        std::fs::write(home.join("server.toml"), "default_client = \"gpu-1\"\n").unwrap();
+        assert_eq!(required_client(&None).unwrap(), "gpu-1");
+        assert_eq!(required_client(&Some("other".into())).unwrap(), "other");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn required_client_errors_without_flag_or_default() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let home = tmp_home("nocli");
+        std::env::set_var("SHUNT_HOME", &home);
+        let err = required_client(&None).unwrap_err().to_string();
+        assert!(err.contains("default_client"), "{err}");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn resolve_client_respects_local_scope() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let home = tmp_home("rescli");
+        std::env::set_var("SHUNT_HOME", &home);
+        std::env::remove_var("SHUNT_ROOT");
+        std::fs::write(home.join("server.toml"), "default_client = \"gpu-1\"\n").unwrap();
+        // No flag + no local queue -> default_client.
+        assert_eq!(resolve_client(&None, &None).unwrap().as_deref(), Some("gpu-1"));
+        // A local root in scope keeps the call local.
+        assert_eq!(resolve_client(&None, &Some("/tmp/q".into())).unwrap(), None);
+        // Explicit -c always wins.
+        assert_eq!(resolve_client(&Some("x".into()), &Some("/tmp/q".into())).unwrap().as_deref(), Some("x"));
+        std::fs::remove_dir_all(&home).ok();
+    }
 }
