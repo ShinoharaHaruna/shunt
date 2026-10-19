@@ -22,6 +22,11 @@ pub fn arm(root: &Path, grace_s: Option<u64>) -> Result<()> {
     std::fs::write(root.join("shutdown_on_idle"), b"")?;
     if let Some(g) = grace_s {
         std::fs::write(root.join("shutdown_grace_s"), format!("{g}\n"))?;
+    } else {
+        // No override given: clear any grace file left by a previous
+        // `shutdown on <n>` so the default applies — resolution is
+        // "file > default", and a stale file must not survive re-arm.
+        let _ = std::fs::remove_file(root.join("shutdown_grace_s"));
     }
     Ok(())
 }
@@ -66,7 +71,7 @@ pub fn resolve_cmd(root: &Path) -> String {
     std::env::var("SHUTDOWN_CMD").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/usr/bin/shutdown".to_string())
 }
 
-/// True when pending/ has at least one `.sh` file.
+/// True when pending/ holds at least one entry (dir or `.sh` file).
 pub fn pending_nonempty(root: &Path) -> bool {
     queue::pending_list(root).map(|v| !v.is_empty()).unwrap_or(false)
 }

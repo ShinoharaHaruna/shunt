@@ -73,7 +73,7 @@ The daemon only manages tasks it dequeued itself, tracked via `running/*/pid`. O
 - `pending/` entry names are `NNNN_<slug>`, `NNNN` zero-padded to 4.
 - `.seq` starts at 99, so the first enqueued task is `0100`. Values `0000`–`0099` are the manual priority band: `shunt prio` renumbers into it (numbers outside the band are rejected — renumbering into the normal sequence would corrupt it), and requeued orphans land at `0000_requeued_*`.
 - `.seq` is read/incremented/written under an flock on `.seq.lock` (30 s wait, matching `flock -w 30`). Concurrent enqueues must never produce duplicate numbers.
-- Claim order is `LC_ALL=C` filename sort, so `0000_*` always runs ahead of `0100_*`. The 4-digit namespace tops out at `9999`; the next number issued is the larger of `.seq + 1` and `highest pending number + 1`, so a new entry always sorts behind everything queued. When pending already holds `9999` the enqueue fails ("sequence space exhausted") rather than minting a 5-digit name that would leapfrog the queue.
+- Claim order is `LC_ALL=C` filename sort, so `0000_*` always runs ahead of `0100_*`. The 4-digit namespace tops out at `9999`; the next number issued is the larger of `.seq + 1` and the high-water NNNN prefix across all four tracks (and their `.archive/`s) + 1, so a new entry always sorts behind everything queued and can never collide at claim or finalize time. When pending already holds `9999` the enqueue fails ("sequence space exhausted") rather than minting a 5-digit name that would leapfrog the queue.
 
 ### 3.3 Enqueue
 

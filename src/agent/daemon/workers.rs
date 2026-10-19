@@ -41,7 +41,8 @@ fn resolve(root: &Path, last: Option<u32>) -> crate::proto::wire::WorkersState {
         }
     }
     if let Ok(e) = std::env::var("QUEUE_WORKERS") {
-        if let Ok(v) = e.trim().parse::<u32>() {
+        // Same `tr -cd '0-9'` semantics as the file path (§3.8).
+        if let Some(v) = queue::digits_only(&e) {
             return WorkersState { value: v.max(1), source: "env".into() };
         }
     }

@@ -9,8 +9,26 @@ use std::time::Duration;
 
 use crate::agent::queue;
 
-/// Daemon liveness: pidfile + `/proc/<pid>` + cmdline mentions
-/// `queue::DAEMON_IDENTITY`. Never pgrep (design.md §3.4). Stale
+/// NUL-separated `/proc/<pid>/cmdline` → this is our daemon when
+/// argv[0]'s basename equals this binary's basename AND some argv
+/// element is exactly `queue::DAEMON_IDENTITY` (the subcommand).
+/// Basename + whole-element beats a substring test: a binary
+/// installed as `shuntd`/`shunt-1.2` still matches itself, while an
+/// unrelated `foo-shunt daemon` cannot false-match (design.md §3.4).
+fn is_daemon_cmdline(cmdline: &[u8], exe_name: &str) -> bool {
+    let mut argv = cmdline.split(|&b| b == 0).filter(|a| !a.is_empty());
+    let Some(argv0) = argv.next() else {
+        return false;
+    };
+    let base = argv0.rsplit(|&b| b == b'/').next().unwrap_or(argv0);
+    if base != exe_name.as_bytes() {
+        return false;
+    }
+    argv.any(|a| a == queue::DAEMON_IDENTITY.as_bytes())
+}
+
+/// Daemon liveness: pidfile + `/proc/<pid>` + cmdline identity check
+/// (`is_daemon_cmdline`). Never pgrep (design.md §3.4). Stale
 /// pidfiles are removed.
 pub fn alive(root: &Path) -> Result<Option<u32>> {
     let pidf = root.join("daemon.pid");
@@ -18,13 +36,8 @@ pub fn alive(root: &Path) -> Result<Option<u32>> {
         Some(p) => p,
         None => return Ok(None),
     };
-    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok();
-    let hit = cmdline
-        .map(|c| {
-            let s = String::from_utf8_lossy(&c).replace('\0', " ");
-            s.contains(queue::DAEMON_IDENTITY)
-        })
-        .unwrap_or(false);
+    let exe_name = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+    let hit = exe_name.as_deref().is_some_and(|n| std::fs::read(format!("/proc/{pid}/cmdline")).ok().is_some_and(|c| is_daemon_cmdline(&c, n)));
     if hit {
         Ok(Some(pid))
     } else {
@@ -76,4 +89,34 @@ pub fn start(root: &Path) -> Result<u32> {
 pub fn stop(root: &Path) -> Result<()> {
     std::fs::write(root.join("STOP"), b"")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_daemon_cmdline;
+
+    fn argv(parts: &[&str]) -> Vec<u8> {
+        let mut v = Vec::new();
+        for p in parts {
+            v.extend_from_slice(p.as_bytes());
+            v.push(0);
+        }
+        v
+    }
+
+    /// Identity = argv[0] basename == our exe basename + a whole
+    /// `daemon` argv element (design.md §3.4): renamed binaries
+    /// self-match, unrelated `foo-shunt daemon` does not.
+    #[test]
+    fn cmdline_identity_basename_plus_element() {
+        assert!(is_daemon_cmdline(&argv(&["/usr/bin/shunt", "daemon", "--root", "/q"]), "shunt"));
+        // same binary installed under another basename
+        assert!(is_daemon_cmdline(&argv(&["shuntd", "daemon", "--root", "/q"]), "shuntd"));
+        // basename mismatch: foreign binary must not match
+        assert!(!is_daemon_cmdline(&argv(&["/usr/bin/foo-shunt", "daemon"]), "shunt"));
+        // `daemon` only as a substring of an argv element
+        assert!(!is_daemon_cmdline(&argv(&["shunt", "daemonesque"]), "shunt"));
+        assert!(!is_daemon_cmdline(&argv(&["shunt", "--root", "/q"]), "shunt"));
+        assert!(!is_daemon_cmdline(&[], "shunt"));
+    }
 }

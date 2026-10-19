@@ -16,10 +16,12 @@ pub const PRIORITY_BAND_MAX: u32 = 99;
 /// of `9999_*` and break FIFO (design.md §3.2).
 pub const SEQ_MAX: u32 = 9999;
 
-/// Liveness identity string for cmdline matching (design.md §3.4).
-/// Single-sourced here; the bash version duplicated it in three
-/// scripts, which was a logged defect.
-pub const DAEMON_IDENTITY: &str = "shunt daemon";
+/// Daemon identity for cmdline matching (design.md §3.4): the
+/// subcommand string matched as a whole NUL-separated argv element
+/// alongside argv[0]'s basename, never a substring — a substring
+/// match misses renamed binaries (`shuntd`) and false-matches
+/// unrelated ones (`foo-shunt daemon`).
+pub const DAEMON_IDENTITY: &str = "daemon";
 
 /// Built-in pool size when neither the file nor env supplies one.
 pub const DEFAULT_WORKERS: u32 = 3;
@@ -113,25 +115,28 @@ pub fn next_seq(root: &Path) -> Result<u32> {
     }
     let seq_path = root.join(".seq");
     let cur: u32 = std::fs::read_to_string(&seq_path).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(SEQ_INIT);
-    // The new entry must sort BEHIND every pending one (claim order
+    // The new entry must sort BEHIND every queued one (claim order
     // is byte sort on the 4-digit prefix). Normally `cur + 1`
-    // qualifies; when the counter wrapped at SEQ_MAX (or pending
-    // holds a higher hand-placed number) continue just past the
-    // highest pending sequence instead. True exhaustion — pending
-    // already holding 9999 — errors out rather than minting a
-    // 5-digit name that would leapfrog the queue.
-    let hi_pending = pending_list(root)?.iter().filter_map(|n| n.get(..4)?.parse::<u32>().ok()).filter(|&n| n > PRIORITY_BAND_MAX).max().unwrap_or(SEQ_INIT);
+    // qualifies; when the counter wrapped at SEQ_MAX (or a
+    // hand-placed number sits higher) continue just past the
+    // high-water mark instead. The floor spans ALL tracks and
+    // archives, not just pending/: a same-numbered entry in
+    // running/ would fail the claim, one in done//failed/ would
+    // fail the finalize rename — both unclaimable-until-quarantine.
+    // True exhaustion — 9999 already occupied — errors out rather
+    // than minting a 5-digit name that would leapfrog the queue.
+    let hi = high_water(root)?;
     let next = if cur >= SEQ_MAX {
         // Counter wrapped the 4-digit ceiling: restart just past
-        // the highest pending number.
-        hi_pending + 1
+        // the highest occupied number.
+        hi + 1
     } else {
-        // A hand-placed pending entry above `cur` still forces the
+        // A hand-placed entry above `cur` still forces the
         // new task to sort behind it.
-        (cur + 1).max(hi_pending + 1)
+        (cur + 1).max(hi + 1)
     };
     if next > SEQ_MAX {
-        anyhow::bail!("sequence space exhausted: pending already holds {SEQ_MAX}; let tasks drain or cancel some");
+        anyhow::bail!("sequence space exhausted: a track already holds {SEQ_MAX}; let tasks drain or cancel some");
     }
     std::fs::write(&seq_path, format!("{next}\n"))?;
     lock.unlock()?;
@@ -167,6 +172,33 @@ pub fn list_entries(root: &Path, track: &str) -> Result<Vec<String>> {
     }
     names.sort();
     Ok(names)
+}
+
+/// Highest NNNN prefix occupied anywhere in the NNNN namespace:
+/// all four live tracks plus each track's `.archive/` (priority
+/// band 0000–0099 excluded). Wraparound renumbering must clear
+/// every one of these or the minted name collides at claim or
+/// finalize time (design.md §3.2).
+fn high_water(root: &Path) -> Result<u32> {
+    let mut hi = SEQ_INIT;
+    let mut bump = |n: &str| {
+        if let Some(v) = n.get(..4).and_then(|p| p.parse::<u32>().ok()).filter(|&v| v > PRIORITY_BAND_MAX) {
+            hi = hi.max(v);
+        }
+    };
+    for track in ["pending", "running", "done", "failed"] {
+        for name in list_entries(root, track)? {
+            bump(&name);
+        }
+        // Archived entries still hold their NNNN prefix; a wrapped
+        // counter minting onto one collides in .archive/ itself.
+        if let Ok(rd) = std::fs::read_dir(root.join(track).join(".archive")) {
+            for ent in rd.flatten() {
+                bump(&ent.file_name().to_string_lossy());
+            }
+        }
+    }
+    Ok(hi)
 }
 
 /// Pending entry names in claim order.
@@ -247,8 +279,19 @@ pub fn claim(root: &Path, name: &str) -> Result<bool> {
     std::fs::create_dir_all(&dst).with_context(|| format!("cannot claim {name}"))?;
     match std::fs::rename(&src, dst.join("task.sh")) {
         Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e).with_context(|| format!("cannot claim {name}")),
+        Err(e) => {
+            // The dst dir we just created must not outlive the lost
+            // race: an empty pid-less `running/<name>/` ghost counts
+            // in running_list and keeps busy_peers busy forever.
+            // remove_dir fails harmlessly if it is somehow non-empty
+            // — that would mean someone else owns it.
+            let _ = std::fs::remove_dir(&dst);
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(false)
+            } else {
+                Err(e).with_context(|| format!("cannot claim {name}"))
+            }
+        }
     }
 }
 
@@ -283,10 +326,20 @@ pub fn enqueue(root: &Path, slug: &str, body: &str) -> Result<String> {
     std::fs::create_dir_all(&pending)?;
     let tmp = pending.join(format!(".tmp.{}.{}", std::process::id(), n));
     std::fs::create_dir_all(&tmp)?;
-    let tf = tmp.join("task.sh");
-    std::fs::write(&tf, body)?;
-    std::fs::set_permissions(&tf, std::fs::Permissions::from_mode(0o755))?;
-    std::fs::rename(&tmp, pending.join(&name))?;
+    let result = (|| -> Result<()> {
+        let tf = tmp.join("task.sh");
+        std::fs::write(&tf, body)?;
+        std::fs::set_permissions(&tf, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::rename(&tmp, pending.join(&name))?;
+        Ok(())
+    })();
+    // Any failure after the staging dir exists must not strand a
+    // `.tmp.*` dir in pending/ (dot-prefixed, so listings skip it,
+    // but it litters the track forever).
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    result?;
     Ok(name)
 }
 
@@ -340,4 +393,48 @@ pub fn unix_now() -> u64 {
 pub fn digits_only(s: &str) -> Option<u32> {
     let d: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
     d.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("shunt-qtest-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        init(&root).unwrap();
+        root
+    }
+
+    /// Losing the flat-file claim race must not strand an empty
+    /// `running/<name>/` ghost: it would count in running_list and
+    /// keep busy_peers busy forever, blocking idle-shutdown.
+    #[test]
+    fn claim_lost_race_leaves_no_ghost_dir() {
+        let root = tmp_root("ghost");
+        std::fs::write(root.join("pending/0100_x.sh"), "echo hi\n").unwrap();
+        // cancel wins the race before the rename lands
+        std::fs::remove_file(root.join("pending/0100_x.sh")).unwrap();
+        assert!(!claim(&root, "0100_x").unwrap());
+        assert!(running_list(&root).unwrap().is_empty());
+        assert!(!root.join("running/0100_x").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The wraparound floor spans all tracks + archives (§3.2): a
+    /// number held only in done/ or .archive/ must not be reminted —
+    /// the collision would fail a later claim/finalize rename.
+    #[test]
+    fn next_seq_wraparound_clears_all_tracks() {
+        let root = tmp_root("hiwater");
+        std::fs::create_dir_all(root.join("done/9500_old")).unwrap();
+        std::fs::create_dir_all(root.join("failed/.archive/9700_ancient")).unwrap();
+        std::fs::write(root.join(".seq"), format!("{SEQ_MAX}\n")).unwrap();
+        let n = next_seq(&root).unwrap();
+        assert_eq!(n, 9701);
+        // true exhaustion: 9999 occupied in a terminal track
+        std::fs::create_dir_all(root.join("done/9999_last")).unwrap();
+        assert!(next_seq(&root).is_err());
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

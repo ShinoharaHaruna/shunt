@@ -232,7 +232,17 @@ impl Daemon {
                         Some((_, start)) => format!("{pid} {start}\n"),
                         None => format!("{pid}\n"),
                     };
-                    let _ = std::fs::write(queue::piece_file(&self.root, "running", &next, "pid"), line);
+                    // Without the pid file the task runs unreachable
+                    // by `shunt kill` — still run it, but make the
+                    // blind spot loud in the log.
+                    if let Err(e) = std::fs::write(queue::piece_file(&self.root, "running", &next, "pid"), line) {
+                        dlog(
+                            &self.root,
+                            "pid_write_failed",
+                            ev(json!({"task": next, "pgid": pid, "error": e.to_string(),
+                               "warning": "task running with no pid file; kill cannot reach it"})),
+                        );
+                    }
                     let deadline = timeout_s.map(|s| std::time::Instant::now() + Duration::from_secs(s));
                     self.runpids.insert(pid, RunHandle { base: next.clone(), child, timeout_s, deadline, timed_out: None, kill_at: None, exited: None });
                     dlog(
@@ -263,20 +273,33 @@ impl Daemon {
     /// logged: a restarted daemon drains the queue and honors it.
     fn on_term(&mut self) -> ! {
         dlog(&self.root, "signal", ev(json!({"forwarded_to": self.runpids.len()})));
-        for pid in self.runpids.keys() {
-            exec::signal_pgid(*pid, "TERM");
+        // §3.1 hard rule: signal only a pgid still provably led by
+        // the task's leader (same pid-file + start_time gate as
+        // kill_task). A handle whose leader already exited may have
+        // had its pgid recycled into a foreign process group — its
+        // lingering grandchildren are left behind rather than risk
+        // hitting a stranger.
+        let signal_verified = |root: &Path, h: &RunHandle, sig: &str| {
+            if let Some((pgid, start)) = exec::read_pid_file(root, "running", &h.base) {
+                if exec::pgid_is_task_leader(pgid, start) {
+                    exec::signal_pgid(pgid, sig);
+                }
+            }
+        };
+        for h in self.runpids.values() {
+            signal_verified(&self.root, h, "TERM");
         }
         std::thread::sleep(Duration::from_secs(2));
-        for pid in self.runpids.keys() {
-            exec::signal_pgid(*pid, "KILL");
+        for h in self.runpids.values() {
+            signal_verified(&self.root, h, "KILL");
         }
 
         // Finalize the killed tasks so they land in failed/ rather
         // than orphaning as running/ entries for the next daemon.
-        for _ in 0..20 {
-            if self.runpids.is_empty() {
-                break;
-            }
+        // Runs long enough to cover pgid_drain_grace: a leader reaped
+        // early still waits out its group's drain window (§3.9).
+        let deadline = std::time::Instant::now() + pgid_drain_grace() + Duration::from_secs(2);
+        while !self.runpids.is_empty() && std::time::Instant::now() < deadline {
             self.reap();
             std::thread::sleep(Duration::from_millis(100));
         }
