@@ -459,7 +459,9 @@ shunt/
     server/          # registry, spool, dispatcher, ssh transport, status,
                      # client_ops/ (key, lifecycle, update, hygiene, env,
                      # probe, bootstrap)
-    agent/           # daemon loop, FS queue ops, exec, reap, shutdown, probe
+    agent/           # FS queue ops, exec, shutdown flags, probe;
+                     # daemon/ = poll loop (core), lifecycle, workers,
+                     # orphan requeue (reap), idle-shutdown countdown (idle)
     proto/           # task format, wire JSON types (shared)
   etc/vendors/autodl.toml
   docs/design.md
