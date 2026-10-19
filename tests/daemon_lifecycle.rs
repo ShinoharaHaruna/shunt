@@ -51,8 +51,12 @@ fn orphan_requeue_front_of_queue() {
     let lines: Vec<String> = std::fs::read_to_string(&order).unwrap().lines().map(|s| s.to_string()).collect();
     // the requeued copy lands at 0000_requeued_* and runs first
     assert_eq!(lines, ["old", "new"], "{lines:?}");
-    // interrupted log swept to failed/
-    assert!(q.names("failed").iter().any(|n| n.contains("interrupted")), "expected interrupted log in failed/: {:?}", q.names("failed"));
+    // interrupted log swept to failed/ as <clean>.interrupted.<ts>.log
+    // (§3.6) — the timestamp must survive, not be eaten as the
+    // "extension" (regression: with_extension("log") clobbered it and
+    // successive interruptions overwrote each other).
+    let interrupted: Vec<_> = q.names("failed").into_iter().filter(|n| n.contains("interrupted")).collect();
+    assert!(interrupted.iter().any(|n| n.strip_prefix("0001_old.interrupted.").is_some_and(|r| r.strip_suffix(".log").is_some_and(|ts| ts.chars().all(|c| c.is_ascii_digit()) && !ts.is_empty()))), "expected <clean>.interrupted.<unixts>.log in failed/: {interrupted:?}");
     // double-requeue must not stack prefixes
     let requeued = q.names("done");
     assert!(!requeued.iter().any(|n| n.contains("requeued_0000_requeued")), "prefix stacked: {requeued:?}");

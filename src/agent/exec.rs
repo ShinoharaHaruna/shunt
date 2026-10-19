@@ -34,7 +34,13 @@ pub fn read_env_file(root: &Path) -> BTreeMap<String, String> {
                 continue;
             }
             if let Some((k, v)) = line.split_once('=') {
-                map.insert(k.trim().to_string(), v.trim().to_string());
+                let k = k.trim();
+                // `Command::env` panics on an empty key — a `=foo`
+                // line must be dropped here, not crash the daemon
+                // mid-dispatch.
+                if !k.is_empty() {
+                    map.insert(k.to_string(), v.trim().to_string());
+                }
             }
         }
     }
@@ -132,7 +138,12 @@ fn task_directives(task: &Path) -> (Option<String>, Vec<(String, String)>, Optio
             timeout_s = t.trim().parse::<u64>().ok().filter(|&n| n > 0);
         } else if let Some(kv) = line.strip_prefix("# shunt-env:") {
             if let Some((k, v)) = kv.split_once('=') {
-                envs.push((k.trim().to_string(), v.to_string()));
+                let k = k.trim();
+                // Same panic guard as the env file: `# shunt-env:=x`
+                // yields an empty key that `Command::env` rejects.
+                if !k.is_empty() {
+                    envs.push((k.to_string(), v.to_string()));
+                }
             }
         } else if !line.starts_with('#') && !line.trim().is_empty() {
             break;
@@ -357,5 +368,25 @@ mod tests {
         assert_eq!(m["SPACED"], "padded");
         assert!(!m.contains_key("NOEQ"));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `=foo` yields an empty key, and `Command::env` panics on it —
+    /// the parse layer must drop it so the daemon never crashes
+    /// mid-dispatch (same guard for `# shunt-env:=x` directives).
+    #[test]
+    fn empty_env_keys_are_dropped() {
+        let root = std::env::temp_dir().join(format!("shunt-emptykey-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("env"), "=orphan-value\nGOOD=1\n  =also-empty\n").unwrap();
+        let m = read_env_file(&root);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m["GOOD"], "1");
+        std::fs::remove_dir_all(&root).ok();
+
+        let task = std::env::temp_dir().join(format!("shunt-emptydir-{}", std::process::id()));
+        std::fs::write(&task, "#!/usr/bin/env bash\n# shunt-env:=bad\n# shunt-env:OK=yes\necho hi\n").unwrap();
+        let (_, envs, _) = super::task_directives(&task);
+        assert_eq!(envs, vec![("OK".to_string(), "yes".to_string())]);
+        std::fs::remove_file(&task).ok();
     }
 }

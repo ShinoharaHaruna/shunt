@@ -328,8 +328,12 @@ pub fn run(root: &Path) -> Result<()> {
         if d.got_signal.load(Ordering::SeqCst) > 0 {
             d.on_term();
         }
-        d.enforce_timeouts();
+        // reap before enforce: a leader that just exited must be
+        // marked `exited` before the deadline check runs, or a
+        // clean rc-0 finish at the deadline boundary would still be
+        // stamped timed_out and land in failed/ (§3.7).
         d.reap();
+        d.enforce_timeouts();
         if d.root.join("STOP").exists() {
             if d.runpids.is_empty() {
                 let _ = std::fs::remove_file(d.root.join("STOP"));

@@ -34,12 +34,14 @@ pub(crate) fn requeue_orphans(root: &Path) -> Result<()> {
         while let Some(rest) = clean.strip_prefix("0000_requeued_") {
             clean = rest;
         }
-        let interrupted = failed.join(format!("{clean}.interrupted.{}", queue::unix_now()));
         if queue::is_dir_entry(root, "running", &base) {
             let dir = running.join(&base);
             let old_log = dir.join("log");
             if old_log.exists() {
-                let _ = std::fs::rename(&old_log, interrupted.with_extension("log"));
+                // Not `with_extension("log")`: the timestamp after the
+                // last dot IS the extension, so it must go inside the
+                // name — `<clean>.interrupted.<unixts>.log` (§3.6).
+                let _ = std::fs::rename(&old_log, failed.join(format!("{clean}.interrupted.{}.log", queue::unix_now())));
             }
             let _ = std::fs::remove_file(dir.join("pid"));
             if let Err(e) = std::fs::rename(&dir, pending.join(format!("0000_requeued_{clean}"))) {

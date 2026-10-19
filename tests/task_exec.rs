@@ -123,6 +123,21 @@ fn guard_hit_task_exits_before_timeout() {
 }
 
 #[test]
+fn exit_just_before_deadline_is_not_timed_out() {
+    // Regression: the poll loop reaps before enforcing deadlines —
+    // a leader that exited cleanly but whose try_wait has not run
+    // yet must not be stamped timed_out and sent to failed/.
+    let q = Q::new("edge");
+    q.enqueue_script("edge", "#!/usr/bin/env bash\n# shunt:timeout_s=1\nsleep 0.9\necho ok\n");
+    let mut d = q.daemon();
+    wait_until(|| !q.exits("done").is_empty() || !q.exits("failed").is_empty(), 15, "task finalized");
+    assert!(q.exits("failed").is_empty(), "clean exit at the deadline boundary must not fail: {:?}", q.exits("failed"));
+    assert!(!q.dlog().contains("task_timeout"), "{}", q.dlog());
+    q.stop();
+    let _ = d.wait();
+}
+
+#[test]
 fn no_timeout_task_still_runs() {
     // Regression: a task with no directive is never touched by the
     // supervisor.
