@@ -336,25 +336,124 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
     Ok(())
 }
 
+/// `ssh-keygen -R <spec>` scoped to shunt's own known_hosts. The
+/// spec is `host` on port 22 else `[host]:port` — OpenSSH's stored
+/// form. No-op when the store or the host is absent.
+fn drop_hostkey(host: &str, port: u16) -> Result<()> {
+    let kh = registry::known_hosts_path()?;
+    if host.is_empty() || !kh.exists() {
+        return Ok(());
+    }
+    let spec = if port == 22 { host.to_string() } else { format!("[{host}]:{port}") };
+    let st = std::process::Command::new("ssh-keygen").args(["-R", &spec, "-f", &kh.display().to_string()]).stdin(std::process::Stdio::null()).status().context("spawn ssh-keygen -R")?;
+    if !st.success() {
+        anyhow::bail!("ssh-keygen -R {spec} failed");
+    }
+    Ok(())
+}
+
+/// Kill the live mux master for `name`, if one is up (`ssh -O exit`).
+/// A master answers for the destination it was opened to regardless
+/// of the requested target — after an endpoint change or key
+/// rotation it must go, or the next exec rides the stale session.
+fn kill_mux(name: &str) {
+    if let Ok(sock) = crate::server::transport::cm_dir().map(|d| d.join(format!("{name}.sock"))) {
+        if sock.exists() {
+            let _ = std::process::Command::new("ssh").args(["-S", &sock.display().to_string(), "-O", "exit", "x"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        }
+    }
+}
+
 /// `shunt client hostkey <name>`: drop the box's host-key entries
 /// from OUR known_hosts (`ssh-keygen -R` scoped to it) and kill the
 /// live mux master, so the next connect re-TOFUs a rebuilt container.
 /// This is the escape hatch for `REMOTE HOST IDENTIFICATION HAS
 /// CHANGED` — the user's own ~/.ssh/known_hosts is never involved.
 pub fn rekey(entry: &ClientEntry) -> Result<()> {
-    let kh = registry::known_hosts_path()?;
-    if kh.exists() {
-        let spec = if entry.ssh.port == 22 { entry.ssh.host.clone() } else { format!("[{}]:{}", entry.ssh.host, entry.ssh.port) };
-        let st = std::process::Command::new("ssh-keygen").args(["-R", &spec, "-f", &kh.display().to_string()]).stdin(std::process::Stdio::null()).status().context("spawn ssh-keygen -R")?;
-        if !st.success() {
-            anyhow::bail!("ssh-keygen -R {spec} failed");
-        }
+    drop_hostkey(&entry.ssh.host, entry.ssh.port)?;
+    // The mux master still holds a session verified against the OLD key.
+    kill_mux(&entry.name);
+    Ok(())
+}
+
+/// Field-level changes for `client update` (endpoint drift, design.md
+/// §4.1). Any unset Option leaves the row field untouched; an empty
+/// `--password ""` clears it.
+pub struct EndpointUpdate {
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub user: Option<String>,
+    pub password: Option<String>,
+    pub endpoint_rotates: bool,
+}
+
+/// `shunt client update <name> [flags]`: rewrite the row's ssh
+/// endpoint fields after the vendor moved the box. Editing the TOML
+/// by hand leaves live state pinned to the dead endpoint, so when
+/// host/port/user move this also drops the stale known_hosts entries
+/// — BOTH the old and the new spec, because a rotating vendor
+/// reassigns host:port tuples between tenants and the new endpoint
+/// can carry a foreign key that hard-fails TOFU — kills the mux
+/// master, tears down a recorded tunnel (best-effort ALL_PROXY
+/// cleanup over the new endpoint), and resets the conn-fail streak.
+/// Server-local: no reachability check; verify with `status -c`.
+pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
+    let endpoint_moved = u.host.is_some() || u.port.is_some() || u.user.is_some();
+    if !endpoint_moved && u.password.is_none() && !u.endpoint_rotates {
+        anyhow::bail!("nothing to update — pass --host/--port/--user/--password/--endpoint-rotates");
     }
-    // Kill the mux master if one is alive — it still holds a session
-    // verified against the OLD key.
-    let sock = crate::server::transport::cm_dir()?.join(format!("{}.sock", entry.name));
-    if sock.exists() {
-        let _ = std::process::Command::new("ssh").args(["-S", &sock.display().to_string(), "-O", "exit", "x"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    if u.port == Some(0) {
+        anyhow::bail!("--port 0 is not a usable endpoint");
+    }
+    let mut e = registry::load_client(name)?;
+    let (old_host, old_port) = (e.ssh.host.clone(), e.ssh.port);
+    let mut changes: Vec<String> = Vec::new();
+    if let Some(h) = u.host {
+        changes.push(format!("ssh.host: {old_host} -> {h}"));
+        e.ssh.host = h;
+    }
+    if let Some(p) = u.port {
+        changes.push(format!("ssh.port: {old_port} -> {p}"));
+        e.ssh.port = p;
+    }
+    if let Some(user) = u.user {
+        changes.push(format!("ssh.user: {} -> {user}", e.ssh.user));
+        e.ssh.user = user;
+    }
+    if let Some(pw) = u.password {
+        // Never echo the secret into terminal output or logs.
+        changes.push(if pw.is_empty() { "ssh.password: cleared".into() } else { "ssh.password: set".into() });
+        e.ssh.password = pw;
+    }
+    if u.endpoint_rotates && !e.endpoint_rotates {
+        changes.push("endpoint_rotates: -> true".into());
+        e.endpoint_rotates = true;
+    }
+    let path = registry::save_client(&e)?;
+    println!("updated {name}: {}", changes.join(", "));
+    println!("wrote {}", path.display());
+    if endpoint_moved && !e.local {
+        if let Err(err) = drop_hostkey(&old_host, old_port) {
+            eprintln!("warn: could not drop old host key ({err:#})");
+        }
+        if let Err(err) = drop_hostkey(&e.ssh.host, e.ssh.port) {
+            eprintln!("warn: could not drop stale key for the new endpoint ({err:#})");
+        }
+        kill_mux(&e.name);
+        if crate::server::tunnel::recorded(name)? {
+            // Tears down the local forward and tries to strip
+            // ALL_PROXY from <qroot>/env via the NEW endpoint; a
+            // still-unreachable box keeps its stale proxy line —
+            // warn rather than fail the update.
+            let t = transport::transport_for(&e);
+            if let Err(err) = crate::server::tunnel::down(t.as_ref(), &e) {
+                eprintln!("warn: tunnel teardown incomplete ({err:#}); after reconnect, run `shunt tunnel -c {name} down` or remove ALL_PROXY from <qroot>/env");
+            }
+        }
+        // Reset AFTER the tunnel's best-effort exec so a failed
+        // reachability attempt cannot leave the streak at 1.
+        registry::conn_fail_reset(&e.name);
+        eprintln!("note: mux/known_hosts/fail-streak cleared for the old endpoint; verify with `shunt status -c {name}`");
     }
     Ok(())
 }

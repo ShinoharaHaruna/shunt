@@ -315,7 +315,8 @@ pub enum SpoolAction {
     /// List staged entries oldest-first
     Ls,
     /// Remove a staged entry by task id
-    Rm { task_id: String },
+    #[command(visible_alias = "rm")]
+    Remove { task_id: String },
 }
 
 #[derive(Args)]
@@ -386,9 +387,41 @@ pub enum ClientAction {
     Ls,
     /// Show one client row
     Show { name: String },
-    /// Remove a client row
-    #[command(alias = "remove")]
-    Rm { name: String },
+    /// Update a row's ssh endpoint after the vendor moved the box
+    /// (rotating IP/port, rebuilt container). Also drops stale
+    /// known_hosts entries, kills the mux master, clears the
+    /// conn-fail streak, and tears down a recorded tunnel — things
+    /// hand-editing the row would leave pinned to the dead endpoint.
+    Update {
+        name: String,
+        /// New SSH host
+        #[arg(long)]
+        host: Option<String>,
+        /// New SSH port
+        #[arg(long)]
+        port: Option<u16>,
+        /// New SSH user
+        #[arg(long)]
+        user: Option<String>,
+        /// New SSH password (empty string clears)
+        #[arg(long)]
+        password: Option<String>,
+        /// Mark the vendor as one that reassigns IP/port on restart
+        #[arg(long)]
+        endpoint_rotates: bool,
+    },
+    /// Deregister a box: remote stop + key revocation (best-effort),
+    /// then row/keys/mux/state/spool/binding removal locally. On the
+    /// reserved `localhost` this resets the row to factory defaults
+    /// (it regenerates on next use — disabled=true is the opt-out).
+    #[command(visible_alias = "rm")]
+    Remove {
+        name: String,
+        /// Also `rm -rf <qroot>` on the box (queue, env, binary).
+        /// Bind workdirs are reported, never deleted.
+        #[arg(long)]
+        purge: bool,
+    },
     /// Re-collect machine facts over SSH and merge into the row
     Probe { name: String },
     /// Probe raw SSH, scp the binary, remote init + start
@@ -410,16 +443,6 @@ pub enum ClientAction {
         /// Command + args, e.g. `-- ls -la /root`
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
-    },
-    /// Deregister a box: remote stop + key revocation (best-effort),
-    /// then row/keys/mux/state/spool/binding removal locally
-    #[command(visible_alias = "rm")]
-    Remove {
-        name: String,
-        /// Also `rm -rf <qroot>` on the box (queue, env, binary).
-        /// Bind workdirs are reported, never deleted.
-        #[arg(long)]
-        purge: bool,
     },
 }
 
@@ -446,8 +469,8 @@ pub enum ProjectAction {
     /// Show one project row
     Show { name: String },
     /// Remove a project row
-    #[command(alias = "remove")]
-    Rm { name: String },
+    #[command(visible_alias = "rm")]
+    Remove { name: String },
     /// Bind the project to a client with a workdir + env overlay
     Bind {
         name: String,
@@ -571,12 +594,13 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
                 Ok(())
             }
-            SpoolAction::Rm { task_id } => crate::server::spool::remove(&task_id),
+            SpoolAction::Remove { task_id } => crate::server::spool::remove(&task_id),
         },
 
         Command::Client(c) => match c.action {
             ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { host: a.host, port: a.port, user: a.user, key: a.key, password: a.password, qroot: a.qroot, deploy_root: a.deploy_root, local: a.local, expire: a.expire, env_setup: a.env_setup, shell: a.shell, endpoint_rotates: a.endpoint_rotates }),
             ClientAction::Rename { old, new } => crate::server::client_ops::rename(&old, &new),
+            ClientAction::Update { name, host, port, user, password, endpoint_rotates } => crate::server::client_ops::update(&name, crate::server::client_ops::EndpointUpdate { host, port, user, password, endpoint_rotates }),
             ClientAction::Exec { name, cmd } => {
                 let c = registry::load_client(&name)?;
                 let t = crate::server::transport::transport_for(&c);
@@ -584,7 +608,6 @@ pub fn run(cli: Cli) -> Result<()> {
                 print!("{out}");
                 Ok(())
             }
-            ClientAction::Remove { name, purge } => crate::server::client_ops::remove(&name, purge),
             ClientAction::Hostkey { name } => {
                 let c = registry::load_client(&name)?;
                 crate::server::client_ops::rekey(&c)?;
@@ -614,12 +637,16 @@ pub fn run(cli: Cli) -> Result<()> {
                 println!("{}", toml::to_string_pretty(&e)?);
                 Ok(())
             }
-            ClientAction::Rm { name } => {
-                // Materialize `localhost` first so `rm` resets it to
-                // factory defaults even on a pristine registry — and
-                // undeletes a disabled row (it regenerates on next use).
-                let _ = registry::load_client(&name);
-                registry::remove("clients", &name)
+            ClientAction::Remove { name, purge } => {
+                if name == "localhost" {
+                    // rm on the reserved loopback = factory reset:
+                    // materialize the row, then delete it — the
+                    // defaults regenerate on next use (this is also
+                    // how a disabled localhost row comes back).
+                    let _ = registry::load_client(&name);
+                    return registry::remove("clients", &name);
+                }
+                crate::server::client_ops::remove(&name, purge)
             }
             ClientAction::Probe { name } => {
                 let c = registry::load_client(&name)?;
@@ -663,7 +690,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 println!("{}", toml::to_string_pretty(&e)?);
                 Ok(())
             }
-            ProjectAction::Rm { name } => registry::remove("projects", &name),
+            ProjectAction::Remove { name } => registry::remove("projects", &name),
             ProjectAction::Bind { name, client, workdir, env } => {
                 let mut e = registry::load_project(&name)?;
                 let mut map = std::collections::BTreeMap::new();

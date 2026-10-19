@@ -224,6 +224,8 @@ Registry files are human-editable TOML and safe to keep in git (minus key paths)
 
 **Host-key rotation** (rebuilt containers change their key): `shunt client hostkey <name>` runs `ssh-keygen -R` scoped to our `known_hosts` and kills the mux master, so the next connect re-TOFUs cleanly. Anything — agent or human — must never write to `~/.ssh/known_hosts`; a stale entry there surfaces as an unexplained REMOTE HOST IDENTIFICATION HAS CHANGED on the user's own connections.
 
+**Endpoint drift** (vendors that reassign IP/port across restarts — `endpoint_rotates = true` in the row): `shunt client update <name> --host <h> --port <p>` rewrites the row AND clears the live state that would stay pinned to the dead endpoint — known_hosts entries under both the old and the new host:port spec (a reassigned tuple can carry a foreign key that hard-fails TOFU), the mux master (it answers for its original destination regardless of the requested target), the conn-fail streak, and any recorded tunnel (with a best-effort ALL_PROXY cleanup over the new endpoint). Hand-editing the row does none of this. Also updatable: `--user`, `--password` (empty clears), `--endpoint-rotates`. Server-local: no reachability check; verify with `status -c`.
+
 **Lifecycle exits.** `client rename <old> <new>` moves the whole identity (row, managed keypair, mux socket, conn-fail streak, tunnel state, queued spool refs, project `[[bind]]` rows). `client rm <name>` deregisters: remotely it stops the daemon and revokes our authorized_keys line — matched by the key blob, not its comment, so a renamed client still revokes cleanly — then locally removes row, keys, mux socket, state, spool entries, and bindings. `--purge` additionally `rm -rf <qroot>` on the box; bound workdirs are reported, never deleted — task data is the user's call. Remote steps are best-effort: an unreachable box warns but never wedges the deregistration. Ad-hoc box probing goes through `client exec <name> -- <cmd>` (managed ssh: mux + retries + our key/known_hosts).
 
 **Connection discipline.** Every ssh/scp exec rides a ControlMaster mux (`cm/<name>.sock`, `ControlPersist=60`) — one TCP session per client instead of one handshake per op. Boxes fronted by startup-limited proxies (observed: `Exceeded MaxStartups` on a mainland vendor's ssh gateway) flap hard under per-op connections; muxing removes the storm. rc-255 failures also retry 3× inside a call so a single flap never surfaces; only an exhausted streak feeds the endpoint-drift counter. The deploy path deliberately keeps `ControlPath=none` — a password-auth session must never become the mux master.
@@ -363,26 +365,26 @@ Facts are advisory registry data for agent-side matching, not enforced constrain
 
 ## 10. CLI surface
 
-| command                                                | side   | purpose                     |
-| ------------------------------------------------------ | ------ | --------------------------- |
-| `shunt submit -p proj -c client [--guard p] -- cmd...` | server | spool a task                |
-| `shunt submit -c client file.sh`                       | server | spool a script file         |
-| `shunt status [--all] [--json]`                        | server | aggregate client states     |
-| `shunt spool ls\|rm`                                   | server | inspect staging             |
-| `shunt client add\|ls\|show\|bootstrap\|probe\|rm`     | server | registry                    |
-| `shunt project add\|bind\|ls\|show`                    | server | registry                    |
-| `shunt dispatch [--once]`                              | server | run the dispatcher loop     |
-| `shunt daemon`                                         | client | run queue loop (foreground) |
-| `shunt init`                                           | client | create queue dirs           |
-| `shunt start` / `shunt stop`                           | client | daemon lifecycle            |
-| `shunt enqueue [file\|-] [slug]`                       | client | install into pending        |
-| `shunt new` / `shunt mktask`                           | client | wrap argv as task (guard)   |
-| `shunt status`                                         | client | queue summary               |
-| `shunt cancel` / `prio` / `kill`                       | client | pending/running ops         |
-| `shunt workers [N]`                                    | client | pool size get/set           |
-| `shunt shutdown on\|off\|status`                       | client | idle poweroff               |
-| `shunt logs [pat]` / `shunt dlog`                      | client | task/daemon logs            |
-| `shunt probe`                                          | client | machine facts JSON          |
+| command                                                        | side   | purpose                     |
+| -------------------------------------------------------------- | ------ | --------------------------- |
+| `shunt submit -p proj -c client [--guard p] -- cmd...`         | server | spool a task                |
+| `shunt submit -c client file.sh`                               | server | spool a script file         |
+| `shunt status [--all] [--json]`                                | server | aggregate client states     |
+| `shunt spool ls\|rm`                                           | server | inspect staging             |
+| `shunt client add\|update\|ls\|show\|bootstrap\|probe\|remove` | server | registry                    |
+| `shunt project add\|bind\|ls\|show`                            | server | registry                    |
+| `shunt dispatch [--once]`                                      | server | run the dispatcher loop     |
+| `shunt daemon`                                                 | client | run queue loop (foreground) |
+| `shunt init`                                                   | client | create queue dirs           |
+| `shunt start` / `shunt stop`                                   | client | daemon lifecycle            |
+| `shunt enqueue [file\|-] [slug]`                               | client | install into pending        |
+| `shunt new` / `shunt mktask`                                   | client | wrap argv as task (guard)   |
+| `shunt status`                                                 | client | queue summary               |
+| `shunt cancel` / `prio` / `kill`                               | client | pending/running ops         |
+| `shunt workers [N]`                                            | client | pool size get/set           |
+| `shunt shutdown on\|off\|status`                               | client | idle poweroff               |
+| `shunt logs [pat]` / `shunt dlog`                              | client | task/daemon logs            |
+| `shunt probe`                                                  | client | machine facts JSON          |
 
 ## 11. Testing strategy
 

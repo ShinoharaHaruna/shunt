@@ -67,6 +67,13 @@ fn pid_alive(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
+/// A tunnel was set up for `name` at some point: a pid or port
+/// state file exists, so the box's env may still carry ALL_PROXY
+/// even after the ssh process died (endpoint drift, reboot).
+pub fn recorded(name: &str) -> Result<bool> {
+    Ok(pid_path(name)?.exists() || port_path(name)?.exists())
+}
+
 /// Current tunnel state for a client (no network needed).
 pub fn status(name: &str) -> Result<TunnelState> {
     let port = port_path(name)?.exists().then(|| std::fs::read_to_string(port_path(name).unwrap())).and_then(|r| r.ok()).and_then(|s| s.trim().parse::<u16>().ok());

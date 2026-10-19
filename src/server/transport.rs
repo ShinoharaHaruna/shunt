@@ -154,7 +154,7 @@ impl Transport for SshTransport {
                     let n = crate::server::registry::conn_fail_bump(&client.name);
                     let hint = if n >= crate::server::registry::CONN_FAIL_ESCALATE {
                         if client.endpoint_rotates {
-                            format!(" [{n} consecutive connect failures — vendor may have reassigned IP/port on restart; check the console and update ssh.host/ssh.port in the row]")
+                            format!(" [{n} consecutive connect failures — vendor may have reassigned IP/port on restart; check the console, then `shunt client update {} --host … --port …`]", client.name)
                         } else {
                             format!(" [{n} consecutive connect failures — vendor keeps stable endpoints; box is likely off, asleep, or its sshd is down]")
                         }
