@@ -812,3 +812,81 @@ fn unclaimable_pending_entry_quarantined_not_spun() {
     q.stop();
     let _ = d.wait();
 }
+
+#[test]
+fn unclaimable_pending_entry_quarantined_not_spun() {
+    // A pending entry that cannot be renamed into running/ (name
+    // collision with a leftover non-empty running dir) must be
+    // quarantined and skipped — spinning on it would wedge the whole
+    // dispatch loop and starve the tasks behind it.
+    let q = Q::new("claimfail");
+    let ran = q.root.join("next-ran");
+    let mut d = q.daemon();
+    // Wait for the startup sweep to finish, then create the
+    // collision — requeue_orphans only runs at daemon start.
+    wait_until(|| q.dlog().contains("workers_now"), 10, "daemon startup done");
+    std::fs::create_dir_all(q.root.join("running/0050_stuck")).unwrap();
+    std::fs::write(q.root.join("running/0050_stuck/task.sh"), sleep_task()).unwrap();
+    std::fs::create_dir_all(q.root.join("pending/0050_stuck")).unwrap();
+    std::fs::write(q.root.join("pending/0050_stuck/task.sh"), sleep_task()).unwrap();
+    q.enqueue_script("next", &marker_task(&ran));
+    wait_until(|| ran.exists(), 15, "task behind the stuck head still dispatched");
+    wait_until(|| q.dlog().contains("claim_failed"), 10, "claim_failed event logged");
+    assert!(q.tasks("pending").is_empty(), "stuck entry must leave pending/: {:?}", q.tasks("pending"));
+    let quarantined = q.root.join("failed/0050_stuck");
+    assert!(quarantined.is_dir(), "stuck entry quarantined to failed/");
+    assert!(quarantined.join("shunt_error").exists(), "quarantine note written");
+    assert!(q.daemon_pid().is_some(), "daemon still alive");
+    q.stop();
+    let _ = d.wait();
+}
+
+#[test]
+fn kill_refuses_recycled_pgid() {
+    // TOCTOU guard: a pid file whose recorded leader start_time no
+    // longer matches the live process means the pgid was recycled —
+    // signaling it would hit a stranger's process group. kill must
+    // report "gone" and send nothing.
+    let q = Q::new("killgone");
+    use std::os::unix::process::CommandExt;
+    let mut stranger = Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+    let foreign_pgid = stranger.id();
+    std::fs::create_dir_all(q.root.join("running/0300_victim")).unwrap();
+    std::fs::write(q.root.join("running/0300_victim/task.sh"), sleep_task()).unwrap();
+    // bogus start_time: live process exists at this pid but it isn't
+    // the task leader we recorded.
+    std::fs::write(q.root.join("running/0300_victim/pid"), format!("{foreign_pgid} 1\n")).unwrap();
+    let out = q.run_ok(&["kill", "victim"]);
+    assert!(out.contains("gone"), "got {out}");
+    let _ = Command::new("kill").args(["-0", &foreign_pgid.to_string()]).status().map(|s| {
+        assert!(s.success(), "foreign process group was signaled");
+    });
+    // wire form is honest too
+    let o = Command::new(bin()).args(["kill", "--json", "--root"]).arg(&q.root).args(["--", "victim"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["gone"], true, "{v}");
+    let _ = stranger.kill();
+    let _ = stranger.wait();
+}
+
+#[test]
+fn kill_dead_leader_reports_gone() {
+    // The task's leader pid is simply dead (already reaped/finalized
+    // elsewhere): kill must not claim a kill.
+    let q = Q::new("killdead");
+    // a pid that is (practically) never live: spawn+reap a child
+    let dead = Command::new("true").spawn().unwrap().wait_with_output().unwrap();
+    let _ = dead;
+    let dead_pid = {
+        let c = Command::new("true").spawn().unwrap();
+        let id = c.id();
+        let mut c = c;
+        let _ = c.wait();
+        id
+    };
+    std::fs::create_dir_all(q.root.join("running/0301_dead")).unwrap();
+    std::fs::write(q.root.join("running/0301_dead/task.sh"), sleep_task()).unwrap();
+    std::fs::write(q.root.join("running/0301_dead/pid"), format!("{dead_pid}\n")).unwrap();
+    let out = q.run_ok(&["kill", "dead"]);
+    assert!(out.contains("gone"), "got {out}");
+}

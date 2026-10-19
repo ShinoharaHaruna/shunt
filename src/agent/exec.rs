@@ -135,22 +135,74 @@ pub fn pgid_alive(pgid: u32) -> bool {
     signal_pgid(pgid, "0")
 }
 
+/// Outcome of `kill_task`. `Gone` means the pid file's pgid no longer
+/// names this task's leader — reaped by the daemon already, or the
+/// pid was recycled by the OS — so no signal was ever sent. The kill
+/// command reports this honestly instead of claiming a kill.
+pub enum KillOutcome {
+    Signaled { pgid: u32, escalated: bool },
+    Gone,
+}
+
+/// Parse a running entry's `pid` file: the leader pid (= task pgid)
+/// optionally followed by the leader's /proc start_time recorded at
+/// spawn. The start-time pin is the TOCTOU guard against pgid reuse
+/// between reading the file and sending the signal.
+pub fn read_pid_file(root: &Path, track: &str, name: &str) -> Option<(u32, Option<u64>)> {
+    let s = std::fs::read_to_string(queue::piece_file(root, track, name, "pid")).ok()?;
+    let mut it = s.split_whitespace();
+    let pgid = it.next()?.parse().ok()?;
+    let start = it.next().and_then(|t| t.parse().ok());
+    Some((pgid, start))
+}
+
+/// `/proc/<pid>/stat` → `(pgrp, start_time)`. comm is skipped via the
+/// last `)` so a parenthesised/spaced comm cannot shift the fields
+/// (fields after comm: state=f[0], ppid=f[1], pgrp=f[2], …,
+/// start_time=f[19]).
+pub fn proc_pgrp_start(pid: u32) -> Option<(u32, u64)> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = s.rsplit_once(')')?.1;
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    Some((f.get(2)?.parse().ok()?, f.get(19)?.parse().ok()?))
+}
+
+/// The pid file's pgid still names this task's leader: the leader pid
+/// is live, is its own process-group leader, and — when a start_time
+/// was recorded — is the same process the daemon spawned, not a
+/// recycled pid. Signals only ever go out when this holds
+/// (design.md §3.1: never signal anything that isn't ours).
+pub fn pgid_is_task_leader(pgid: u32, recorded_start: Option<u64>) -> bool {
+    match proc_pgrp_start(pgid) {
+        Some((pgrp, start)) => pgrp == pgid && recorded_start.is_none_or(|s| s == start),
+        None => false,
+    }
+}
+
 /// TERM → 10×1 s → KILL on the task's recorded pgid. The pgid comes
-/// only from the entry's `pid` file (`running/<name>/pid`, or the
-/// legacy `<name>.sh.pid`), never from a name match
-/// (design.md §3.1). Returns `(pgid, escalated)`.
-pub fn kill_task(root: &Path, task_name: &str) -> Result<(u32, bool)> {
-    let pidf = queue::piece_file(root, "running", task_name, "pid");
-    let pgid: u32 = std::fs::read_to_string(&pidf).with_context(|| format!("no pid file for {task_name}"))?.trim().parse().context("bad pid file")?;
+/// only from the entry's `pid` file, never from a name match, and is
+/// verified as the task's leader before every signal — a reaped pid
+/// recycled into a foreign process group is reported `Gone`, not
+/// signaled (design.md §3.1).
+pub fn kill_task(root: &Path, task_name: &str) -> Result<KillOutcome> {
+    let (pgid, start) = read_pid_file(root, "running", task_name).with_context(|| format!("no pid file for {task_name}"))?;
+    if !pgid_is_task_leader(pgid, start) {
+        return Ok(KillOutcome::Gone);
+    }
     signal_pgid(pgid, "TERM");
     for _ in 0..10 {
         if !pgid_alive(pgid) {
-            return Ok((pgid, false));
+            return Ok(KillOutcome::Signaled { pgid, escalated: false });
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
+    // Re-verify before escalating: the group may have died on TERM
+    // and the pgid been recycled during the grace window.
+    if !pgid_is_task_leader(pgid, start) {
+        return Ok(KillOutcome::Signaled { pgid, escalated: false });
+    }
     signal_pgid(pgid, "KILL");
-    Ok((pgid, true))
+    Ok(KillOutcome::Signaled { pgid, escalated: true })
 }
 
 /// Quarantine: move a stuck entry to `failed/` with a `shunt_error`

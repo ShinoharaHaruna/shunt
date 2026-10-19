@@ -105,9 +105,12 @@ fn requeue_orphans(root: &Path) -> Result<()> {
     let pending = root.join("pending");
     let failed = root.join("failed");
     for base in queue::running_list(root)? {
-        let pidf = queue::piece_file(root, "running", &base, "pid");
-        if let Ok(pgid) = std::fs::read_to_string(&pidf).map(|s| s.trim().parse::<u32>()).and_then(|r| r.map_err(|_| std::io::Error::other("bad pid"))) {
-            if exec::pgid_alive(pgid) {
+        if let Some((pgid, start)) = exec::read_pid_file(root, "running", &base) {
+            // A recorded start_time that no longer matches means the
+            // pgid was recycled — the leftover group is a stranger's,
+            // so no warning (and nothing is ever signaled here).
+            let ours = start.is_none_or(|s| exec::proc_pgrp_start(pgid).map(|(_, st)| st == s).unwrap_or(false));
+            if ours && exec::pgid_alive(pgid) {
                 dlog(
                     root,
                     "orphan_live_pgid",
@@ -296,7 +299,14 @@ impl Daemon {
             match exec::spawn_task(&self.root, &next) {
                 Ok(child) => {
                     let pid = child.id();
-                    let _ = std::fs::write(queue::piece_file(&self.root, "running", &next, "pid"), format!("{pid}\n"));
+                    // Record the leader's /proc start_time beside the
+                    // pgid: kill_task verifies it before signaling so
+                    // a recycled pgid can never be hit by mistake.
+                    let line = match exec::proc_pgrp_start(pid) {
+                        Some((_, start)) => format!("{pid} {start}\n"),
+                        None => format!("{pid}\n"),
+                    };
+                    let _ = std::fs::write(queue::piece_file(&self.root, "running", &next, "pid"), line);
                     self.runpids.insert(pid, (next.clone(), child));
                     dlog(
                         &self.root,

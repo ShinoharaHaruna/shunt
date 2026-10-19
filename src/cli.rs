@@ -1168,7 +1168,18 @@ fn agent_kill(a: &PatternArgs) -> Result<()> {
     match m.len() {
         0 => jfail(a.json, &format!("no running task matches '{}'", a.pattern)),
         1 => match crate::agent::exec::kill_task(&root, &m[0]) {
-            Ok((pgid, escalated)) => {
+            Ok(crate::agent::exec::KillOutcome::Gone) => {
+                // Honest report: the recorded pgid no longer names
+                // this task's leader (reaped already or recycled) —
+                // nothing was signaled.
+                if a.json {
+                    jprint(jobj(jfields(serde_json::json!({"gone": true}))));
+                } else {
+                    println!("{} already gone; nothing signaled", m[0]);
+                }
+                Ok(())
+            }
+            Ok(crate::agent::exec::KillOutcome::Signaled { pgid, escalated }) => {
                 if a.json {
                     jprint(jobj(jfields(serde_json::json!({"pgid": pgid, "escalated": escalated}))));
                 } else {
