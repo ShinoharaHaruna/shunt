@@ -159,7 +159,9 @@ fn requeue_orphans(root: &Path) -> Result<()> {
 
 /// Idle-shutdown countdown (design.md §3.11). Returns when cancelled;
 /// on success it execs the shutdown command and never returns.
-fn maybe_shutdown(root: &Path, running_empty: bool) {
+/// `stop_consumed`: caller already removed the STOP sentinel, so it
+/// must not cancel this countdown (STOP drain honoring an armed flag).
+fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bool) {
     let flag = root.join("shutdown_on_idle");
     let grace = shutdown::grace(root);
     dlog(root, "idle_shutdown_armed", ev(json!({"grace_s": grace})));
@@ -174,8 +176,12 @@ fn maybe_shutdown(root: &Path, running_empty: bool) {
             dlog(root, "idle_shutdown_cancelled", ev(json!({"why": "pending task arrived"})));
             return;
         }
-        if root.join("STOP").exists() {
-            dlog(root, "idle_shutdown_cancelled", ev(json!({"why": "STOP sentinel"})));
+        if !stop_consumed && root.join("STOP").exists() {
+            // STOP during a countdown is the operator's cancel: disarm
+            // too, or the drain-exit path would just re-honor the flag
+            // and fire anyway (design.md §3.10/§3.11).
+            let _ = std::fs::remove_file(&flag);
+            dlog(root, "idle_shutdown_cancelled", ev(json!({"why": "STOP sentinel", "disarmed": true})));
             return;
         }
         if i % 10 == 0 || i <= 5 {
@@ -315,15 +321,25 @@ pub fn run(root: &Path) -> Result<()> {
         if d.root.join("STOP").exists() {
             if d.runpids.is_empty() {
                 let _ = std::fs::remove_file(d.root.join("STOP"));
-                let _ = std::fs::remove_file(d.root.join("daemon.pid"));
                 dlog(&d.root, "stop_drained", Map::new());
+                // An armed shutdown_on_idle must not be orphaned: the
+                // daemon is the only process that can fire it, so honor
+                // it now — grace countdown, then power off — instead of
+                // exiting and leaving the box billing idle (§3.10/§3.11).
+                // STOP is already consumed, so it cannot cancel; flag rm
+                // and a new pending entry still can.
+                if d.root.join("shutdown_on_idle").exists() && !shutdown::pending_nonempty(&d.root) {
+                    dlog(&d.root, "stop_drain_honors_shutdown", Map::new());
+                    maybe_shutdown(&d.root, true, true);
+                }
+                let _ = std::fs::remove_file(d.root.join("daemon.pid"));
                 return Ok(());
             }
             // STOP set while tasks run: no new dispatches, drain only
         } else {
             d.dispatch();
             if d.root.join("shutdown_on_idle").exists() && d.runpids.is_empty() && !shutdown::pending_nonempty(&d.root) {
-                maybe_shutdown(&d.root, true);
+                maybe_shutdown(&d.root, true, false);
             }
         }
         std::thread::sleep(poll);

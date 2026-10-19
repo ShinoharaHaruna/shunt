@@ -441,6 +441,44 @@ fn idle_shutdown_cancel_new_pending() {
 }
 
 #[test]
+fn stop_drain_honors_armed_shutdown() {
+    // design.md §3.10: STOP drain must not orphan an armed
+    // shutdown_on_idle flag — the daemon runs the grace countdown
+    // and fires before exiting.
+    let q = Q::new("stopshut");
+    let fired = q.root.join("FIRED");
+    std::fs::write(q.root.join("shutdown_cmd"), format!("touch {}", fired.display())).unwrap();
+    q.run_ok(&["shutdown", "on", "2"]);
+    let mut d = q.daemon();
+    // STOP while armed: daemon drains, then honors the flag
+    q.stop();
+    wait_until(|| q.dlog().contains("stop_drain_honors_shutdown"), 10, "drain honors armed flag");
+    wait_until(|| fired.exists(), 15, "shutdown command fired after drain");
+    wait_until(|| q.daemon_pid().is_none(), 5, "daemon exec'd away");
+    assert!(q.dlog().contains("idle_shutdown_exec"));
+    let _ = d.wait();
+}
+
+#[test]
+fn stop_drain_honored_shutdown_still_cancellable() {
+    // During the honoring countdown the flag can still be disarmed;
+    // the daemon then exits 0 without firing.
+    let q = Q::new("stopshutoff");
+    let fired = q.root.join("FIRED");
+    std::fs::write(q.root.join("shutdown_cmd"), format!("touch {}", fired.display())).unwrap();
+    q.run_ok(&["shutdown", "on", "6"]);
+    let mut d = q.daemon();
+    q.stop();
+    wait_until(|| q.dlog().contains("idle_shutdown_armed"), 10, "honoring countdown started");
+    q.run_ok(&["shutdown", "off"]);
+    wait_until(|| q.dlog().contains("idle_shutdown_cancelled"), 10, "cancelled");
+    wait_until(|| q.daemon_pid().is_none(), 10, "daemon exits after cancel");
+    assert!(!fired.exists());
+    let status = d.wait().unwrap();
+    assert!(status.success());
+}
+
+#[test]
 fn idle_shutdown_cancel_stop() {
     let q = Q::new("shutstop");
     let fired = q.root.join("FIRED");
@@ -451,6 +489,7 @@ fn idle_shutdown_cancel_stop() {
     q.stop();
     wait_until(|| q.daemon_pid().is_none(), 10, "daemon exits via STOP");
     assert!(!fired.exists());
+    assert!(!q.root.join("shutdown_on_idle").exists(), "STOP-cancel disarms the flag");
     let status = d.wait().unwrap();
     assert!(status.success());
 }

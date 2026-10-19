@@ -89,7 +89,7 @@ The daemon only manages tasks it dequeued itself, tracked via `running/*/pid`. O
 
 ### 3.5 Daemon loop
 
-Poll cycle is 2 s (`POLL` env overridable for tests). Each cycle, in order: `reap` → if `STOP` present, drain; else `dispatch`, then check idle-shutdown.
+Poll cycle is 2 s (`POLL` env overridable for tests). Each cycle, in order: `reap` → if `STOP` present, drain; else `dispatch`, then check idle-shutdown. When a STOP drain completes with `shutdown_on_idle` armed, the daemon honors it before exiting (§3.10).
 
 On startup:
 
@@ -143,14 +143,14 @@ Re-read every cycle. Order: `workers` file > `QUEUE_WORKERS` env (set at daemon 
 
 ### 3.10 STOP sentinel
 
-If `STOP` exists: no new dispatches. When the running set empties, the daemon removes `STOP` and `daemon.pid`, logs, and exits 0. A task in flight when STOP appears finishes normally and lands in `done/` or `failed/` first. Immediate stop = `shunt stop` + `shunt kill`: the killed task lands in `failed/`, the daemon exits at the next boundary.
+If `STOP` exists: no new dispatches. When the running set empties, the daemon removes `STOP`, logs, and exits 0 — with one exception: if `shutdown_on_idle` is still armed (and `pending/` is empty), the daemon first runs the §3.11 grace countdown and fires the shutdown command, because the daemon is the only process that can honor an armed flag; exiting without firing would orphan the flag and leave the box billing idle forever. In this path `STOP` is already consumed and no longer cancels the countdown; a flag removal or a new `pending/` entry still can, and the daemon then exits 0 without firing. A task in flight when STOP appears finishes normally and lands in `done/` or `failed/` first. Immediate stop = `shunt stop` + `shunt kill`: the killed task lands in `failed/`, the daemon exits at the next boundary. The pidfile is kept for the duration of the honoring countdown (so `shunt shutdown off` still reaches a live daemon) and removed before exit.
 
 ### 3.11 Idle shutdown
 
 When `shutdown_on_idle` exists AND `running/` is empty AND `pending/` is empty:
 
 1. Arm: log `IDLE-SHUTDOWN ARMED` with the grace length.
-2. Count down `shutdown_grace_s` (file > default 60) one second at a time. Each second, re-check: flag removed → cancel; a new `pending/` entry → cancel; `STOP` sentinel → cancel. Log every 10 s and for the final 5 s.
+2. Count down `shutdown_grace_s` (file > default 60) one second at a time. Each second, re-check: flag removed → cancel; a new `pending/` entry → cancel; `STOP` sentinel → cancel and disarm (flag removed — without the disarm the STOP-drain honoring path below would fire it anyway). Exception: when the countdown is running as part of STOP-drain honoring, §3.10, `STOP` is already consumed and does not apply. Log every 10 s and for the final 5 s.
 3. After the countdown, re-check once more: flag still present, pending still empty, running set empty. Only then exec the shutdown command.
 4. Resolve the command at the last moment: `shutdown_cmd` file > `$SHUTDOWN_CMD` env > `/usr/bin/shutdown`. Last-moment resolution is what lets a test redirect the command to a marker — a test must never reach the real `/usr/bin/shutdown`. The `shutdown_cmd` file is written by `shunt shutdown on --cmd`, and the server-side arm (`shutdown -c <name> on`) pushes the client row's `shutdown_cmd` field every time, so the registry stays the source of truth — copy a row to a test env and its placeholder command comes along. `shutdown status` reports the resolved command before anything fires.
 
@@ -398,7 +398,7 @@ Integration tests spawn a real daemon against a tmp `SHUNT_ROOT`; the poll inter
 - `kill`: TERM → 10 s → KILL, rc recorded, lands in `failed/`
 - orphan requeue: dead daemon leaves `running/` entries → restart → front-of-queue, prefix strip, interrupted logs swept
 - live-pgid orphan: WARNING + requeue anyway
-- STOP drain: running task finalizes, then daemon exits
+- STOP drain: running task finalizes, then daemon exits; armed shutdown_on_idle is honored (grace countdown → fire) instead of orphaned
 - idle-shutdown: arm → fire (marker), cancel via flag rm / new pending / STOP, grace default, final re-check
 - workers resize: raise dispatches immediately; lower drains only; invalid value falls back to last-known
 - env file overlay, workdir, proxy unset, thread caps
