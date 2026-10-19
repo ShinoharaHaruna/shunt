@@ -19,7 +19,8 @@ pub struct LocalTransport {
     /// `env!("CARGO_BIN_EXE_shunt")` or any path.
     pub bin: std::path::PathBuf,
     /// Exec timeout (client row `timeout_s`); on expiry the child is
-    /// killed and the call errors. None = wait indefinitely.
+    /// killed and the call errors. None = `exec_timeout_s()` default
+    /// ceiling — a wedged wire op must not stall the dispatcher.
     pub timeout_s: Option<u64>,
 }
 
@@ -56,10 +57,7 @@ impl super::Transport for LocalTransport {
                 let _ = w.write_all(body.as_bytes());
             });
         }
-        let out = match self.timeout_s {
-            Some(t) => super::wait_deadline(child, t, &format!("local exec {}", prog.display()))?,
-            None => child.wait_with_output().context("wait local exec")?,
-        };
+        let out = super::wait_deadline(child, self.timeout_s.unwrap_or_else(super::exec_timeout_s), &format!("local exec {}", prog.display()))?;
         if !out.status.success() {
             // Same wire convention as the ssh transport: a wire op's
             // `{"ok":false,"error":"…"}` on stdout carries the real
@@ -135,6 +133,20 @@ mod tests {
         let c = local_client();
         let t = LocalTransport { bin: PathBuf::from("/bin/sleep"), timeout_s: Some(0) };
         let err = t.exec(&c, &[shunt_bin(&c), "30".into()], None).unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
+    #[test]
+    fn local_exec_none_timeout_uses_default_deadline() {
+        // Row timeout_s=None must NOT wait forever: it falls back to
+        // the shared exec ceiling (SHUNT_SSH_EXEC_TIMEOUT_S=1 here),
+        // so a wedged wire op can't stall the dispatcher sweep.
+        let _g = super::super::ENV_LOCK.lock().unwrap();
+        std::env::set_var("SHUNT_SSH_EXEC_TIMEOUT_S", "1");
+        let c = local_client();
+        let t = LocalTransport { bin: PathBuf::from("/bin/sleep"), timeout_s: None };
+        let err = t.exec(&c, &[shunt_bin(&c), "30".into()], None).unwrap_err();
+        std::env::remove_var("SHUNT_SSH_EXEC_TIMEOUT_S");
         assert!(err.to_string().contains("timed out"), "{err}");
     }
 }

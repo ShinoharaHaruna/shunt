@@ -13,7 +13,10 @@ use anyhow::{Context, Result};
 /// `start`, push env_setup, merge facts.
 pub fn bootstrap(t: &dyn Transport, name: &str) -> Result<()> {
     let mut entry = registry::load_client(name)?;
-    if !entry.local && entry.qroot.is_empty() {
+    // Any row: an empty qroot renders shunt_bin as `/bin/shunt` (the
+    // stage-then-mv would target SYSTEM /bin) and wire ops pass
+    // `--root ""`, landing queue dirs in the cwd.
+    if entry.qroot.is_empty() {
         anyhow::bail!("{}: qroot is empty — set it in the row (usually <deploy_root>/queue)", entry.name);
     }
     ensure_key(&mut entry)?;
@@ -55,4 +58,43 @@ pub fn bootstrap(t: &dyn Transport, name: &str) -> Result<()> {
     println!("bootstrapped {} ({})", entry.name, bin);
     println!("wrote {}", p.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bootstrap;
+    use crate::server::registry::{self, tests::HOME_LOCK, ClientEntry};
+    use crate::server::transport::Transport;
+
+    /// Transport that must never be reached: the qroot guard fires
+    /// before the first wire op.
+    struct Panic;
+    impl Transport for Panic {
+        fn exec(&self, _c: &ClientEntry, _a: &[String], _s: Option<&str>) -> anyhow::Result<String> {
+            panic!("bootstrap ran a wire op with an empty qroot")
+        }
+        fn copy_to(&self, _c: &ClientEntry, _l: &std::path::Path, _r: &str) -> anyhow::Result<()> {
+            panic!("bootstrap copied with an empty qroot")
+        }
+    }
+
+    #[test]
+    fn bootstrap_rejects_empty_qroot_on_local_row() {
+        // A custom `--local` row (not the built-in localhost, which
+        // materializes a real qroot) with qroot="" would render
+        // shunt_bin as `/bin/shunt` and stage the binary toward
+        // SYSTEM /bin — reject at the guard, before any wire op.
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("shunt-test-boot-qroot-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &tmp);
+        let mut entry = super::super::test_entry();
+        entry.name = "loctest".into();
+        entry.local = true;
+        entry.qroot = String::new();
+        registry::save_client(&entry).unwrap();
+        let err = bootstrap(&Panic, "loctest").unwrap_err();
+        std::env::remove_var("SHUNT_HOME");
+        std::fs::remove_dir_all(&tmp).ok();
+        assert!(err.to_string().contains("qroot is empty"), "{err}");
+    }
 }

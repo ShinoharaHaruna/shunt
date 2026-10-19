@@ -215,6 +215,9 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
     if !entry.local && (entry.ssh.host.is_empty() || entry.ssh.key.is_empty() || entry.ssh.port == 0) {
         eprintln!("note: ssh fields still incomplete; edit the row before bootstrap");
     }
+    if entry.local && entry.qroot.is_empty() {
+        eprintln!("note: local row has no qroot — bootstrap will reject it; set qroot (or deploy_root) in the row");
+    }
     Ok(())
 }
 

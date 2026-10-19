@@ -4,7 +4,7 @@
 //! plus `scp` for `copy_to`. ControlMaster mux per client under
 //! `$SHUNT_HOME/cm/` (design.md §4.1).
 
-use super::{cm_dir, join_argv, shell_quote, wait_deadline};
+use super::{cm_dir, exec_timeout_s, join_argv, shell_quote, wait_deadline};
 use crate::server::registry::ClientEntry;
 use anyhow::{Context, Result};
 use std::io::Write;
@@ -16,18 +16,6 @@ use std::process::{Command, Stdio};
 /// -o ServerAliveInterval=… -o ServerAliveCountMax=…
 /// -i KEY USER@HOST '<quoted argv>'`.
 pub struct SshTransport;
-
-/// Hard deadline for one ssh exec attempt. `ConnectTimeout` only
-/// bounds the handshake; a live-but-hung remote command (frozen NFS
-/// qroot, remote OOM) would otherwise block the caller forever.
-/// ServerAlive catches dead TCP in ~30s; this ceiling catches the
-/// rest. Wire ops are short (status/enqueue/push); `logs -f` never
-/// crosses ssh. `SHUNT_SSH_EXEC_TIMEOUT_S` overrides (tests).
-const EXEC_TIMEOUT_S: u64 = 120;
-
-fn exec_timeout_s() -> u64 {
-    std::env::var("SHUNT_SSH_EXEC_TIMEOUT_S").ok().and_then(|s| s.parse().ok()).filter(|&n| n > 0).unwrap_or(EXEC_TIMEOUT_S)
-}
 
 /// rc-255 retries per call so one flap never surfaces; an exhausted
 /// streak feeds the endpoint-drift counter (design.md §4.1).
@@ -205,7 +193,7 @@ mod tests {
     /// serialize the fake-ssh tests. Tests that also touch
     /// SHUNT_HOME additionally hold the registry's HOME_LOCK so
     /// registry-side env users can't observe their value.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use super::super::ENV_LOCK;
 
     /// Install a fake `ssh` ahead on PATH; returns the tmp dir.
     /// `script` is the whole shell body; argv reaches it as $@.

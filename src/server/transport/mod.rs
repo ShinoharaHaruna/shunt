@@ -63,9 +63,22 @@ pub fn wire_argv(client: &ClientEntry, tail: &[&str]) -> Vec<String> {
     v
 }
 
+/// Hard deadline for one wire op. `ConnectTimeout` only bounds the
+/// ssh handshake; a live-but-hung remote command (frozen NFS qroot,
+/// remote OOM) — or a wedged loopback op — would otherwise block the
+/// caller forever. ServerAlive catches dead TCP in ~30s; this
+/// ceiling catches the rest. Wire ops are short (status/enqueue/
+/// push); `logs -f` never crosses the transport. A row's `timeout_s`
+/// overrides; `SHUNT_SSH_EXEC_TIMEOUT_S` overrides that (tests).
+const EXEC_TIMEOUT_S: u64 = 120;
+
+pub(crate) fn exec_timeout_s() -> u64 {
+    std::env::var("SHUNT_SSH_EXEC_TIMEOUT_S").ok().and_then(|s| s.parse().ok()).filter(|&n| n > 0).unwrap_or(EXEC_TIMEOUT_S)
+}
+
 /// Poll a spawned child to completion or kill it at the deadline.
 /// Shared by the ssh transport (exec + scp hard ceiling) and the
-/// loopback transport's row-configured `timeout_s`.
+/// loopback transport (row `timeout_s` else `exec_timeout_s()`).
 ///
 /// stdout/stderr drain on reader threads from the start: a child
 /// that fills its pipe buffer (~64 KiB) otherwise blocks on write
@@ -145,6 +158,11 @@ pub trait Transport {
 pub fn cm_dir() -> Result<std::path::PathBuf> {
     Ok(crate::server::registry::shunt_home()?.join("cm"))
 }
+
+/// Serializes tests that mutate process env vars
+/// (`SHUNT_SSH_EXEC_TIMEOUT_S`, PATH) across transport modules.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 fn local_client() -> ClientEntry {
