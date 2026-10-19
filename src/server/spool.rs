@@ -1,4 +1,4 @@
-//! Server-side staging queue (design.md §4.5). Entries persist under
+//! Server-side staging queue (design.md §4.4). Entries persist under
 //! `<SHUNT_HOME>/spool/` as `<task-id>.json` + `<task-id>.sh` so a
 //! submission survives while the box is powered off.
 
@@ -15,7 +15,7 @@ pub fn spool_dir() -> Result<PathBuf> {
 }
 
 /// Merge the binding's directives into a `--file` task body
-/// (design.md §4.5): `# shunt:workdir=` / `# shunt-env:` lines are
+/// (design.md §4.4): `# shunt:workdir=` / `# shunt-env:` lines are
 /// injected at the top of the comment head so the file's own
 /// directives — scanned later by the runner — override them per key
 /// (the file is the task author speaking; the binding is context).
@@ -159,7 +159,7 @@ pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slu
     }
 
     let dir = spool_dir()?;
-    crate::server::registry::private_dir(&dir)?;
+    crate::server::fsutil::private_dir(&dir)?;
     let id = new_task_id(&dir);
     let shortid: String = id.chars().take(8).collect();
     meta.slug = format!("{slug}-{shortid}");
@@ -183,11 +183,11 @@ pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slu
 /// write-temp-then-rename.
 pub fn stage(entry: &SpoolEntry, body: &str) -> Result<()> {
     let dir = spool_dir()?;
-    crate::server::registry::private_dir(&dir)?;
+    crate::server::fsutil::private_dir(&dir)?;
     let json = serde_json::to_string_pretty(entry)?;
     for (name, contents) in [(format!("{}.json", entry.id), json), (format!("{}.sh", entry.id), body.to_string())] {
         let tmp = dir.join(format!(".{name}.tmp"));
-        crate::server::registry::write_private(&tmp, contents)?;
+        crate::server::fsutil::write_private(&tmp, contents)?;
         fs::rename(&tmp, dir.join(&name))?;
     }
     Ok(())
@@ -197,7 +197,7 @@ pub fn stage(entry: &SpoolEntry, body: &str) -> Result<()> {
 /// lexically; id breaks ties). Per-entry fault tolerance: an entry
 /// that fails to read or parse is quarantined — the `.json` (and its
 /// `.sh` sibling) renamed to `*.bad` — with a stderr warning, so one
-/// corrupt file can never wedge the whole sweep (design.md §4.5).
+/// corrupt file can never wedge the whole sweep (design.md §4.4).
 pub fn list() -> Result<Vec<SpoolEntry>> {
     let dir = spool_dir()?;
     let mut out = Vec::new();

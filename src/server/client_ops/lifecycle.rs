@@ -40,11 +40,9 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
 
     // A live mux master still answers on the old socket path — kill
     // it; the next exec opens a fresh master under the new name.
+    super::hygiene::kill_mux(old);
     let old_sock = crate::server::transport::cm_dir()?.join(format!("{old}.sock"));
-    if old_sock.exists() {
-        let _ = std::process::Command::new("ssh").args(["-S", &old_sock.display().to_string(), "-O", "exit", "x"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
-        let _ = std::fs::remove_file(&old_sock);
-    }
+    let _ = std::fs::remove_file(&old_sock);
     // Conn-fail streak and tunnel state follow the identity, as does
     // the per-client known_hosts file.
     for (dir, ext) in [("state", "fail"), ("tunnels", "pid"), ("tunnels", "port"), ("tunnels", "log")] {

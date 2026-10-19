@@ -12,7 +12,7 @@ pub use local::LocalTransport;
 pub use ssh::SshTransport;
 
 use crate::server::registry::ClientEntry;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 
 /// Quote one arg for the remote shell (`%q` equivalent).
@@ -59,6 +59,24 @@ pub fn wire_argv(client: &ClientEntry, tail: &[&str]) -> Vec<String> {
     v.push(client.qroot.clone());
     v.extend(tail[i..].iter().map(|s| s.to_string()));
     v
+}
+
+/// Poll a spawned child to completion or kill it at the deadline.
+/// Shared by the ssh transport (exec + scp hard ceiling) and the
+/// loopback transport's row-configured `timeout_s`.
+pub(crate) fn wait_deadline(mut child: std::process::Child, timeout_s: u64, what: &str) -> Result<std::process::Output> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_s);
+    loop {
+        match child.try_wait()? {
+            Some(_) => return child.wait_with_output().with_context(|| format!("wait {what}")),
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                anyhow::bail!("{what} timed out after {timeout_s}s");
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
 }
 
 /// Pick the transport for a client row (design.md §5): local loopback

@@ -1,6 +1,6 @@
 //! Registry home and per-name path constructors.
 
-use super::privacy::private_dir;
+use crate::server::fsutil::private_dir;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 

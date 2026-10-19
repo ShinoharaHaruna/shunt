@@ -1,5 +1,5 @@
 //! Box-side SOCKS5 proxy via SSH reverse dynamic forward
-//! (design.md §4.4): `ssh -N -R <port>` opens `127.0.0.1:<port>` as a
+//! (design.md §4.3): `ssh -N -R <port>` opens `127.0.0.1:<port>` as a
 //! SOCKS5 listener ON THE BOX, tunnelled back through the dev
 //! machine's network — the escape hatch for boxes whose outbound
 //! connectivity is poor (e.g. mainland-China GPU vendors).
@@ -124,7 +124,7 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
         }
     }
     let port = port.unwrap_or(DEFAULT_SOCKS_PORT);
-    registry::private_dir(&dir)?;
+    crate::server::fsutil::private_dir(&dir)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(dir.join(format!("{}.log", client.name)))?;
     let err = log.try_clone()?;
 
@@ -138,8 +138,8 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
         anyhow::bail!("ssh tunnel exited during setup; see {}", dir.join(format!("{}.log", client.name)).display());
     }
     let pid = child.id();
-    registry::write_private(&pid_path(&dir, &client.name), format!("{pid}\n"))?;
-    registry::write_private(&port_path(&dir, &client.name), format!("{port}\n"))?;
+    crate::server::fsutil::write_private(&pid_path(&dir, &client.name), format!("{pid}\n"))?;
+    crate::server::fsutil::write_private(&port_path(&dir, &client.name), format!("{port}\n"))?;
 
     // Wire the queue env so tasks see the proxy without any task edits.
     let proxy = format!("socks5h://127.0.0.1:{port}");
@@ -167,7 +167,7 @@ pub enum Heal {
 }
 
 /// Self-heal a dead recorded tunnel while the box itself is
-/// reachable (design.md §4.4): try `up` once; on failure strip
+/// reachable (design.md §4.3): try `up` once; on failure strip
 /// ALL_PROXY so queued tasks are not poisoned by a dead proxy.
 /// Called by the dispatcher sweep only on a successful probe — a
 /// dead box never reaches this (env cannot be edited anyway).
@@ -228,7 +228,7 @@ mod tests {
 
     fn tmp(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("shunt-tun-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        registry::private_dir(&dir).unwrap();
+        crate::server::fsutil::private_dir(&dir).unwrap();
         dir
     }
 
@@ -281,7 +281,7 @@ mod tests {
         let client = entry(&root);
         let t = LocalTransport { bin: PathBuf::from("/bin/sh"), timeout_s: Some(10) };
         // Recorded + dead: port file only, no live pid.
-        registry::write_private(&port_path(&state, "tun-test"), "1080\n").unwrap();
+        crate::server::fsutil::write_private(&port_path(&state, "tun-test"), "1080\n").unwrap();
         let res = heal_in(&state, &t, &client, |_, _| Ok(4242)).unwrap();
         assert!(matches!(res, Heal::Reconnected(4242)));
         std::fs::remove_dir_all(&state).ok();
@@ -297,8 +297,8 @@ mod tests {
         // Poisoned env + dead tunnel record (pid file naming a dead pid).
         env_write(&t, &client, "ALL_PROXY", Some("socks5h://127.0.0.1:1080")).unwrap();
         env_write(&t, &client, "WORKDIR", Some("/work")).unwrap();
-        registry::write_private(&pid_path(&state, "tun-test"), "99999999\n").unwrap();
-        registry::write_private(&port_path(&state, "tun-test"), "1080\n").unwrap();
+        crate::server::fsutil::write_private(&pid_path(&state, "tun-test"), "99999999\n").unwrap();
+        crate::server::fsutil::write_private(&port_path(&state, "tun-test"), "1080\n").unwrap();
         let res = heal_in(&state, &t, &client, |_, _| anyhow::bail!("ssh refused")).unwrap();
         assert!(matches!(res, Heal::Stripped));
         let text = std::fs::read_to_string(root.join("env")).unwrap();

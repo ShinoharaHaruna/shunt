@@ -2,8 +2,8 @@
 //! materialization rule.
 
 use super::paths::shunt_home;
-use super::privacy::{private_dir, write_private};
 use super::types::*;
+use crate::server::fsutil::{private_dir, write_private};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

@@ -16,6 +16,26 @@ use agent::*;
 use args::*;
 use server::*;
 
+/// Shared skeleton for dual-mode commands (`status`, `logs`,
+/// `cancel`, `prio`, `kill`, `workers`, `shutdown`): `-c`/registry
+/// default_client forwards the op over the wire; a local queue in
+/// scope runs the agent handler; neither prints subcommand help.
+/// `wire` builds the remote argv lazily so the local path never
+/// loads the client row (shutdown's arm path reads it).
+fn dual_mode<W, L>(client: &Option<String>, root: &Option<String>, sub: &str, wire: W, local: L) -> Result<()>
+where
+    W: FnOnce(&str) -> Result<()>,
+    L: FnOnce() -> Result<()>,
+{
+    if let Some(name) = resolve_client(client, root)? {
+        return wire(&name);
+    }
+    if rootless(root) {
+        return print_subhelp(sub);
+    }
+    local()
+}
+
 pub fn run(cli: Cli) -> Result<()> {
     use crate::server::registry;
     match cli.command {
@@ -29,30 +49,26 @@ pub fn run(cli: Cli) -> Result<()> {
             if a.all {
                 return crate::server::status::run_all(a.json);
             }
-            if let Some(name) = resolve_client(&a.client, &a.root)? {
-                return remote(&name, &["status", "--json"], None);
-            }
-            if rootless(&a.root) {
-                return print_subhelp("status");
-            }
-            agent_status(&a)
+            dual_mode(&a.client, &a.root, "status", |name| remote(name, &["status", "--json"], None), || agent_status(&a))
         }
         Command::Logs(a) => {
-            if let Some(name) = resolve_client(&a.client, &a.root)? {
-                // ssh exec is output-collected under a hard
-                // deadline (§5): a follow would buffer silently
-                // until the kill. Say so instead of swallowing -f.
-                if a.follow {
-                    anyhow::bail!("`logs -f` cannot follow over the wire; use -n/--tail and re-run, or `shunt client exec {name} -- tail -f <log>`");
-                }
-                let tail = logs_wire_tail(&a);
-                let refs: Vec<&str> = tail.iter().map(String::as_str).collect();
-                return remote(&name, &refs, None);
-            }
-            if rootless(&a.root) {
-                return print_subhelp("logs");
-            }
-            agent_logs(&a)
+            dual_mode(
+                &a.client,
+                &a.root,
+                "logs",
+                |name| {
+                    // ssh exec is output-collected under a hard
+                    // deadline (§5): a follow would buffer silently
+                    // until the kill. Say so instead of swallowing -f.
+                    if a.follow {
+                        anyhow::bail!("`logs -f` cannot follow over the wire; use -n/--tail and re-run, or `shunt client exec {name} -- tail -f <log>`");
+                    }
+                    let tail = logs_wire_tail(&a);
+                    let refs: Vec<&str> = tail.iter().map(String::as_str).collect();
+                    remote(name, &refs, None)
+                },
+                || agent_logs(&a),
+            )
         }
         Command::Dlog(a) => {
             if rootless(&a.root) {
@@ -309,79 +325,62 @@ pub fn run(cli: Cli) -> Result<()> {
             print!("{}", crate::agent::exec::render_task(&meta));
             Ok(())
         }
-        Command::Cancel(a) => {
-            if let Some(name) = resolve_client(&a.client, &a.root)? {
-                return remote(&name, &["cancel", "--json", "--", &a.pattern], None);
-            }
-            if rootless(&a.root) {
-                return print_subhelp("cancel");
-            }
-            agent_cancel(&a)
-        }
-        Command::Prio(a) => {
-            if let Some(name) = resolve_client(&a.client, &a.root)? {
+        Command::Cancel(a) => dual_mode(&a.client, &a.root, "cancel", |name| remote(name, &["cancel", "--json", "--", &a.pattern], None), || agent_cancel(&a)),
+        Command::Prio(a) => dual_mode(
+            &a.client,
+            &a.root,
+            "prio",
+            |name| {
                 let n = a.n.to_string();
-                return remote(&name, &["prio", "--json", "--", &a.pattern, &n], None);
-            }
-            if rootless(&a.root) {
-                return print_subhelp("prio");
-            }
-            agent_prio(&a)
-        }
-        Command::Kill(a) => {
-            if let Some(name) = resolve_client(&a.client, &a.root)? {
-                return remote(&name, &["kill", "--json", "--", &a.pattern], None);
-            }
-            if rootless(&a.root) {
-                return print_subhelp("kill");
-            }
-            agent_kill(&a)
-        }
-        Command::Workers(a) => {
-            if let Some(name) = resolve_client(&a.client, &a.root)? {
-                return match a.n {
-                    Some(n) => remote(&name, &["workers", "set", &n.to_string(), "--json"], None),
-                    None => remote(&name, &["workers", "get", "--json"], None),
-                };
-            }
-            if rootless(&a.root) {
-                return print_subhelp("workers");
-            }
-            agent_workers(&a)
-        }
+                remote(name, &["prio", "--json", "--", &a.pattern, &n], None)
+            },
+            || agent_prio(&a),
+        ),
+        Command::Kill(a) => dual_mode(&a.client, &a.root, "kill", |name| remote(name, &["kill", "--json", "--", &a.pattern], None), || agent_kill(&a)),
+        Command::Workers(a) => dual_mode(
+            &a.client,
+            &a.root,
+            "workers",
+            |name| match a.n {
+                Some(n) => remote(name, &["workers", "set", &n.to_string(), "--json"], None),
+                None => remote(name, &["workers", "get", "--json"], None),
+            },
+            || agent_workers(&a),
+        ),
         Command::Shutdown(a) => {
-            if let Some(name) = resolve_client(&a.client, &a.root)? {
-                let name = name.as_str();
-                return match a.action {
-                    ShutdownAction::On { grace_s, cmd } => {
-                        // Push the row's shutdown_cmd unless --cmd
-                        // overrides it; the file it writes is the
-                        // daemon's first-choice poweroff command.
-                        let client = registry::load_client(name)?;
-                        let g = grace_s.map(|n| n.to_string());
-                        // --cmd > row.shutdown_cmd > facts.shutdown_cmd
-                        // (the probe guess from §8 detection).
-                        let c = cmd.as_deref().or(client.shutdown_cmd.as_deref()).or_else(|| client.facts.get("shutdown_cmd").and_then(|v| v.as_str()));
-                        let mut tail: Vec<String> = vec!["shutdown".into(), "on".into()];
-                        if let Some(g) = &g {
-                            tail.push(g.clone());
+            dual_mode(
+                &a.client,
+                &a.root,
+                "shutdown",
+                |name| {
+                    match &a.action {
+                        ShutdownAction::On { grace_s, cmd } => {
+                            // Push the row's shutdown_cmd unless --cmd
+                            // overrides it; the file it writes is the
+                            // daemon's first-choice poweroff command.
+                            let client = registry::load_client(name)?;
+                            let g = grace_s.map(|n| n.to_string());
+                            // --cmd > row.shutdown_cmd > facts.shutdown_cmd
+                            // (the probe guess from §8 detection).
+                            let c = cmd.as_deref().or(client.shutdown_cmd.as_deref()).or_else(|| client.facts.get("shutdown_cmd").and_then(|v| v.as_str()));
+                            let mut tail: Vec<String> = vec!["shutdown".into(), "on".into()];
+                            if let Some(g) = &g {
+                                tail.push(g.clone());
+                            }
+                            if let Some(c) = c {
+                                tail.push("--cmd".into());
+                                tail.push(c.to_string());
+                            }
+                            tail.push("--json".into());
+                            let refs: Vec<&str> = tail.iter().map(String::as_str).collect();
+                            remote(name, &refs, None)
                         }
-                        if let Some(c) = c {
-                            tail.push("--cmd".into());
-                            tail.push(c.to_string());
-                        }
-                        tail.push("--json".into());
-                        let refs: Vec<&str> = tail.iter().map(String::as_str).collect();
-                        remote(name, &refs, None)
+                        ShutdownAction::Off => remote(name, &["shutdown", "off", "--json"], None),
+                        ShutdownAction::Status => remote(name, &["shutdown", "status", "--json"], None),
                     }
-                    ShutdownAction::Off => remote(name, &["shutdown", "off", "--json"], None),
-                    ShutdownAction::Status => remote(name, &["shutdown", "status", "--json"], None),
-                };
-            }
-            if rootless(&a.root) {
-                return print_subhelp("shutdown");
-            }
-            agent_shutdown(&a)
+                },
+                || agent_shutdown(&a),
+            )
         }
         Command::Probe(a) => {
             let report = crate::agent::probe::collect(&a.deploy_root);

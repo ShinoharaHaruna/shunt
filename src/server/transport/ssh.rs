@@ -4,7 +4,7 @@
 //! plus `scp` for `copy_to`. ControlMaster mux per client under
 //! `$SHUNT_HOME/cm/` (design.md §4.1).
 
-use super::{cm_dir, join_argv};
+use super::{cm_dir, join_argv, wait_deadline};
 use crate::server::registry::ClientEntry;
 use anyhow::{Context, Result};
 use std::io::Write;
@@ -26,23 +26,6 @@ const EXEC_TIMEOUT_S: u64 = 120;
 
 fn exec_timeout_s() -> u64 {
     std::env::var("SHUNT_SSH_EXEC_TIMEOUT_S").ok().and_then(|s| s.parse().ok()).filter(|&n| n > 0).unwrap_or(EXEC_TIMEOUT_S)
-}
-
-/// Poll a spawned child to completion or kill it at the deadline
-/// (same pattern as `LocalTransport`'s `timeout_s`).
-fn wait_deadline(mut child: std::process::Child, timeout_s: u64, what: &str) -> Result<std::process::Output> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_s);
-    loop {
-        match child.try_wait()? {
-            Some(_) => return child.wait_with_output().with_context(|| format!("wait {what}")),
-            None if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait_with_output();
-                anyhow::bail!("{what} timed out after {timeout_s}s");
-            }
-            None => std::thread::sleep(std::time::Duration::from_millis(50)),
-        }
-    }
 }
 
 /// rc-255 retries per call so one flap never surfaces; an exhausted
@@ -86,7 +69,7 @@ impl SshTransport {
         // MaxStartups`) reject back-to-back handshakes — muxing is the
         // fix, not retries. The socket lives under $SHUNT_HOME/cm/ so
         // nothing touches the user's own ssh config.
-        let _ = crate::server::registry::private_dir(&cm_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp")));
+        let _ = crate::server::fsutil::private_dir(&cm_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp")));
         let mut v = vec!["-p".into(), client.ssh.port.to_string(), "-o".into(), "BatchMode=yes".into(), "-o".into(), format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)), "-o".into(), "StrictHostKeyChecking=accept-new".into(), "-o".into(), format!("UserKnownHostsFile={kh}"), "-o".into(), "ControlMaster=auto".into(), "-o".into(), format!("ControlPath={}", cm_sock(client)), "-o".into(), "ControlPersist=60".into()];
         if !client.ssh.key.is_empty() {
             v.push("-i".into());
@@ -195,7 +178,9 @@ mod tests {
     use crate::server::registry::ClientEntry;
 
     /// Env mutation (PATH, timeout override) is process-global —
-    /// serialize the fake-ssh tests.
+    /// serialize the fake-ssh tests. Tests that also touch
+    /// SHUNT_HOME additionally hold the registry's HOME_LOCK so
+    /// registry-side env users can't observe their value.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Install a fake `ssh` ahead on PATH; returns the tmp dir.
@@ -276,6 +261,7 @@ mod tests {
 
     #[test]
     fn scp_retries_255_flaps_then_succeeds() {
+        let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
         let _g = ENV_LOCK.lock().unwrap();
         let home = std::env::temp_dir().join(format!("shunt-scp-home-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &home);
@@ -293,6 +279,7 @@ mod tests {
 
     #[test]
     fn scp_deadline_bails_without_retry() {
+        let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
         let _g = ENV_LOCK.lock().unwrap();
         let home = std::env::temp_dir().join(format!("shunt-scp-home2-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &home);

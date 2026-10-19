@@ -1,4 +1,4 @@
-//! Task ledger (design.md §4.6). When the dispatcher's push is acked
+//! Task ledger (design.md §4.5). When the dispatcher's push is acked
 //! it records which queue name the spool id became on the box —
 //! `tasks/<id>.json`, one file per task — so a submission stays
 //! traceable after its spool entry is deleted. The box never reports
@@ -85,7 +85,7 @@ fn now_iso() -> String {
 fn append_event(fields: serde_json::Value) -> Result<()> {
     let path = events_path()?;
     if let Some(d) = path.parent() {
-        registry::private_dir(d)?;
+        crate::server::fsutil::private_dir(d)?;
     }
     let mut line = serde_json::json!({ "ts": now_iso() });
     line.as_object_mut().unwrap().extend(fields.as_object().cloned().unwrap_or_default());
@@ -98,10 +98,10 @@ fn append_event(fields: serde_json::Value) -> Result<()> {
 
 fn save(rec: &TaskRecord) -> Result<()> {
     let dir = tasks_dir()?;
-    registry::private_dir(&dir)?;
+    crate::server::fsutil::private_dir(&dir)?;
     let path = dir.join(format!("{}.json", rec.id));
     let tmp = dir.join(format!(".{}.json.tmp", rec.id));
-    registry::write_private(&tmp, serde_json::to_string_pretty(rec)?)?;
+    crate::server::fsutil::write_private(&tmp, serde_json::to_string_pretty(rec)?)?;
     fs::rename(&tmp, &path)?;
     Ok(())
 }

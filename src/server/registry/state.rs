@@ -1,7 +1,7 @@
 //! Connection-failure streak counters under `$SHUNT_HOME/state/`.
 
 use super::paths::shunt_home;
-use super::privacy::{private_dir, write_private};
+use crate::server::fsutil::{private_dir, write_private};
 use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;

@@ -2,6 +2,7 @@
 
 pub mod client_ops;
 pub mod dispatch;
+pub mod fsutil;
 pub mod registry;
 pub mod spool;
 pub mod status;

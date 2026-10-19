@@ -131,9 +131,7 @@ fn endpoint_peers(name: &str, host: &str, port: u16) -> Vec<String> {
 mod tests {
     use super::{endpoint_peers, ClientEntry};
 
-    fn entry() -> ClientEntry {
-        ClientEntry { name: "b".into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: Default::default(), qroot: "/q".into(), deploy_root: "/data".into(), facts: Default::default(), billing: None }
-    }
+    use super::super::test_entry as entry;
 
     #[test]
     fn endpoint_peers_finds_duplicate_endpoint() {

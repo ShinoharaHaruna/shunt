@@ -49,20 +49,7 @@ impl super::Transport for LocalTransport {
         // try_wait and never drops the pipe otherwise.
         drop(child.stdin.take());
         let out = match self.timeout_s {
-            Some(t) => {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(t);
-                loop {
-                    match child.try_wait()? {
-                        Some(_) => break child.wait_with_output().context("wait local exec")?,
-                        None if std::time::Instant::now() >= deadline => {
-                            let _ = child.kill();
-                            let _ = child.wait_with_output();
-                            anyhow::bail!("local exec {} timed out after {}s", prog.display(), t);
-                        }
-                        None => std::thread::sleep(std::time::Duration::from_millis(50)),
-                    }
-                }
-            }
+            Some(t) => super::wait_deadline(child, t, &format!("local exec {}", prog.display()))?,
             None => child.wait_with_output().context("wait local exec")?,
         };
         if !out.status.success() {

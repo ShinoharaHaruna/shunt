@@ -1,6 +1,7 @@
-//! Registry permission infrastructure: shared with spool, tasks,
-//! and tunnel, which is why these are `pub(crate)` rather than
-//! private to the registry.
+//! Shared permission infrastructure (design.md §4.1): registry
+//! rows, spool entries, task ledger, and tunnel state all carry
+//! secrets-adjacent data, so dir/file creation is funneled through
+//! these two helpers.
 
 use anyhow::Result;
 use std::fs;
@@ -17,7 +18,7 @@ use std::path::Path;
 /// path keeps its own permissions).
 pub(crate) fn private_dir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir)?;
-    if let Ok(home) = super::paths::shunt_home() {
+    if let Ok(home) = crate::server::registry::shunt_home() {
         if let Ok(rel) = dir.strip_prefix(&home) {
             let mut p = home;
             let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o700));
