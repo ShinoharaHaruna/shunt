@@ -104,6 +104,14 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
     let text = std::fs::read_to_string(&row).with_context(|| format!("no client row {}", row.display()))?;
     let e: ClientEntry = toml::from_str(&text).with_context(|| format!("bad TOML in {}", row.display()))?;
 
+    // `--purge` becomes a remote `rm -rf <qroot>`; validate the path
+    // before anything reaches a remote shell. A bad row must stop
+    // the deregistration, not warn-and-continue — the remote steps
+    // below are best-effort only after this gate passes.
+    if purge {
+        check_purge_qroot(&e.qroot)?;
+    }
+
     // --- remote decommission (best-effort) ---
     if !e.local && !e.ssh.host.is_empty() {
         let t = transport::transport_for(&e);
@@ -175,6 +183,29 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
     Ok(())
 }
 
+/// Guard for `rm --purge`'s remote `rm -rf <qroot>`: the row's qroot
+/// is trusted input only after these checks. Rejects empty,
+/// relative, `~`-prefixed, or `..`-carrying paths; anything shorter
+/// than two components (`/`, `/root`, `/q`); a first component naming
+/// a system dir (`/etc`, `/usr`, `/bin`, …); a home dir itself
+/// (`/home`, `/home/<user>`); and suspiciously short paths. The
+/// AutoDL default `/root/autodl-tmp/queue` passes — qroots under
+/// /root are normal, only the top-level dirs are dangerous.
+fn check_purge_qroot(qroot: &str) -> Result<()> {
+    let p = qroot.trim();
+    anyhow::ensure!(!p.is_empty(), "--purge refused: qroot is empty");
+    anyhow::ensure!(!p.starts_with('~'), "--purge refused: qroot {p:?} is ~-relative (expansion is shell-dependent)");
+    anyhow::ensure!(p.starts_with('/'), "--purge refused: qroot {p:?} is not absolute");
+    let comps: Vec<&str> = p.split('/').filter(|c| !c.is_empty()).collect();
+    anyhow::ensure!(!comps.contains(&".."), "--purge refused: qroot {p:?} contains ..");
+    anyhow::ensure!(comps.len() >= 2, "--purge refused: qroot {p:?} is a top-level path — edit the row to a deeper queue dir");
+    const SYSTEM_DIRS: [&str; 12] = ["bin", "sbin", "boot", "dev", "etc", "lib", "lib64", "proc", "sys", "usr", "run", "var"];
+    anyhow::ensure!(!SYSTEM_DIRS.contains(&comps[0]), "--purge refused: qroot {p:?} lives under a system dir");
+    anyhow::ensure!(!(comps[0] == "home" && comps.len() == 2), "--purge refused: qroot {p:?} is a user's home dir");
+    anyhow::ensure!(comps.join("/").len() >= 7, "--purge refused: qroot {p:?} is suspiciously short for rm -rf");
+    Ok(())
+}
+
 /// The remote revoke snippet, factored out for testing. Reads the
 /// key blob on stdin (no quoting surface at all), drops every
 /// authorized_keys line containing it via fixed-string grep, and
@@ -203,7 +234,21 @@ fi
 
 #[cfg(test)]
 mod tests {
-    use super::REVOKE_SCRIPT;
+    use super::{check_purge_qroot, REVOKE_SCRIPT};
+
+    #[test]
+    fn purge_qroot_accepts_real_queue_dirs() {
+        for ok in ["/root/autodl-tmp/queue", "/data/queue", "/home/u/proj/queue", "/tmp/shunt-queue"] {
+            assert!(check_purge_qroot(ok).is_ok(), "{ok} should be allowed");
+        }
+    }
+
+    #[test]
+    fn purge_qroot_rejects_dangerous_paths() {
+        for bad in ["", "/", "/root", "/q", "home", "~/queue", "~root/q", "../queue", "/a/../q", "/home/u", "/home", "/etc/foo", "/usr/local/q", "/var/lib/x", "/opt/x"] {
+            assert!(check_purge_qroot(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
 
     /// Run REVOKE_SCRIPT against a fake HOME holding the given
     /// authorized_keys content; returns (rc, resulting file). The
