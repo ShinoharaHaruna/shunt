@@ -44,7 +44,12 @@ pub(crate) fn requeue_orphans(root: &Path) -> Result<()> {
                 let _ = std::fs::rename(&old_log, failed.join(format!("{clean}.interrupted.{}.log", queue::unix_now())));
             }
             let _ = std::fs::remove_file(dir.join("pid"));
-            if let Err(e) = std::fs::rename(&dir, pending.join(format!("0000_requeued_{clean}"))) {
+            // Rust rename() onto an existing EMPTY dir silently
+            // replaces it (unlike bash mv) — check the target first
+            // and take the same quarantine path as a rename failure.
+            let target = pending.join(format!("0000_requeued_{clean}"));
+            let moved = if target.exists() { Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("target exists: {}", target.display()))) } else { std::fs::rename(&dir, &target) };
+            if let Err(e) = moved {
                 // A failed rename must not strand the entry in
                 // running/ forever: no pid file means kill/status
                 // can't see it. Quarantine to failed/ so the task
@@ -63,7 +68,9 @@ pub(crate) fn requeue_orphans(root: &Path) -> Result<()> {
         } else {
             // Legacy flat entry: stays a flat `NNNN_slug.sh` in
             // pending so the listing keeps seeing it.
-            if let Err(e) = std::fs::rename(running.join(format!("{base}.sh")), pending.join(format!("0000_requeued_{clean}.sh"))) {
+            let target = pending.join(format!("0000_requeued_{clean}.sh"));
+            let moved = if target.exists() { Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("target exists: {}", target.display()))) } else { std::fs::rename(running.join(format!("{base}.sh")), &target) };
+            if let Err(e) = moved {
                 dlog(root, "requeue_failed", ev(json!({"task": base, "error": e.to_string()})));
                 if let Err(e2) = exec::quarantine(root, "running", &base, &format!("orphan requeue failed: {e}")) {
                     dlog(

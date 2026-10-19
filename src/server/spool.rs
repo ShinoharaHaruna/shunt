@@ -169,6 +169,7 @@ pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slu
     let shortid: String = id.chars().take(8).collect();
     meta.slug = format!("{slug}-{shortid}");
 
+    crate::proto::task::validate_meta(&meta)?;
     let body = if file.is_some() { merge_file_directives(&body, &meta) } else { crate::agent::exec::render_task(&meta) };
 
     // Guard contract (design.md §3.13): requeue reruns the body, so a

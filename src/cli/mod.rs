@@ -330,6 +330,7 @@ pub fn run(cli: Cli) -> Result<()> {
             if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
                 anyhow::bail!("bad slug '{}': {p}", a.slug);
             }
+            crate::proto::task::validate_meta(&meta)?;
             print!("{}", crate::agent::exec::render_task(&meta));
             Ok(())
         }

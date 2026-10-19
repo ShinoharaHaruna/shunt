@@ -87,6 +87,7 @@ pub(crate) fn agent_new(a: &NewArgs) -> Result<()> {
         if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
             anyhow::bail!("bad slug '{}': {p}", a.slug);
         }
+        crate::proto::task::validate_meta(&meta)?;
         let body = crate::agent::exec::render_task(&meta);
         let root = agent_root(&a.root)?;
         crate::agent::queue::enqueue(&root, &meta.slug, &body)
@@ -142,9 +143,10 @@ pub(crate) fn agent_prio(a: &PrioArgs) -> Result<()> {
     // its `.sh` suffix so it stays visible to the listing.
     let (from, to) = if crate::agent::queue::is_dir_entry(&root, "pending", base) { (root.join("pending").join(base), root.join("pending").join(&new)) } else { (root.join("pending").join(format!("{base}.sh")), root.join("pending").join(format!("{new}.sh"))) };
     // refuse to clobber an existing pending task (bash `mv -f` defect,
-    // design.md §3.14); check BOTH shapes — a dir would silently
-    // coexist with a legacy `NNNN_slug.sh` of the same name.
-    let occupied = to.exists() || root.join("pending").join(format!("{new}.sh")).exists();
+    // design.md §3.14); check BOTH shapes for BOTH entry shapes — a
+    // flat source renaming onto a same-named pending DIR would leave
+    // `NNNN_x/` + `NNNN_x.sh` coexisting as two tasks.
+    let occupied = root.join("pending").join(&new).exists() || root.join("pending").join(format!("{new}.sh")).exists();
     if occupied && new != *base {
         return jfail(a.json, &format!("target name exists: {new}"));
     }
@@ -505,5 +507,32 @@ mod tests {
         // match every task log instead of the daemon log.
         let bare = LogsArgs { pattern: None, ..a };
         assert_eq!(logs_wire_tail(&bare), vec!["logs", "-n", "50"]);
+    }
+
+    /// prio must refuse a flat entry renaming onto a same-named
+    /// pending DIR (and a dir onto a flat `.sh`): either coexistence
+    /// would list as two pending tasks (design.md §3.14).
+    #[test]
+    fn prio_refuses_cross_shape_target() {
+        let root = std::env::temp_dir().join(format!("shunt-prio-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let pending = root.join("pending");
+        std::fs::create_dir_all(&pending).unwrap();
+        // Flat source 0001_a.sh + dir target 0002_a/.
+        std::fs::write(pending.join("0001_a.sh"), "echo hi\n").unwrap();
+        std::fs::create_dir_all(pending.join("0002_a")).unwrap();
+        let args = PrioArgs { pattern: "0001_a".into(), n: 2, client: None, root: Some(root.display().to_string()), json: false };
+        let err = agent_prio(&args).unwrap_err().to_string();
+        assert!(err.contains("target name exists"), "flat->dir not refused: {err}");
+        assert!(pending.join("0001_a.sh").exists() && pending.join("0002_a").exists());
+        std::fs::remove_dir_all(&root).ok();
+
+        // Dir source 0001_b/ + flat target 0002_b.sh.
+        std::fs::create_dir_all(&pending).unwrap();
+        std::fs::create_dir_all(pending.join("0001_b")).unwrap();
+        std::fs::write(pending.join("0002_b.sh"), "echo hi\n").unwrap();
+        let args = PrioArgs { pattern: "0001_b".into(), n: 2, client: None, root: Some(root.display().to_string()), json: false };
+        let err = agent_prio(&args).unwrap_err().to_string();
+        assert!(err.contains("target name exists"), "dir->flat not refused: {err}");
+        std::fs::remove_dir_all(&root).ok();
     }
 }

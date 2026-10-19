@@ -64,6 +64,21 @@ pub fn slug_problem(slug: &str) -> Option<&'static str> {
     }
 }
 
+/// Reject meta fields that would inject extra lines into the
+/// rendered task body: `workdir`/`guard`/env keys and values ride in
+/// `# shunt:` comment lines, so a `\n`/`\r` inside any of them
+/// (TOML escapes make these real) splices arbitrary lines — even
+/// code lines — into the file. Must run at every render entry point
+/// before `render_task`/`merge_file_directives`; `cmd` is exempt
+/// (shell-quoted, so embedded newlines stay inside quotes).
+pub fn validate_meta(meta: &TaskMeta) -> anyhow::Result<()> {
+    let fields = std::iter::once(("slug", meta.slug.as_str())).chain(meta.guard.iter().map(|g| ("guard", g.as_str()))).chain(meta.workdir.iter().map(|w| ("workdir", w.as_str()))).chain(meta.env.iter().flat_map(|(k, v)| [("env key", k.as_str()), ("env value", v.as_str())]));
+    for (what, s) in fields {
+        anyhow::ensure!(!s.contains(['\n', '\r']), "task meta {what} contains a newline — would inject lines into the task body");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::sanitize_slug;
@@ -93,5 +108,35 @@ mod tests {
         assert!(slug_problem("train-v2").is_none());
         // non-ASCII slugs sanitize to leading dashes -> rejected too
         assert!(slug_problem(&sanitize_slug("实验A")).is_some());
+    }
+
+    /// `\n`/`\r` in slug/guard/workdir/env keys+values would splice
+    /// extra lines into the rendered task file — every field is
+    /// refused (design.md §3.13; TOML escapes make these real).
+    #[test]
+    fn meta_rejects_embedded_newlines() {
+        use super::{validate_meta, TaskMeta};
+        let base = TaskMeta { slug: "t".into(), guard: None, workdir: None, env: Default::default(), cmd: vec!["true".into()], timeout_s: None };
+        assert!(validate_meta(&base).is_ok());
+
+        let mut m = base.clone();
+        m.slug = "bad\nslug".into();
+        assert!(validate_meta(&m).is_err());
+
+        let mut m = base.clone();
+        m.guard = Some("g\r\nwhoami".into());
+        assert!(validate_meta(&m).is_err());
+
+        let mut m = base.clone();
+        m.workdir = Some("/x\nrm -rf /".into());
+        assert!(validate_meta(&m).is_err());
+
+        let mut m = base.clone();
+        m.env.insert("K\nBAD".into(), "v".into());
+        assert!(validate_meta(&m).is_err());
+
+        let mut m = base;
+        m.env.insert("K".into(), "v\nevil".into());
+        assert!(validate_meta(&m).is_err());
     }
 }

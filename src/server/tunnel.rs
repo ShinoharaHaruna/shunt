@@ -64,22 +64,53 @@ fn read_pid(dir: &Path, name: &str) -> Option<u32> {
     s.trim().parse().ok()
 }
 
-/// NUL-separated `/proc/<pid>/cmdline` → our tunnel when argv[0]'s
-/// basename is `ssh` and some whole argv element is `-R` (`ssh -N -R
-/// <port>` is this tunnel's signature). Whole-element matching, same
-/// discipline as the daemon's `is_daemon_cmdline` (design.md §3.4).
-fn is_tunnel_cmdline(cmdline: &[u8]) -> bool {
-    let mut argv = cmdline.split(|&b| b == 0).filter(|a| !a.is_empty());
-    let Some(argv0) = argv.next() else { return false };
-    let base = argv0.rsplit(|&b| b == b'/').next().unwrap_or(argv0);
-    base == b"ssh" && argv.any(|a| a == b"-R")
+/// `user@host` needle for cmdline identity — only when the row
+/// carries a real endpoint (local rows have neither field).
+fn client_target(client: &ClientEntry) -> Option<String> {
+    if client.local || client.ssh.user.is_empty() || client.ssh.host.is_empty() {
+        None
+    } else {
+        Some(format!("{}@{}", client.ssh.user, client.ssh.host))
+    }
 }
 
-fn pid_alive(pid: u32) -> bool {
+/// NUL-separated `/proc/<pid>/cmdline` → our tunnel when argv[0]'s
+/// basename is `ssh` AND the recorded needles are present: `-R`
+/// followed by the recorded port (when a port file exists) and the
+/// `user@host` target (when the caller knows the client row). A bare
+/// `ssh -R` match accepted ANY reverse forward — a stranger's tunnel
+/// recycling our recorded pid would then pass liveness and `down`
+/// would TERM it. Whole-element matching, same discipline as the
+/// daemon's `is_daemon_cmdline` (design.md §3.4).
+fn is_tunnel_cmdline(cmdline: &[u8], port: Option<u16>, target: Option<&str>) -> bool {
+    let argv: Vec<&[u8]> = cmdline.split(|&b| b == 0).filter(|a| !a.is_empty()).collect();
+    let Some(argv0) = argv.first() else { return false };
+    let base = argv0.rsplit(|&b| b == b'/').next().unwrap_or(argv0);
+    if base != b"ssh" {
+        return false;
+    }
+    let r_ok = match port {
+        // `-R <port>` as an adjacent pair — the exact form `up` spawns.
+        Some(p) => {
+            let ps = p.to_string();
+            argv.windows(2).any(|w| w[0] == b"-R" && w[1] == ps.as_bytes())
+        }
+        None => argv.iter().any(|a| *a == b"-R"),
+    };
+    if !r_ok {
+        return false;
+    }
+    match target {
+        Some(t) => argv.contains(&t.as_bytes()),
+        None => true,
+    }
+}
+
+fn pid_alive(pid: u32, port: Option<u16>, target: Option<&str>) -> bool {
     // Cmdline identity, not bare /proc existence: a recycled pid must
     // not pass for a live tunnel (status lies, `up` early-bails, and
     // `down` would signal a foreign process).
-    std::fs::read(format!("/proc/{pid}/cmdline")).ok().is_some_and(|c| is_tunnel_cmdline(&c))
+    std::fs::read(format!("/proc/{pid}/cmdline")).ok().is_some_and(|c| is_tunnel_cmdline(&c, port, target))
 }
 
 /// A tunnel was set up for `name` at some point: a pid or port
@@ -94,16 +125,26 @@ pub fn recorded(name: &str) -> Result<bool> {
     Ok(recorded_in(&tunnels_dir()?, name))
 }
 
-fn status_in(dir: &Path, name: &str) -> TunnelState {
-    let port = std::fs::read_to_string(port_path(dir, name)).ok().and_then(|s| s.trim().parse::<u16>().ok());
-    let alive = matches!(read_pid(dir, name), Some(pid) if pid_alive(pid));
+fn recorded_port(dir: &Path, name: &str) -> Option<u16> {
+    std::fs::read_to_string(port_path(dir, name)).ok().and_then(|s| s.trim().parse::<u16>().ok())
+}
+
+/// `target` is the `user@host` needle when the caller knows the
+/// client row — pass `None` when the row is unloadable (liveness
+/// then falls back to the port needle alone).
+fn status_in(dir: &Path, name: &str, target: Option<&str>) -> TunnelState {
+    let port = recorded_port(dir, name);
+    let alive = matches!(read_pid(dir, name), Some(pid) if pid_alive(pid, port, target));
     let stale = !alive && recorded_in(dir, name);
     TunnelState { alive, port, stale }
 }
 
 /// Current tunnel state for a client (no network needed).
 pub fn status(name: &str) -> Result<TunnelState> {
-    Ok(status_in(&tunnels_dir()?, name))
+    // The row gives the `user@host` needle; an unloadable/missing
+    // row degrades to port-only matching rather than failing status.
+    let target = registry::load_client(name).ok().and_then(|c| client_target(&c));
+    Ok(status_in(&tunnels_dir()?, name, target.as_deref()))
 }
 
 /// List every recorded tunnel name (clients/tunnels dir).
@@ -133,7 +174,7 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
     }
     let dir = tunnels_dir()?;
     if let Some(pid) = read_pid(&dir, &client.name) {
-        if pid_alive(pid) {
+        if pid_alive(pid, recorded_port(&dir, &client.name), client_target(client).as_deref()) {
             return Ok(pid);
         }
     }
@@ -204,7 +245,7 @@ fn heal_in(dir: &Path, t: &dyn Transport, client: &ClientEntry, reconnect: impl 
     if !recorded_in(dir, &client.name) {
         return Ok(Heal::NotRecorded);
     }
-    if status_in(dir, &client.name).alive {
+    if status_in(dir, &client.name, client_target(client).as_deref()).alive {
         return Ok(Heal::Healthy);
     }
     match reconnect(t, client) {
@@ -224,11 +265,12 @@ fn heal_in(dir: &Path, t: &dyn Transport, client: &ClientEntry, reconnect: impl 
 pub fn down(t: &dyn Transport, client: &ClientEntry) -> Result<()> {
     let dir = tunnels_dir()?;
     if let Some(pid) = read_pid(&dir, &client.name) {
-        // pid_alive already cmdline-verified the pid as our ssh, so
-        // this can never signal a recycled pid. The tunnel spawned
+        // pid_alive already cmdline-verified the pid as our ssh
+        // (port + user@host needles), so this can never signal a
+        // recycled pid or a stranger's -R forward. The tunnel spawned
         // with process_group(0) — pid == pgid — so TERM the whole
         // group and any children go with the leader.
-        if pid_alive(pid) {
+        if pid_alive(pid, recorded_port(&dir, &client.name), client_target(client).as_deref()) {
             let _ = crate::agent::exec::signal_pgid(pid, "TERM");
         }
     }
@@ -333,8 +375,32 @@ mod tests {
         // State files stay so the next sweep retries the reconnect,
         // and status reports the intermediate state as stale.
         assert!(recorded_in(&state, "tun-test"));
-        assert!(status_in(&state, "tun-test").stale);
+        assert!(status_in(&state, "tun-test", None).stale);
         std::fs::remove_dir_all(&state).ok();
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A bare `ssh -R` cmdline must NOT pass liveness when the
+    /// recorded port and user@host needles are absent — a stranger's
+    /// reverse forward recycling our pid would otherwise be TERM'd
+    /// by `tunnel down`.
+    #[test]
+    fn cmdline_needs_port_and_target_needles() {
+        // Build /proc-style NUL-separated cmdlines without escape soup.
+        let cl = |args: &[&str]| args.join("\0").into_bytes();
+        let ours = cl(&["ssh", "-i", "key", "-N", "-R", "1080", "user@host"]);
+        assert!(is_tunnel_cmdline(&ours, Some(1080), Some("user@host")));
+        // Foreign -R on another port: rejected once the port is known.
+        let foreign = cl(&["ssh", "-N", "-R", "9999", "other@box"]);
+        assert!(!is_tunnel_cmdline(&foreign, Some(1080), Some("user@host")));
+        assert!(!is_tunnel_cmdline(&foreign, Some(1080), None));
+        // Same port, wrong target: still not ours.
+        let wrong_target = cl(&["ssh", "-N", "-R", "1080", "other@box"]);
+        assert!(!is_tunnel_cmdline(&wrong_target, Some(1080), Some("user@host")));
+        // No recorded port: any `-R` element satisfies the port needle.
+        assert!(is_tunnel_cmdline(&foreign, None, Some("other@box")));
+        // argv0 basename match: /usr/bin/ssh counts, not-ssh does not.
+        assert!(is_tunnel_cmdline(&cl(&["/usr/bin/ssh", "-R", "1080"]), Some(1080), None));
+        assert!(!is_tunnel_cmdline(&cl(&["autossh", "-R", "1080"]), Some(1080), None));
     }
 }

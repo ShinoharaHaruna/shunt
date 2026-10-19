@@ -92,10 +92,6 @@ pub fn spawn_task(root: &Path, task_name: &str) -> Result<(Child, Option<u64>)> 
     for v in PROXY_VARS {
         cmd.env_remove(v);
     }
-    if let Some(prepend) = env.get("PATH_PREPEND") {
-        let cur = std::env::var("PATH").unwrap_or_default();
-        cmd.env("PATH", format!("{prepend}:{cur}"));
-    }
     if let Some(threads) = env.get("TASK_THREADS") {
         let n = if threads == "auto" { crate::agent::probe::cgroup_cores().unwrap_or(1) } else { queue::digits_only(threads).unwrap_or(1) };
         let n = n.max(1).to_string();
@@ -106,6 +102,15 @@ pub fn spawn_task(root: &Path, task_name: &str) -> Result<(Child, Option<u64>)> 
         if !matches!(k.as_str(), "WORKDIR" | "PATH_PREPEND" | "TASK_THREADS") {
             cmd.env(k, v);
         }
+    }
+    // PATH_PREPEND applies AFTER the generic env passthrough: a literal
+    // `PATH=` line in the env file is the base the prepend extends, not
+    // an override that silently erases it — effective PATH is always
+    // `PATH_PREPEND:PATH` (env-file PATH if present, else the daemon's),
+    // per design.md §3.12.
+    if let Some(prepend) = env.get("PATH_PREPEND") {
+        let cur = env.get("PATH").cloned().or_else(|| std::env::var("PATH").ok()).unwrap_or_default();
+        cmd.env("PATH", format!("{prepend}:{cur}"));
     }
     // Per-task `shunt-env:` directives applied last: a submitted
     // binding's overlay beats the queue-level env file.
@@ -293,13 +298,21 @@ pub fn kill_task(root: &Path, task_name: &str) -> Result<KillOutcome> {
 /// renames). A same-name failed/ entry gets a timestamped suffix
 /// rather than being clobbered.
 pub fn quarantine(root: &Path, track: &str, name: &str, note: &str) -> Result<()> {
+    // Nothing to quarantine is a no-op, not an error: when the source
+    // entry is already gone (e.g. finalize's rename succeeded and only
+    // the exit-file write failed) the real entry sits in done/ — a
+    // `failed/<name>/` holding only `shunt_error` would report a task
+    // as failed that actually completed.
+    let src_dir = root.join(track).join(name);
+    if !src_dir.exists() && !root.join(track).join(format!("{name}.sh")).exists() {
+        return Ok(());
+    }
     let failed = root.join("failed");
     std::fs::create_dir_all(&failed)?;
     let mut dest = failed.join(name);
     if dest.exists() || failed.join(format!("{name}.sh")).exists() {
         dest = failed.join(format!("{name}.quarantined.{}", queue::unix_now()));
     }
-    let src_dir = root.join(track).join(name);
     if src_dir.is_dir() {
         std::fs::rename(&src_dir, &dest).with_context(|| format!("cannot quarantine {name}"))?;
     } else {
@@ -458,5 +471,23 @@ mod tests {
         let (_, envs, _) = super::task_directives(&task);
         assert_eq!(envs, vec![("OK".to_string(), "yes".to_string())]);
         std::fs::remove_file(&task).ok();
+    }
+
+    /// Quarantine with a missing source is a no-op: when the entry
+    /// already left the track (e.g. finalize's rename succeeded and
+    /// only the exit-file write failed) no bogus `failed/<name>/`
+    /// holding only `shunt_error` may appear beside the real entry
+    /// in done/.
+    #[test]
+    fn quarantine_missing_source_is_noop() {
+        let root = std::env::temp_dir().join(format!("shunt-qnoop-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(root.join("running")).unwrap();
+        std::fs::create_dir_all(root.join("done")).unwrap();
+        // Real entry already finalized into done/.
+        std::fs::create_dir_all(root.join("done").join("0001_t")).unwrap();
+        super::quarantine(&root, "running", "0001_t", "exit write failed").unwrap();
+        assert!(!root.join("failed").join("0001_t").exists(), "ghost failed/ entry was created");
+        assert!(root.join("done").join("0001_t").exists());
+        std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -61,9 +61,16 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
     // Undelivered spool entries and project [[bind]] refs.
     for mut se in crate::server::spool::list()? {
         if se.client == old {
-            se.client = new.into();
-            let body = crate::server::spool::body(&se.id).unwrap_or_default();
-            crate::server::spool::stage(&se, &body)?;
+            // An unreadable body must not be staged back as an empty
+            // task: skip the entry (it keeps pointing at the old name
+            // and fails loudly at dispatch) rather than lose the task.
+            match crate::server::spool::body(&se.id) {
+                Ok(body) => {
+                    se.client = new.into();
+                    crate::server::spool::stage(&se, &body)?;
+                }
+                Err(e) => eprintln!("warn: spool entry {} body unreadable ({e:#}); left bound to {old} — fix or remove it manually", se.id),
+            }
         }
     }
     // Delivered-task ledger records point at the live row too.

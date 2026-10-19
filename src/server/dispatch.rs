@@ -153,7 +153,14 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
                 if let Err(e) = crate::server::tasks::record_push(&entry, &name) {
                     eprintln!("dispatch: {} ledger write failed: {e:#}", entry.id);
                 }
-                spool::remove(&entry.id)?;
+                // A remove hiccup must not abort the sweep: every
+                // remaining deliverable entry would be skipped this
+                // poll for one fs error. The entry WAS delivered —
+                // log LOUDLY: the leftover spool file re-pushes next
+                // sweep (the task guard absorbs the double-run).
+                if let Err(e) = spool::remove(&entry.id) {
+                    eprintln!("dispatch: {} spool remove failed ({e:#}); entry will RE-PUSH next sweep — the remote guard must absorb the duplicate", entry.id);
+                }
                 pushed += 1;
             }
             Err(e) => eprintln!("dispatch: {} retained: {e:#}", entry.id),
