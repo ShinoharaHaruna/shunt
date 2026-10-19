@@ -32,7 +32,7 @@ impl Q {
         let mut c = Command::new(bin());
         let mut argv: Vec<String> = vec![args[0].to_string(), "--root".into(), self.root.to_string_lossy().into_owned()];
         argv.extend(args[1..].iter().map(|s| s.to_string()));
-        c.args(&argv);
+        c.args(&argv).env("SHUNT_STATE", self.root.join("boxstate"));
         c.output().expect("shunt run failed")
     }
 
@@ -375,7 +375,7 @@ fn env_overlay_workdir_threads_proxy() {
     std::fs::write(q.root.join("env"), format!("WORKDIR={}\nTASK_THREADS=2\nFOO=bar\nPATH_PREPEND=/nonexistent-prepend\n", workdir.display())).unwrap();
     q.enqueue_script("envcheck", &format!("#!/usr/bin/env bash\n{{ echo \"pwd=$PWD\"; echo \"omp=$OMP_NUM_THREADS\"; echo \"foo=$FOO\"; echo \"proxies=$(env | grep -cE '^(ALL_PROXY|all_proxy|http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY)=')\"; echo \"path=$PATH\"; }} > {}\n", out.display()));
     let mut c = Command::new(bin());
-    c.args(["daemon", "--root"]).arg(&q.root).env("POLL", "0.1").env("http_proxy", "http://should-be-unset:1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    c.args(["daemon", "--root"]).arg(&q.root).env("POLL", "0.1").env("SHUNT_STATE", q.root.join("boxstate")).env("http_proxy", "http://should-be-unset:1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     let mut d = c.spawn().unwrap();
     wait_until(|| out.exists(), 15, "env task ran");
     let text = std::fs::read_to_string(&out).unwrap();
@@ -458,9 +458,14 @@ fn stop_drain_honors_armed_shutdown() {
     let fired = q.root.join("FIRED");
     std::fs::write(q.root.join("shutdown_cmd"), format!("touch {}", fired.display())).unwrap();
     q.run_ok(&["shutdown", "on", "2"]);
-    let mut d = q.daemon();
-    // STOP while armed: daemon drains, then honors the flag
+    // STOP must be in place before the daemon starts: if the daemon's
+    // first poll cycle sees the armed flag on an empty queue before
+    // STOP lands, it enters the *normal* countdown and STOP then
+    // cancels + disarms (§3.11) — the flag is gone by drain-exit and
+    // nothing is honored. STOP-first selects the §3.10 honoring path
+    // deterministically.
     q.stop();
+    let mut d = q.daemon();
     wait_until(|| q.dlog().contains("stop_drain_honors_shutdown"), 10, "drain honors armed flag");
     wait_until(|| fired.exists(), 15, "shutdown command fired after drain");
     wait_until(|| q.daemon_pid().is_none(), 5, "daemon exec'd away");
@@ -476,8 +481,11 @@ fn stop_drain_honored_shutdown_still_cancellable() {
     let fired = q.root.join("FIRED");
     std::fs::write(q.root.join("shutdown_cmd"), format!("touch {}", fired.display())).unwrap();
     q.run_ok(&["shutdown", "on", "6"]);
-    let mut d = q.daemon();
+    // STOP placed before the daemon starts (same race as
+    // stop_drain_honors_armed_shutdown) so the countdown the test
+    // observes is the honoring countdown, not a normal one.
     q.stop();
+    let mut d = q.daemon();
     wait_until(|| q.dlog().contains("idle_shutdown_armed"), 10, "honoring countdown started");
     q.run_ok(&["shutdown", "off"]);
     wait_until(|| q.dlog().contains("idle_shutdown_cancelled"), 10, "cancelled");
