@@ -30,12 +30,21 @@ pub(crate) fn ev(v: serde_json::Value) -> Map<String, serde_json::Value> {
 }
 
 /// Append one JSONL event to daemon.log: `{ts, event, ...}`.
+/// The log is unbounded without rotation: past `daemon_log_max()` it
+/// is renamed to `daemon.log.1` (one generation kept) and a fresh
+/// file starts (design.md §3.1).
 pub(crate) fn dlog(root: &Path, event: &str, extra: Map<String, serde_json::Value>) {
     let mut obj = Map::new();
     obj.insert("ts".into(), json!(crate::agent::queue::iso8601_now()));
     obj.insert("event".into(), json!(event));
     obj.extend(extra);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(root.join("daemon.log")) {
+    let path = root.join("daemon.log");
+    if let Ok(m) = path.metadata() {
+        if m.len() > crate::agent::queue::daemon_log_max() {
+            let _ = std::fs::rename(&path, root.join("daemon.log.1"));
+        }
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{}", serde_json::Value::Object(obj));
     }
 }

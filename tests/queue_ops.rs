@@ -179,6 +179,25 @@ fn prio_rejects_outside_band() {
 }
 
 #[test]
+fn done_track_archives_beyond_keep() {
+    // Terminal tracks are capped: past SHUNT_TRACK_KEEP the oldest
+    // entries move to done/.archive/ so status scans stay cheap
+    // (design.md §3.9). Dot-prefixed archive is invisible to listings.
+    let q = Q::new("archive");
+    for i in 0..4 {
+        q.enqueue_script(&format!("t{i}"), &marker_task(&q.root.join(format!("m{i}"))));
+    }
+    let mut c = Command::new(bin());
+    let mut d = c.args(["daemon", "--root"]).arg(&q.root).env("POLL", "0.1").env("SHUNT_TRACK_KEEP", "2").env("SHUNT_STATE", q.root.join("boxstate")).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn daemon");
+    let live = |q: &Q| q.tasks("done").into_iter().filter(|n| !n.starts_with('.')).count();
+    wait_until(|| (0..4).all(|i| q.root.join(format!("m{i}")).exists()), 15, "all four tasks ran");
+    wait_until(|| q.names("done/.archive").len() == 2, 10, "oldest entries archived");
+    assert_eq!(live(&q), 2, "done capped at keep: {:?}", q.tasks("done"));
+    q.stop();
+    let _ = d.wait();
+}
+
+#[test]
 fn slug_leading_dash_rejected() {
     // A `-`-leading slug parses as a flag in the remote argv; entries
     // rejected there stay in spool retrying forever (design.md §3.3).

@@ -279,6 +279,11 @@ pub fn finalize(root: &Path, base: &str, rc: i32, timeout_s: Option<u64>) -> Res
     if let Some(limit) = timeout_s {
         let _ = std::fs::write(dest.join("timeout"), format!("{limit}\n"));
     }
+    // Terminal tracks are unbounded without a sweep: past the keep
+    // cap the oldest entries move to `<track>/.archive/` so `status`
+    // scans stay cheap on long-lived queues (design.md §3.9).
+    let track_name = if rc == 0 && timeout_s.is_none() { "done" } else { "failed" };
+    queue::archive_oldest(root, track_name, queue::track_keep());
     Ok(())
 }
 

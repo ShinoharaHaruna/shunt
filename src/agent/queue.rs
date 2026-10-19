@@ -27,6 +27,45 @@ pub const DEFAULT_WORKERS: u32 = 3;
 /// Default idle-shutdown grace (design.md §3.11).
 pub const DEFAULT_GRACE_S: u64 = 60;
 
+/// Terminal-track cap: `done/`/`failed/` keep only the newest entries
+/// on the live listing; older ones move to `<track>/.archive/`
+/// (design.md §3.9). `SHUNT_TRACK_KEEP` overrides (tests).
+pub fn track_keep() -> usize {
+    std::env::var("SHUNT_TRACK_KEEP").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(500)
+}
+
+/// `daemon.log` rotation threshold (design.md §3.1): past this size
+/// the current log is renamed to `daemon.log.1` and a fresh file
+/// starts. `SHUNT_DAEMON_LOG_MAX` overrides (tests).
+pub fn daemon_log_max() -> u64 {
+    std::env::var("SHUNT_DAEMON_LOG_MAX").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(1 << 20)
+}
+
+/// Archive the oldest entries of a terminal track beyond `keep`:
+/// they move to `<track>/.archive/` — dot-prefixed, so `list_entries`
+/// (which skips `.` names) never sees them, but the data survives on
+/// disk. Name sort is sequence order, so the oldest entries leave
+/// first. Returns how many entries moved.
+pub fn archive_oldest(root: &Path, track: &str, keep: usize) -> usize {
+    let Ok(names) = list_entries(root, track) else {
+        return 0;
+    };
+    if names.len() <= keep {
+        return 0;
+    }
+    let archive = root.join(track).join(".archive");
+    if std::fs::create_dir_all(&archive).is_err() {
+        return 0;
+    }
+    let mut moved = 0;
+    for name in names.iter().take(names.len() - keep) {
+        if std::fs::rename(root.join(track).join(name), archive.join(name)).is_ok() {
+            moved += 1;
+        }
+    }
+    moved
+}
+
 /// Resolve the queue root: `--root` flag > `$SHUNT_ROOT` env.
 pub fn resolve_root(flag: Option<&str>) -> Result<PathBuf> {
     if let Some(r) = flag {
