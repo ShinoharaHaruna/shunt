@@ -154,15 +154,59 @@ fn task_directives(task: &Path) -> (Option<String>, Vec<(String, String)>, Optio
     (workdir, envs, timeout_s)
 }
 
-/// Send a signal to a whole process group (`kill -SIG -- -pgid`).
-/// Returns false when the group is gone.
-pub fn signal_pgid(pgid: u32, sig: &str) -> bool {
-    Command::new("kill").arg(format!("-{sig}")).arg("--").arg(format!("-{pgid}")).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
+/// Outcome of `signal_pgid`. The distinction matters: `Gone`
+/// (ESRCH) is the ONLY proof the group does not exist — an EPERM or
+/// any other errno means the signal could not be sent but the group
+/// may be alive, so collapsing it to `Gone` would lie.
+pub enum SignalOutcome {
+    /// kill(2) succeeded; the signal was delivered to ≥1 member.
+    Delivered,
+    /// ESRCH: no such process group — provably absent.
+    Gone,
+    /// EPERM or another errno: cannot signal, group may exist.
+    Failed(std::io::Error),
 }
 
-/// Is any member of process group `pgid` still alive?
+/// Send a signal to a whole process group (`kill(-pgid, sig)`).
+/// Signals go through libc directly, not an external `kill` binary:
+/// slim containers may lack it, and a failed exec must never read
+/// as "group is gone".
+pub fn signal_pgid(pgid: u32, sig: &str) -> SignalOutcome {
+    let num = match sig {
+        "0" => 0,
+        "HUP" | "SIGHUP" => libc::SIGHUP,
+        "INT" | "SIGINT" => libc::SIGINT,
+        "TERM" | "SIGTERM" => libc::SIGTERM,
+        "KILL" | "SIGKILL" => libc::SIGKILL,
+        other => other.trim_start_matches("SIG").parse::<i32>().unwrap_or(-1),
+    };
+    // Valid signal range: 0..64 covers every standard and realtime
+    // signal on Linux (NSIG is 65); a bogus name never reaches kill.
+    if !(0..64).contains(&num) {
+        return SignalOutcome::Failed(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown signal {sig}")));
+    }
+    // Negative pid targets the whole process group |pgid|.
+    let rc = unsafe { libc::kill(-(pgid as i32), num) };
+    if rc == 0 {
+        return SignalOutcome::Delivered;
+    }
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::ESRCH) => SignalOutcome::Gone,
+        _ => SignalOutcome::Failed(err),
+    }
+}
+
+/// Is any member of process group `pgid` still alive? `kill -0`
+/// semantics: a successful probe OR EPERM (group exists but is owned
+/// by another uid) both mean the group is there; only ESRCH means
+/// gone.
 pub fn pgid_alive(pgid: u32) -> bool {
-    signal_pgid(pgid, "0")
+    match signal_pgid(pgid, "0") {
+        SignalOutcome::Delivered => true,
+        SignalOutcome::Failed(e) => e.raw_os_error() == Some(libc::EPERM),
+        SignalOutcome::Gone => false,
+    }
 }
 
 /// Outcome of `kill_task`. `Gone` means the pid file's pgid no longer
@@ -219,7 +263,13 @@ pub fn kill_task(root: &Path, task_name: &str) -> Result<KillOutcome> {
     if !pgid_is_task_leader(pgid, start) {
         return Ok(KillOutcome::Gone);
     }
-    signal_pgid(pgid, "TERM");
+    // A TERM that cannot be sent (EPERM, bad arg) is an error, not
+    // a silent Signaled — the kill command must not claim a signal
+    // it never delivered (design.md §3.9a).
+    match signal_pgid(pgid, "TERM") {
+        SignalOutcome::Delivered | SignalOutcome::Gone => {}
+        SignalOutcome::Failed(e) => return Err(e).with_context(|| format!("cannot TERM pgid {pgid}")),
+    }
     for _ in 0..10 {
         if !pgid_alive(pgid) {
             return Ok(KillOutcome::Signaled { pgid, escalated: false });
@@ -231,8 +281,10 @@ pub fn kill_task(root: &Path, task_name: &str) -> Result<KillOutcome> {
     if !pgid_is_task_leader(pgid, start) {
         return Ok(KillOutcome::Signaled { pgid, escalated: false });
     }
-    signal_pgid(pgid, "KILL");
-    Ok(KillOutcome::Signaled { pgid, escalated: true })
+    match signal_pgid(pgid, "KILL") {
+        SignalOutcome::Delivered | SignalOutcome::Gone => Ok(KillOutcome::Signaled { pgid, escalated: true }),
+        SignalOutcome::Failed(e) => Err(e).with_context(|| format!("cannot KILL pgid {pgid}")),
+    }
 }
 
 /// Quarantine: move a stuck entry to `failed/` with a `shunt_error`

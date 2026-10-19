@@ -259,6 +259,7 @@ dependencies = [
  "anyhow",
  "clap",
  "fs2",
+ "libc",
  "serde",
  "serde_json",
  "signal-hook",

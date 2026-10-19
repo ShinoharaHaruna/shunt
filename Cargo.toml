@@ -9,6 +9,7 @@ description = "Zero-dependency experiment queue for hourly-billed GPU boxes"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 fs2 = "0.4"
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 signal-hook = "0.3"
