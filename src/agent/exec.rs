@@ -36,8 +36,12 @@ pub fn read_env_file(root: &Path) -> BTreeMap<String, String> {
 
 /// Spawn a claimed task under its own process group (pgid = leader
 /// pid), output appended to `running/<name>.log`. The `.pid` file is
-/// written by the daemon right after this returns.
-pub fn spawn_task(root: &Path, task_name: &str) -> Result<Child> {
+/// written by the daemon right after this returns. The returned
+/// `Option<u64>` is the task's wall-clock budget from its
+/// `# shunt:timeout_s=` head directive — the daemon counts it from
+/// spawn and a daemon restart re-times the requeued rerun wholesale
+/// (at-least-once, design.md §3.6).
+pub fn spawn_task(root: &Path, task_name: &str) -> Result<(Child, Option<u64>)> {
     let task = queue::task_file(root, "running", task_name);
     let log_path = queue::piece_file(root, "running", task_name, "log");
 
@@ -48,7 +52,7 @@ pub fn spawn_task(root: &Path, task_name: &str) -> Result<Child> {
     }
 
     let env = read_env_file(root);
-    let (task_workdir, task_envs) = task_directives(&task);
+    let (task_workdir, task_envs, timeout_s) = task_directives(&task);
     let workdir = task_workdir.or_else(|| env.get("WORKDIR").cloned()).unwrap_or_else(|| root.to_string_lossy().into_owned());
 
     let log_out = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
@@ -95,24 +99,30 @@ pub fn spawn_task(root: &Path, task_name: &str) -> Result<Child> {
     for (k, v) in &task_envs {
         cmd.env(k, v);
     }
-    cmd.spawn().context("spawn task failed")
+    cmd.spawn().map(|c| (c, timeout_s)).context("spawn task failed")
 }
 
 /// Parse the task file's comment head for per-task overrides
 /// (design.md §3.13):
 ///   `# shunt:workdir=<abs path>`  — runner cwd for this task only
 ///   `# shunt-env:<KEY>=<value>`   — env overlay, beats queue `env`
+///   `# shunt:timeout_s=<secs>`    — wall-clock budget; 0 = unlimited
 /// Directives live in the comment head only; scanning stops at the
-/// first non-comment, non-blank line.
-fn task_directives(task: &Path) -> (Option<String>, Vec<(String, String)>) {
+/// first non-comment, non-blank line. Unknown `# shunt:` lines are
+/// skipped silently, so a task pushed to an older runner degrades to
+/// a no-op comment (backward compat).
+fn task_directives(task: &Path) -> (Option<String>, Vec<(String, String)>, Option<u64>) {
     let Ok(text) = std::fs::read_to_string(task) else {
-        return (None, Vec::new());
+        return (None, Vec::new(), None);
     };
     let mut workdir = None;
     let mut envs = Vec::new();
+    let mut timeout_s = None;
     for line in text.lines() {
         if let Some(w) = line.strip_prefix("# shunt:workdir=") {
             workdir = Some(w.trim().to_string());
+        } else if let Some(t) = line.strip_prefix("# shunt:timeout_s=") {
+            timeout_s = t.trim().parse::<u64>().ok().filter(|&n| n > 0);
         } else if let Some(kv) = line.strip_prefix("# shunt-env:") {
             if let Some((k, v)) = kv.split_once('=') {
                 envs.push((k.trim().to_string(), v.to_string()));
@@ -121,7 +131,7 @@ fn task_directives(task: &Path) -> (Option<String>, Vec<(String, String)>) {
             break;
         }
     }
-    (workdir, envs)
+    (workdir, envs, timeout_s)
 }
 
 /// Send a signal to a whole process group (`kill -SIG -- -pgid`).
@@ -234,12 +244,22 @@ pub fn quarantine(root: &Path, track: &str, name: &str, note: &str) -> Result<()
 /// Finalize a reaped task: `=== exit` trailer, `exit` file, move the
 /// entry dir to done/ (rc 0) or failed/. Legacy flat entries are
 /// normalized into the dir layout here, so old queues converge.
-pub fn finalize(root: &Path, base: &str, rc: i32) -> Result<()> {
+/// `timeout_s`: the task exceeded its wall-clock budget and was
+/// killed by the daemon — the exit file keeps the observed signal rc
+/// (143 TERM / 137 KILL) and a `timeout` marker file records the
+/// exceeded limit so agents can distinguish budget death from a
+/// plain non-zero rc.
+pub fn finalize(root: &Path, base: &str, rc: i32, timeout_s: Option<u64>) -> Result<()> {
     let running = root.join("running");
-    let dest_track = root.join(if rc == 0 { "done" } else { "failed" });
+    // A timed-out task always lands in failed/, even if its last
+    // action was a clean exit 0 caught under the TERM.
+    let dest_track = root.join(if rc == 0 && timeout_s.is_none() { "done" } else { "failed" });
     std::fs::create_dir_all(&dest_track)?;
     let dest = dest_track.join(base);
     if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(queue::piece_file(root, "running", base, "log")) {
+        if let Some(limit) = timeout_s {
+            let _ = writeln!(f, "=== timeout: exceeded wall-clock limit {limit}s");
+        }
         let _ = writeln!(f, "=== exit {rc} {}", queue::iso8601_now());
     }
     if queue::is_dir_entry(root, "running", base) {
@@ -256,6 +276,9 @@ pub fn finalize(root: &Path, base: &str, rc: i32) -> Result<()> {
         let _ = std::fs::remove_file(running.join(format!("{base}.sh.pid")));
     }
     std::fs::write(dest.join("exit"), format!("{rc}\n"))?;
+    if let Some(limit) = timeout_s {
+        let _ = std::fs::write(dest.join("timeout"), format!("{limit}\n"));
+    }
     Ok(())
 }
 
@@ -281,6 +304,9 @@ pub fn render_task(meta: &crate::proto::task::TaskMeta) -> String {
     // them at spawn (the wire carries only the body).
     if let Some(w) = &meta.workdir {
         out.push_str(&format!("# shunt:workdir={w}\n"));
+    }
+    if let Some(t) = meta.timeout_s.filter(|&n| n > 0) {
+        out.push_str(&format!("# shunt:timeout_s={t}\n"));
     }
     for (k, v) in &meta.env {
         out.push_str(&format!("# shunt-env:{k}={v}\n"));

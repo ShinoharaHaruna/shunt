@@ -249,28 +249,82 @@ fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bool, abort_a
     }
 }
 
+/// One in-flight task: the spawned leader plus its wall-clock budget
+/// bookkeeping. `deadline` is spawn-time + `# shunt:timeout_s=`;
+/// `timed_out` is set once the budget is exceeded so reap can mark
+/// the finalize; `kill_at` is the TERM grace expiry for escalation.
+struct RunHandle {
+    base: String,
+    child: Child,
+    /// Wall-clock budget seconds from `# shunt:timeout_s=` (None = unlimited).
+    timeout_s: Option<u64>,
+    deadline: Option<std::time::Instant>,
+    timed_out: Option<u64>,
+    kill_at: Option<std::time::Instant>,
+}
+
 struct Daemon {
     root: PathBuf,
-    /// leader pid (= task pgid) -> (task basename, child)
-    runpids: HashMap<u32, (String, Child)>,
+    /// leader pid (= task pgid) -> handle
+    runpids: HashMap<u32, RunHandle>,
     last_workers: Option<u32>,
     /// Count of TERM/INT/HUP seen; >0 means exit at the next boundary.
     got_signal: Arc<AtomicUsize>,
 }
 
+/// Grace between the timeout TERM and the KILL escalation — same
+/// discipline as `shunt kill`.
+const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
+
 impl Daemon {
+    /// Wall-clock enforcement (design.md §3.7): a task past its
+    /// `# shunt:timeout_s=` deadline gets TERM on its verified pgid,
+    /// then KILL after the grace window. Both signals go through the
+    /// same pid-file + start_time leader check as `kill_task` — the
+    /// daemon never signals a group it cannot prove is the task's.
+    fn enforce_timeouts(&mut self) {
+        let now = std::time::Instant::now();
+        for (pid, h) in self.runpids.iter_mut() {
+            if h.timed_out.is_none() {
+                let expired = h.deadline.is_some_and(|d| now >= d);
+                if !expired {
+                    continue;
+                }
+                // Deadline passed: the task exceeded its budget
+                // regardless of how it dies from here.
+                if let Some((pgid, start)) = exec::read_pid_file(&self.root, "running", &h.base) {
+                    if exec::pgid_is_task_leader(pgid, start) {
+                        exec::signal_pgid(pgid, "TERM");
+                    }
+                }
+                h.timed_out = h.timeout_s;
+                h.kill_at = Some(now + TIMEOUT_GRACE);
+                dlog(&self.root, "task_timeout", ev(json!({"task": h.base, "pgid": pid, "limit_s": h.timed_out})));
+            } else if h.kill_at.is_some_and(|k| now >= k) {
+                h.kill_at = None;
+                if let Some((pgid, start)) = exec::read_pid_file(&self.root, "running", &h.base) {
+                    if exec::pgid_is_task_leader(pgid, start) {
+                        exec::signal_pgid(pgid, "KILL");
+                        dlog(&self.root, "task_timeout_kill", ev(json!({"task": h.base, "pgid": pgid})));
+                    }
+                }
+            }
+        }
+    }
+
     fn reap(&mut self) {
         let mut done = Vec::new();
-        for (pid, (base, child)) in self.runpids.iter_mut() {
-            match child.try_wait() {
-                Ok(Some(status)) => done.push((*pid, base.clone(), exec::status_rc(&status))),
+        for (pid, h) in self.runpids.iter_mut() {
+            match h.child.try_wait() {
+                Ok(Some(status)) => done.push((*pid, h.base.clone(), exec::status_rc(&status))),
                 Ok(None) => {}
-                Err(_) => done.push((*pid, base.clone(), 1)),
+                Err(_) => done.push((*pid, h.base.clone(), 1)),
             }
         }
         for (pid, base, rc) in done {
+            let timed_out = self.runpids.get(&pid).and_then(|h| h.timed_out);
             self.runpids.remove(&pid);
-            if let Err(e) = exec::finalize(&self.root, &base, rc) {
+            if let Err(e) = exec::finalize(&self.root, &base, rc, timed_out) {
                 // A failed rename leaves a pid-less entry in
                 // running/ — invisible to kill and status forever.
                 // Quarantine to failed/ so it stays accounted for;
@@ -289,7 +343,8 @@ impl Daemon {
                 &self.root,
                 "finish",
                 ev(json!({"task": base, "rc": rc,
-                       "dest": if rc == 0 { "done" } else { "failed" }})),
+                       "timeout": timed_out,
+                       "dest": if rc == 0 && timed_out.is_none() { "done" } else { "failed" }})),
             );
         }
     }
@@ -337,7 +392,7 @@ impl Daemon {
                 let _ = std::fs::set_permissions(queue::task_file(&self.root, "running", &next), std::fs::Permissions::from_mode(0o755));
             }
             match exec::spawn_task(&self.root, &next) {
-                Ok(child) => {
+                Ok((child, timeout_s)) => {
                     let pid = child.id();
                     // Record the leader's /proc start_time beside the
                     // pgid: kill_task verifies it before signaling so
@@ -347,17 +402,19 @@ impl Daemon {
                         None => format!("{pid}\n"),
                     };
                     let _ = std::fs::write(queue::piece_file(&self.root, "running", &next, "pid"), line);
-                    self.runpids.insert(pid, (next.clone(), child));
+                    let deadline = timeout_s.map(|s| std::time::Instant::now() + Duration::from_secs(s));
+                    self.runpids.insert(pid, RunHandle { base: next.clone(), child, timeout_s, deadline, timed_out: None, kill_at: None });
                     dlog(
                         &self.root,
                         "start",
                         ev(json!({"task": next, "pgid": pid,
+                               "timeout_s": timeout_s,
                                "slots": format!("{}/{}", self.runpids.len(), workers)})),
                     );
                 }
                 Err(e) => {
                     dlog(&self.root, "spawn_failed", ev(json!({"task": next, "error": e.to_string()})));
-                    let _ = exec::finalize(&self.root, &next, 1);
+                    let _ = exec::finalize(&self.root, &next, 1, None);
                 }
             }
         }
@@ -382,6 +439,7 @@ impl Daemon {
         for pid in self.runpids.keys() {
             exec::signal_pgid(*pid, "KILL");
         }
+
         // Finalize the killed tasks so they land in failed/ rather
         // than orphaning as running/ entries for the next daemon.
         for _ in 0..20 {
@@ -437,6 +495,7 @@ pub fn run(root: &Path) -> Result<()> {
         if d.got_signal.load(Ordering::SeqCst) > 0 {
             d.on_term();
         }
+        d.enforce_timeouts();
         d.reap();
         if d.root.join("STOP").exists() {
             if d.runpids.is_empty() {

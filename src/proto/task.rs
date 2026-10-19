@@ -22,6 +22,12 @@ pub struct TaskMeta {
     /// Command and args, executed via `exec bash <taskfile>` equivalent.
     #[serde(default)]
     pub cmd: Vec<String>,
+    /// Wall-clock budget in seconds; `None`/0 = unlimited. Serde
+    /// default keeps pre-timeout spool entries parseable, and the
+    /// rendered `# shunt:timeout_s=` head line is a plain comment to
+    /// old runners (design.md §3.13) — backward compatible both ways.
+    #[serde(default)]
+    pub timeout_s: Option<u64>,
 }
 
 /// A staged server-side spool entry: metadata plus the rendered body.

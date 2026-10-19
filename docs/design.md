@@ -142,6 +142,7 @@ Re-read every cycle. Order: `workers` file > `QUEUE_WORKERS` env (set at daemon 
   - remove the entry's `pid` file;
   - `mv` the whole entry dir to `done/` if rc 0, else `failed/` (legacy flat entries are normalized into the dir layout here);
   - write `<rc>` to `<name>/exit`;
+  - if the task exceeded its `# shunt:timeout_s=` budget (§3.13): it lands in `failed/` even on a clean-exit race, the log gains a `=== timeout: exceeded wall-clock limit <n>s` line, and a `timeout` marker file carrying the limit is written beside `exit` so agents can tell budget death from a plain non-zero rc;
   - log `finish <base> rc=<rc> -> done|failed`.
 - If the finalize `mv` fails, the entry is quarantined to `failed/` with a `shunt_error` note and a `finalize_failed` event is logged — same rule as §3.6: no pid-less ghosts in `running/`. If quarantine itself fails, a `ghost_entry` WARNING is logged.
 
@@ -198,9 +199,12 @@ A submitted task carries its binding inside the body, as comment-head directives
 ```bash
 # shunt:workdir=/abs/path        # runner cwd for this task only
 # shunt-env:KEY=value            # env overlay; beats the queue env file
+# shunt:timeout_s=3600           # wall-clock budget; 0/absent = unlimited
 ```
 
-Both are optional and repeatable (`env`); scanning stops at the first non-comment line, so hand-written tasks can set them too. No `cd` line — the runner already places cwd at `workdir` (the bash version's generated `cd` was redundant). The guard convention is the contract that makes at-least-once safe: tasks must be idempotent or guard on the artifact they produce.
+All are optional (`env` is repeatable); scanning stops at the first non-comment line, so hand-written tasks can set them too. An unrecognized `# shunt:` line is just a comment to older runners — new directives degrade harmlessly.
+
+The timeout is a wall-clock budget counted from spawn, not a retry: at the deadline the daemon sends TERM to the task's verified pgid (§3.9a discipline), escalates to KILL after a 10 s grace, and finalizes per §3.9. A daemon restart re-times the requeued rerun from its new spawn — at-least-once re-executes the whole task, budget included. A guard-hit task exits before the budget can ever matter. No `cd` line — the runner already places cwd at `workdir` (the bash version's generated `cd` was redundant). The guard convention is the contract that makes at-least-once safe: tasks must be idempotent or guard on the artifact they produce.
 
 ### 3.14 Known defects in the bash source — fix in the port
 

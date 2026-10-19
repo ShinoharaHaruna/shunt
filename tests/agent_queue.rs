@@ -904,3 +904,53 @@ fn kill_dead_leader_reports_gone() {
     let out = q.run_ok(&["kill", "dead"]);
     assert!(out.contains("gone"), "got {out}");
 }
+
+#[test]
+fn timeout_kills_runaway_task() {
+    // design.md §3.13: a task past its `# shunt:timeout_s=` budget is
+    // TERM'd, escalated to KILL after grace, and lands in failed/
+    // with a `timeout` marker — distinguishable from a plain non-zero
+    // exit.
+    let q = Q::new("timeout");
+    q.enqueue_script("runaway", "#!/usr/bin/env bash\n# shunt:timeout_s=1\nsleep 300\n");
+    let mut d = q.daemon();
+    wait_until(|| !q.exits("failed").is_empty(), 15, "timed-out task finalized to failed/");
+    let (name, rc) = q.exits("failed").into_iter().next().unwrap();
+    assert!(rc == 143 || rc == 137, "expected signal rc 143/137, got {rc}");
+    let marker = q.root.join("failed").join(&name).join("timeout");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "1");
+    let log = std::fs::read_to_string(q.root.join("failed").join(&name).join("log")).unwrap();
+    assert!(log.contains("=== timeout: exceeded wall-clock limit 1s"), "{log}");
+    assert!(q.dlog().contains("task_timeout"), "{}", q.dlog());
+    q.stop();
+    let _ = d.wait();
+}
+
+#[test]
+fn guard_hit_task_exits_before_timeout() {
+    // The guard fires in seconds, well inside the budget: timeout
+    // must not turn a clean skip into a failure.
+    let q = Q::new("guardto");
+    let guard = q.root.join("already.done");
+    std::fs::write(&guard, "").unwrap();
+    q.enqueue_script("guarded", &format!("#!/usr/bin/env bash\n# shunt:timeout_s=1\nif [ -e {} ]; then echo \"guard hit\"; exit 0; fi\nsleep 300\n", guard.display()));
+    let mut d = q.daemon();
+    wait_until(|| !q.exits("done").is_empty(), 15, "guard-hit task finalized to done/");
+    assert!(q.exits("failed").is_empty(), "guard-hit task must not fail");
+    assert!(!q.dlog().contains("task_timeout"), "{}", q.dlog());
+    q.stop();
+    let _ = d.wait();
+}
+
+#[test]
+fn no_timeout_task_still_runs() {
+    // Regression: a task with no directive is never touched by the
+    // supervisor.
+    let q = Q::new("notimeout");
+    q.enqueue_script("plain", "#!/usr/bin/env bash\nsleep 2\necho ok\n");
+    let mut d = q.daemon();
+    wait_until(|| !q.exits("done").is_empty(), 15, "plain task done");
+    assert!(!q.dlog().contains("task_timeout"), "{}", q.dlog());
+    q.stop();
+    let _ = d.wait();
+}

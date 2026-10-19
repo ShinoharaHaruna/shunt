@@ -102,6 +102,9 @@ pub struct SubmitArgs {
     /// Existing task file to spool instead of wrapping argv
     #[arg(long, conflicts_with = "cmd")]
     pub file: Option<String>,
+    /// Wall-clock budget in seconds; 0/omitted = unlimited
+    #[arg(long)]
+    pub timeout: Option<u64>,
     /// Command to run, after `--`
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub cmd: Vec<String>,
@@ -171,6 +174,9 @@ pub struct NewArgs {
     /// Guard path: skip if it exists at run time
     #[arg(long)]
     pub guard: Option<String>,
+    /// Wall-clock budget in seconds; 0/omitted = unlimited
+    #[arg(long)]
+    pub timeout: Option<u64>,
     #[arg(long)]
     pub root: Option<String>,
     #[arg(long)]
@@ -561,7 +567,7 @@ pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Submit(a) => {
             let client = required_client(&a.client)?;
-            let id = crate::server::spool::submit(&client, a.project.as_deref(), a.guard.as_deref(), a.slug.as_deref(), a.file.as_deref(), &a.cmd)?;
+            let id = crate::server::spool::submit(&client, a.project.as_deref(), a.guard.as_deref(), a.slug.as_deref(), a.file.as_deref(), a.timeout, &a.cmd)?;
             println!("spooled {id}");
             Ok(())
         }
@@ -823,7 +829,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Command::Mktask(a) => {
             // mktask can render for real: it is pure output.
-            let meta = crate::proto::task::TaskMeta { slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard, workdir: None, env: Default::default(), cmd: a.cmd };
+            let meta = crate::proto::task::TaskMeta { slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard, workdir: None, env: Default::default(), cmd: a.cmd, timeout_s: a.timeout };
             if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
                 anyhow::bail!("bad slug '{}': {p}", a.slug);
             }
@@ -1132,7 +1138,7 @@ fn agent_new(a: &NewArgs) -> Result<()> {
         if a.cmd.is_empty() {
             anyhow::bail!("missing command after --");
         }
-        let meta = crate::proto::task::TaskMeta { slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard.clone(), workdir: None, env: Default::default(), cmd: a.cmd.clone() };
+        let meta = crate::proto::task::TaskMeta { slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard.clone(), workdir: None, env: Default::default(), cmd: a.cmd.clone(), timeout_s: a.timeout };
         if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
             anyhow::bail!("bad slug '{}': {p}", a.slug);
         }
