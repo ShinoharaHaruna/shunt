@@ -143,7 +143,9 @@ pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slu
     }
 
     let body = if let Some(path) = file {
-        fs::read_to_string(path).with_context(|| format!("cannot read task file {path}"))?
+        // The positional file slot means a bare word lands here; the
+        // hint separates a missing script from a meant-as-command.
+        fs::read_to_string(path).with_context(|| format!("cannot read task file {path:?} (to run a command, put it after `--`)"))?
     } else {
         if cmd.is_empty() {
             bail!("submit needs a command after `--` or --file <task.sh>");
@@ -232,10 +234,11 @@ pub fn list() -> Result<Vec<SpoolEntry>> {
     Ok(out)
 }
 
-/// Task ids are filenames under spool/ — reject anything that is
-/// not `[A-Za-z0-9_-]+`: a `../`-carrying id (CLI-supplied or
-/// planted in a parsed entry) would escape the spool dir.
-fn valid_task_id(id: &str) -> Result<()> {
+/// Task ids are filenames under spool/ and tasks/ — reject
+/// anything that is not `[A-Za-z0-9_-]+`: a `../`-carrying id
+/// (CLI-supplied or planted in a parsed entry) would escape the
+/// directory it is joined into.
+pub(crate) fn valid_task_id(id: &str) -> Result<()> {
     anyhow::ensure!(!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')), "bad task id {id:?}");
     Ok(())
 }

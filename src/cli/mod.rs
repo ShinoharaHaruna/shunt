@@ -41,7 +41,10 @@ pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Submit(a) => {
             let client = required_client(&a.client)?;
-            let id = crate::server::spool::submit(&client, a.project.as_deref(), a.guard.as_deref(), a.slug.as_deref(), a.file.as_deref(), a.timeout, &a.cmd)?;
+            // --file and the bare positional are two spellings of the
+            // same slot (clap already rejects file + trailing argv).
+            let file = a.file.as_deref().or(a.file_pos.as_deref());
+            let id = crate::server::spool::submit(&client, a.project.as_deref(), a.guard.as_deref(), a.slug.as_deref(), file, a.timeout, &a.cmd)?;
             println!("spooled {id}");
             Ok(())
         }
@@ -262,7 +265,7 @@ pub fn run(cli: Cli) -> Result<()> {
             let root = agent_root(&a.root)?;
             crate::agent::queue::init(&root)?;
             if a.json {
-                jprint(serde_json::json!({"ok": true}));
+                jprint(jobj(jfields(serde_json::json!({}))));
             } else {
                 println!("initialized queue at {}", root.display());
             }
@@ -283,7 +286,7 @@ pub fn run(cli: Cli) -> Result<()> {
             match crate::agent::daemon::start(&root) {
                 Ok(pid) => {
                     if a.json {
-                        jprint(serde_json::json!({"ok": true, "pid": pid}));
+                        jprint(jobj(jfields(serde_json::json!({"pid": pid}))));
                     } else {
                         println!("queue daemon up (pid {pid})");
                     }
@@ -299,7 +302,7 @@ pub fn run(cli: Cli) -> Result<()> {
             let root = agent_root(&a.root)?;
             crate::agent::daemon::stop(&root)?;
             if a.json {
-                jprint(serde_json::json!({"ok": true}));
+                jprint(jobj(jfields(serde_json::json!({}))));
             } else {
                 println!("STOP placed; daemon exits after the current task, or at the next poll if idle");
             }
@@ -318,7 +321,11 @@ pub fn run(cli: Cli) -> Result<()> {
             agent_new(&a)
         }
         Command::Mktask(a) => {
-            // mktask can render for real: it is pure output.
+            // mktask can render for real: it is pure output. An empty
+            // cmd would render `exec ` — a no-op task that exits 0.
+            if a.cmd.is_empty() {
+                anyhow::bail!("missing command after --");
+            }
             let meta = crate::proto::task::TaskMeta { slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard, workdir: None, env: Default::default(), cmd: a.cmd, timeout_s: a.timeout };
             if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
                 anyhow::bail!("bad slug '{}': {p}", a.slug);

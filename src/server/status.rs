@@ -97,30 +97,43 @@ pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
 /// regardless of join timing.
 pub fn run_all(json: bool) -> Result<()> {
     let names = registry::list_clients()?;
-    let clients = names.iter().map(|n| registry::load_client(n)).collect::<Result<Vec<_>>>()?;
+    // list_clients keeps rows it cannot parse; a failed load must
+    // not kill the whole aggregate — it degrades to an error row,
+    // same discipline as an unreachable box.
+    let clients: Vec<Result<ClientEntry>> = names.iter().map(|n| registry::load_client(n)).collect();
     // Scoped threads borrow `clients`; each builds its own transport
     // (`Box<dyn Transport>` is not Sync, and transports are cheap).
     let statuses: Vec<ClientStatus> = std::thread::scope(|s| {
-        clients
+        let handles: Vec<Option<_>> = clients
             .iter()
-            .map(|c| {
-                s.spawn(move || {
+            .map(|c| match c {
+                Ok(c) => Some(s.spawn(move || {
                     let t = transport_for(c);
                     query(t.as_ref(), c)
-                })
+                })),
+                Err(_) => None,
             })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|h| h.join().expect("status probe thread panicked"))
+            .collect();
+        clients
+            .iter()
+            .zip(handles)
+            .map(|(c, h)| match h {
+                Some(h) => h.join().expect("status probe thread panicked"),
+                None => ClientStatus { reachable: false, report: None, error: Some(format!("cannot load row: {:#}", c.as_ref().unwrap_err())), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None },
+            })
             .collect()
     });
     let mut out = serde_json::Map::new();
     let mut rows: Vec<Vec<String>> = Vec::new();
-    for (client, st) in clients.iter().zip(statuses) {
+    for ((name, client), st) in names.iter().zip(&clients).zip(statuses) {
         if !json {
-            rows.push(row_for(client, &st));
+            rows.push(match client {
+                Ok(client) => row_for(client, &st),
+                // Unloadable row: report name + error, no endpoint.
+                Err(_) => vec![name.clone(), "?".into(), "-".into(), "-".into(), "-".into(), "-".into(), st.error.as_deref().unwrap_or("unloadable row").lines().next().unwrap_or("unloadable row").chars().take(60).collect()],
+            });
         }
-        out.insert(client.name.clone(), serde_json::to_value(&st)?);
+        out.insert(name.clone(), serde_json::to_value(&st)?);
     }
     let staged = crate::server::spool::list()?;
     if json {

@@ -118,7 +118,7 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
             if let Reach::Up { daemon_alive } = r {
                 if !daemon_alive {
                     // Auto-heal: ssh works but shuntd is dead; start it once.
-                    match t.exec(client, &wire_argv(client, &["start"]), None) {
+                    match t.exec(client, &wire_argv(client, &["start", "--json"]), None) {
                         Ok(_) => eprintln!("dispatch: {} daemon restarted", client.name),
                         Err(e) => eprintln!("dispatch: {} start failed: {e:#}", client.name),
                     }

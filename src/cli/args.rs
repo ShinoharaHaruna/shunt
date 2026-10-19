@@ -100,13 +100,21 @@ pub struct SubmitArgs {
     #[arg(long)]
     pub slug: Option<String>,
     /// Existing task file to spool instead of wrapping argv
-    #[arg(long, conflicts_with = "cmd")]
+    #[arg(long, conflicts_with_all = ["cmd", "file_pos"])]
     pub file: Option<String>,
     /// Wall-clock budget in seconds; 0/omitted = unlimited
     #[arg(long)]
     pub timeout: Option<u64>,
-    /// Command to run, after `--`
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    /// Task file to spool (same as --file): `submit -c x file.sh`.
+    /// A bare word that is not a file is an error, not a command —
+    /// commands must come after `--`, or a typo'd path would spool
+    /// a task that execs a nonexistent remote script.
+    #[arg(conflicts_with = "cmd")]
+    pub file_pos: Option<String>,
+    /// Command to wrap and spool, after `--`
+    // `last` keeps `submit -c x -- echo hi` unambiguous next to the
+    // file positional; `trailing_var_arg` cannot combine with `last`.
+    #[arg(last = true, num_args = 1.., allow_hyphen_values = true)]
     pub cmd: Vec<String>,
 }
 

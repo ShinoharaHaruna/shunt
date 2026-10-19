@@ -126,6 +126,9 @@ pub fn record_push(entry: &SpoolEntry, queue_name: &str) -> Result<()> {
 
 /// Load one ledger record by task id.
 pub fn load(id: &str) -> Result<TaskRecord> {
+    // The id is joined into a filename — same traversal rule as the
+    // spool (`task show ../../x` must not read outside tasks/).
+    crate::server::spool::valid_task_id(id)?;
     let path = tasks_dir()?.join(format!("{id}.json"));
     let text = fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("bad JSON in {}", path.display()))

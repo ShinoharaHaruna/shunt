@@ -142,7 +142,9 @@ fn task_directives(task: &Path) -> (Option<String>, Vec<(String, String)>, Optio
                 // Same panic guard as the env file: `# shunt-env:=x`
                 // yields an empty key that `Command::env` rejects.
                 if !k.is_empty() {
-                    envs.push((k.to_string(), v.to_string()));
+                    // Trim like the env file: same literal semantics
+                    // for the two KEY=value surfaces.
+                    envs.push((k.to_string(), v.trim().to_string()));
                 }
             }
         } else if !line.starts_with('#') && !line.trim().is_empty() {

@@ -36,7 +36,7 @@ pub fn bootstrap(t: &dyn Transport, name: &str) -> Result<()> {
     t.exec(&entry, &["mv".into(), "-f".into(), staged, bin.clone()], None).context("install shunt binary")?;
 
     t.exec(&entry, &[bin.clone(), "init".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt init")?;
-    t.exec(&entry, &[bin.clone(), "start".into(), "--root".into(), entry.qroot.clone()], None).context("remote shunt start")?;
+    t.exec(&entry, &[bin.clone(), "start".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt start")?;
 
     // Probe AFTER the binary lands: the wire `shunt probe` is the
     // single facts implementation (design.md §8).

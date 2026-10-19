@@ -159,3 +159,25 @@ pub fn busy_peers(root: &Path) -> Vec<PathBuf> {
     }
     busy
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `shutdown on` with no grace argument arms at the default
+    /// (design.md §3.11: ''|0 → 60); a previous explicit grace must
+    /// not survive a re-arm.
+    #[test]
+    fn arm_without_grace_uses_default() {
+        let root = std::env::temp_dir().join(format!("shunt-grace-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        arm(&root, Some(30)).unwrap();
+        assert_eq!(grace(&root), 30);
+        arm(&root, None).unwrap();
+        let st = status(&root).unwrap();
+        assert!(st.armed);
+        assert_eq!(st.grace_s, DEFAULT_GRACE_S);
+        assert_eq!(grace(&root), 60);
+        std::fs::remove_dir_all(&root).ok();
+    }
+}

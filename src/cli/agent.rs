@@ -148,7 +148,24 @@ pub(crate) fn agent_prio(a: &PrioArgs) -> Result<()> {
     if occupied && new != *base {
         return jfail(a.json, &format!("target name exists: {new}"));
     }
-    std::fs::rename(&from, &to)?;
+    if new != *base {
+        if crate::agent::queue::is_dir_entry(&root, "pending", base) {
+            // check-then-rename: rename onto a non-empty dir already
+            // fails; onto an EMPTY dir it silently replaces — a
+            // residual race window the pre-check above shrinks but
+            // cannot close (an empty dir holds no task content).
+            std::fs::rename(&from, &to).with_context(|| format!("cannot rename {}", from.display()))?;
+        } else {
+            // hard_link fails EEXIST atomically — closes the
+            // check-then-rename gap where a same-name flat task
+            // created in between would be silently clobbered.
+            match std::fs::hard_link(&from, &to) {
+                Ok(()) => std::fs::remove_file(&from).with_context(|| format!("cannot remove {}", from.display()))?,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return jfail(a.json, &format!("target name exists: {new}")),
+                Err(e) => return Err(e).with_context(|| format!("cannot rename {}", from.display())),
+            }
+        }
+    }
     if a.json {
         jprint(jobj(jfields(serde_json::json!({"from": base, "to": new}))));
     } else {
@@ -201,7 +218,13 @@ pub(crate) fn agent_workers(a: &WorkersArgs) -> Result<()> {
         _ => None,
     };
     if let Some(n) = set_to {
-        std::fs::write(root.join("workers"), format!("{n}\n"))?;
+        // tmp+rename: a direct truncate+write leaves an empty file
+        // mid-write, and a daemon polling then falls back to
+        // last-known workers for one cycle.
+        let target = root.join("workers");
+        let tmp = root.join(".workers.tmp");
+        std::fs::write(&tmp, format!("{n}\n")).with_context(|| format!("cannot write {}", tmp.display()))?;
+        std::fs::rename(&tmp, &target).with_context(|| format!("cannot write {}", target.display()))?;
     }
     let w = crate::agent::daemon::resolve_workers(&root);
     if a.json {

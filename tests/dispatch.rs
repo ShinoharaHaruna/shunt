@@ -25,11 +25,14 @@ struct FakeTransport {
     done_recent: Vec<(String, i32)>,
     /// `status` replies with non-wire garbage (protocol drift).
     drift: bool,
+    /// `daemon.alive` in the `status` answer; false exercises the
+    /// auto-heal `start` path.
+    daemon_alive: bool,
     calls: Mutex<Vec<String>>,
 }
 
 fn fake(pending: &Path) -> FakeTransport {
-    FakeTransport { pending: pending.to_path_buf(), fail_enqueue: false, down: false, done_recent: Vec::new(), drift: false, calls: Mutex::new(Vec::new()) }
+    FakeTransport { pending: pending.to_path_buf(), fail_enqueue: false, down: false, done_recent: Vec::new(), drift: false, daemon_alive: true, calls: Mutex::new(Vec::new()) }
 }
 
 impl Transport for FakeTransport {
@@ -46,7 +49,7 @@ impl Transport for FakeTransport {
                 let done: Vec<String> = self.done_recent.iter().map(|(n, rc)| format!(r#"{{"name":"{n}","rc":{rc}}}"#)).collect();
                 // Wire answers are one compact JSON object line
                 // (design.md §5); extract() line-scans for it.
-                Ok(format!(r#"{{"protocol":1,"daemon":{{"alive":true,"pid":1234}},"workers":{{"value":3,"source":"default"}},"running":[],"pending":[],"done_recent":[{}],"failed_recent":[],"stop":false,"shutdown":{{"armed":false,"grace_s":60}}}}"#, done.join(",")))
+                Ok(format!(r#"{{"protocol":1,"daemon":{{"alive":{},"pid":1234}},"workers":{{"value":3,"source":"default"}},"running":[],"pending":[],"done_recent":[{}],"failed_recent":[],"stop":false,"shutdown":{{"armed":false,"grace_s":60}}}}"#, self.daemon_alive, done.join(",")))
             }
             Some("enqueue") => {
                 if self.fail_enqueue {
@@ -221,6 +224,28 @@ fn task_ledger_lazy_outcome() -> Result<()> {
     let mut rec = tasks::load("t9")?;
     assert!(matches!(tasks::observe(&t, &client, &mut rec)?, Observed::Done(0)));
     assert_eq!(tasks::events()?.matches("\"event\":").count(), 2); // pushed + finish
+
+    std::fs::remove_dir_all(&home).ok();
+    Ok(())
+}
+
+/// Auto-heal (§4.4): ssh answers but the daemon is dead — the
+/// sweep issues a remote `start` before pushing the entry.
+#[test]
+fn dead_daemon_is_restarted_then_pushed() -> Result<()> {
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, _client) = fixture("heal")?;
+    let pending = home.join("pending");
+    std::fs::create_dir_all(&pending)?;
+
+    spool::stage(&entry("t1", "a-t1"), "echo t1\n")?;
+    let t = FakeTransport { daemon_alive: false, ..fake(&pending) };
+    assert_eq!(dispatch::sweep_with(&t)?, 1);
+    let calls = t.calls.lock().unwrap();
+    assert_eq!(calls.as_slice(), ["status", "start", "enqueue"], "{calls:?}");
+    drop(calls);
+    assert!(spool::list()?.is_empty());
+    assert_eq!(std::fs::read_to_string(pending.join("0100_task/task.sh"))?, "echo t1\n");
 
     std::fs::remove_dir_all(&home).ok();
     Ok(())
