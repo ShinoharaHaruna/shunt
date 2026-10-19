@@ -4,6 +4,7 @@ use super::shunt_bin;
 use crate::server::registry::ClientEntry;
 use anyhow::{Context, Result};
 use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -41,18 +42,35 @@ impl super::Transport for LocalTransport {
         } else {
             cmd.stdin(Stdio::null());
         }
-        let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().with_context(|| format!("spawn {}", prog.display()))?;
+        // process_group(0): pgid == child pid so wait_deadline can
+        // kill the whole group on timeout (see ssh.rs for why).
+        let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).spawn().with_context(|| format!("spawn {}", prog.display()))?;
         if let Some(body) = stdin {
-            child.stdin.as_mut().expect("stdin piped").write_all(body.as_bytes())?;
+            // Write from a thread: a child that never reads stdin
+            // while filling stdout would otherwise deadlock the
+            // write — the pipe readers only start in wait_deadline.
+            // Dropping the write end gives `enqueue -` its EOF.
+            let mut w = child.stdin.take().expect("stdin piped");
+            let body = body.to_string();
+            std::thread::spawn(move || {
+                let _ = w.write_all(body.as_bytes());
+            });
         }
-        // Close stdin so `enqueue -` sees EOF; the timeout path polls
-        // try_wait and never drops the pipe otherwise.
-        drop(child.stdin.take());
         let out = match self.timeout_s {
             Some(t) => super::wait_deadline(child, t, &format!("local exec {}", prog.display()))?,
             None => child.wait_with_output().context("wait local exec")?,
         };
         if !out.status.success() {
+            // Same wire convention as the ssh transport: a wire op's
+            // `{"ok":false,"error":"…"}` on stdout carries the real
+            // message; raw argv prints no wire JSON and falls through.
+            if let Ok(v) = crate::proto::wire::extract(&String::from_utf8_lossy(&out.stdout)) {
+                if v.get("ok").and_then(|o| o.as_bool()) == Some(false) {
+                    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+                        anyhow::bail!("local exec {} failed: {e}", prog.display());
+                    }
+                }
+            }
             anyhow::bail!("local exec {} rc={}: {}", prog.display(), out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).trim());
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -88,6 +106,26 @@ mod tests {
         let t = LocalTransport { bin: PathBuf::from("/nonexistent-shunt"), timeout_s: None };
         let out = t.exec(&c, &["sh".into(), "-c".into(), "echo raw-ok".into()], None).unwrap();
         assert_eq!(out.trim(), "raw-ok");
+    }
+
+    #[test]
+    fn local_exec_drains_big_stdout_under_deadline() {
+        // Same >64 KiB pipe deadlock as the ssh transport, with
+        // timeout_s set so a regression hangs only briefly.
+        let c = local_client();
+        let t = LocalTransport { bin: PathBuf::from("/bin/sh"), timeout_s: Some(30) };
+        let out = t.exec(&c, &[shunt_bin(&c), "-c".into(), "yes | head -c 200000".into()], None).unwrap();
+        assert_eq!(out.len(), 200000);
+    }
+
+    #[test]
+    fn local_exec_surfaces_wire_error() {
+        // Wire ops fail as `{"ok":false,"error":"…"}` on stdout +
+        // rc 1; the caller must see the message, not a bare rc line.
+        let c = local_client();
+        let t = LocalTransport { bin: PathBuf::from("/bin/sh"), timeout_s: None };
+        let err = t.exec(&c, &[shunt_bin(&c), "-c".into(), "printf '%s\n' '{\"protocol\":1,\"ok\":false,\"error\":\"queue wedged\"}'; exit 1".into()], None).unwrap_err();
+        assert!(err.to_string().contains("queue wedged"), "{err}");
     }
 
     #[test]

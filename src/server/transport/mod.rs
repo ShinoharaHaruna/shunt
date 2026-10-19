@@ -12,7 +12,7 @@ pub use local::LocalTransport;
 pub use ssh::SshTransport;
 
 use crate::server::registry::ClientEntry;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 
 /// Quote one arg for the remote shell (`%q` equivalent).
@@ -64,14 +64,45 @@ pub fn wire_argv(client: &ClientEntry, tail: &[&str]) -> Vec<String> {
 /// Poll a spawned child to completion or kill it at the deadline.
 /// Shared by the ssh transport (exec + scp hard ceiling) and the
 /// loopback transport's row-configured `timeout_s`.
+///
+/// stdout/stderr drain on reader threads from the start: a child
+/// that fills its pipe buffer (~64 KiB) otherwise blocks on write
+/// and never exits, so a verbose remote op (`logs -n 200`, noisy
+/// `client exec`) would deadlock against the deadline — or forever
+/// where the caller polls without one. Spawn sites must set
+/// `process_group(0)` so the deadline can kill the whole group
+/// (pgid == child pid): a bare `kill()` would orphan grandchildren
+/// still holding the pipes, and the drain below could hang.
 pub(crate) fn wait_deadline(mut child: std::process::Child, timeout_s: u64, what: &str) -> Result<std::process::Output> {
+    use std::io::Read;
+    let mut out_pipe = child.stdout.take().expect("stdout piped");
+    let mut err_pipe = child.stderr.take().expect("stderr piped");
+    let out_t = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = out_pipe.read_to_end(&mut v);
+        v
+    });
+    let err_t = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = err_pipe.read_to_end(&mut v);
+        v
+    });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_s);
     loop {
         match child.try_wait()? {
-            Some(_) => return child.wait_with_output().with_context(|| format!("wait {what}")),
+            Some(status) => {
+                let stdout = out_t.join().unwrap_or_default();
+                let stderr = err_t.join().unwrap_or_default();
+                return Ok(std::process::Output { status, stdout, stderr });
+            }
             None if std::time::Instant::now() >= deadline => {
+                // Group kill first (grandchildren included), the
+                // direct child as a belt. The reader handles drop
+                // unjoined: their threads end at pipe EOF, and an
+                // out-of-group pipe holder must not delay the bail.
+                let _ = crate::agent::exec::signal_pgid(child.id(), "KILL");
                 let _ = child.kill();
-                let _ = child.wait_with_output();
+                let _ = child.wait();
                 anyhow::bail!("{what} timed out after {timeout_s}s");
             }
             None => std::thread::sleep(std::time::Duration::from_millis(50)),

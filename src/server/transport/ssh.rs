@@ -8,6 +8,7 @@ use super::{cm_dir, join_argv, wait_deadline};
 use crate::server::registry::ClientEntry;
 use anyhow::{Context, Result};
 use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -107,11 +108,20 @@ impl super::Transport for SshTransport {
         // single flap never bubbles up; only an exhausted streak
         // bumps the endpoint-drift counter (design.md §4.1).
         for attempt in 1..=RETRY {
-            let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("spawn ssh")?;
+            // process_group(0): the child's pgid equals its pid so a
+            // wait_deadline timeout can kill the whole group — a bare
+            // kill() would orphan grandchildren holding the pipes.
+            let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).spawn().context("spawn ssh")?;
             if let Some(body) = stdin {
-                child.stdin.as_mut().expect("stdin piped").write_all(body.as_bytes())?;
+                // Write from a thread: a remote that never reads stdin
+                // while filling stdout would otherwise deadlock the
+                // write — the pipe readers only start in wait_deadline.
+                let mut w = child.stdin.take().expect("stdin piped");
+                let body = body.to_string();
+                std::thread::spawn(move || {
+                    let _ = w.write_all(body.as_bytes());
+                });
             }
-            drop(child.stdin.take());
             // A hard deadline that fires means the remote command hung
             // while TCP stayed live — not a flap, so bail without
             // retry and without bumping the conn_fail streak.
@@ -122,6 +132,17 @@ impl super::Transport for SshTransport {
             }
             let rc = out.status.code().unwrap_or(-1);
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            // Wire ops report failures as `{"ok":false,"error":"…"}`
+            // on stdout with a nonzero exit — surface that message.
+            // Raw argv (bootstrap's `sh -c`, probes) prints no wire
+            // JSON, so extract fails and we fall through to rc+stderr.
+            if let Ok(v) = crate::proto::wire::extract(&String::from_utf8_lossy(&out.stdout)) {
+                if v.get("ok").and_then(|o| o.as_bool()) == Some(false) {
+                    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+                        anyhow::bail!("remote exec failed: {e}");
+                    }
+                }
+            }
             if rc != 255 || attempt == RETRY {
                 if rc == 255 {
                     return Err(unreachable_err(client, &stderr));
@@ -151,7 +172,7 @@ impl super::Transport for SshTransport {
         // Bootstrap pushes the binary through here, so a single
         // `Exceeded MaxStartups` flap must not fail the copy.
         for attempt in 1..=RETRY {
-            let child = Command::new("scp").args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("spawn scp")?;
+            let child = Command::new("scp").args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).spawn().context("spawn scp")?;
             let out = wait_deadline(child, exec_timeout_s(), "scp")?;
             if out.status.success() {
                 crate::server::registry::conn_fail_reset(&client.name);
@@ -229,6 +250,29 @@ mod tests {
         assert!(argv.contains("ServerAliveInterval=15"), "{argv}");
         assert!(argv.contains("ServerAliveCountMax=2"), "{argv}");
         std::env::remove_var("FAKE_ARGV");
+        restore_path();
+    }
+
+    #[test]
+    fn ssh_exec_drains_big_stdout() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // >64 KiB on stdout deadlocks an undrained pipe: the remote
+        // blocks on write, never exits, and the deadline would fire
+        // on a healthy-but-verbose command (`logs -n 200`).
+        fake_ssh("yes | head -c 200000");
+        let out = SshTransport.exec(&ssh_client(), &["logs".into(), "-n".into(), "200".into()], None).unwrap();
+        assert_eq!(out.len(), 200000);
+        restore_path();
+    }
+
+    #[test]
+    fn ssh_exec_surfaces_remote_wire_error() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // Wire ops fail as `{"ok":false,"error":"…"}` on stdout + rc 1;
+        // the message must reach the caller, not die with the pipe.
+        fake_ssh("printf '%s\\n' '{\"protocol\":1,\"ok\":false,\"error\":\"sequence space exhausted\"}'; exit 1");
+        let err = SshTransport.exec(&ssh_client(), &["enqueue".into()], None).unwrap_err();
+        assert!(err.to_string().contains("sequence space exhausted"), "{err}");
         restore_path();
     }
 
