@@ -61,7 +61,10 @@ fn merge_file_directives(body: &str, meta: &TaskMeta) -> String {
             inject_head.push_str(&format!("# shunt-env:{k}={v}\n"));
         }
     }
-    let guard_line = meta.guard.as_ref().map(|g| format!("if [ -e {} ]; then echo \"guard hit: {g} exists; skipping\"; exit 0; fi\n", shell_quote(g)));
+    let guard_line = meta.guard.as_ref().map(|g| {
+        let q = shell_quote(g);
+        format!("if [ -e {q} ]; then echo \"guard hit: {q} exists; skipping\"; exit 0; fi\n")
+    });
 
     let mut out = String::new();
     for (i, l) in lines.iter().enumerate() {
@@ -306,6 +309,20 @@ mod tests {
         assert!(body.contains("if [ -e runs/x.json ]; then"));
         assert!(body.contains("exec uv run python 'a b.py'\n"));
         assert!(!body.contains("cd "));
+    }
+
+    /// Same injection surface as render_task: a `--guard` merged into
+    /// a `--file` body must appear in the echo line only shell-quoted.
+    #[test]
+    fn file_merge_guard_echo_uses_quoted_form() {
+        for guard in ["runs/$(touch X).json", "runs/evil\".json", "runs/`id`.json"] {
+            let meta = TaskMeta { slug: "t".into(), guard: Some(guard.into()), workdir: None, env: Default::default(), cmd: Vec::new(), timeout_s: None };
+            let out = merge_file_directives("#!/usr/bin/env bash\necho hi\n", &meta);
+            let q = shell_quote(guard);
+            let line = format!("if [ -e {q} ]; then echo \"guard hit: {q} exists; skipping\"; exit 0; fi");
+            assert!(out.contains(&line), "merged body missing quoted guard line for {guard:?}: {out}");
+            assert!(!out.contains(&format!("echo \"guard hit: {guard}")), "raw guard leaked into echo for {guard:?}");
+        }
     }
 
     #[test]

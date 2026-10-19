@@ -339,7 +339,7 @@ pub fn render_task(meta: &crate::proto::task::TaskMeta) -> String {
     out.push_str("set -uo pipefail\n");
     if let Some(guard) = &meta.guard {
         let q = crate::server::transport::shell_quote(guard);
-        out.push_str(&format!("if [ -e {q} ]; then echo \"guard hit: {guard} exists; skipping\"; exit 0; fi\n"));
+        out.push_str(&format!("if [ -e {q} ]; then echo \"guard hit: {q} exists; skipping\"; exit 0; fi\n"));
     }
     let cmd = meta.cmd.iter().map(|a| crate::server::transport::shell_quote(a)).collect::<Vec<_>>().join(" ");
     out.push_str(&format!("exec {cmd}\n"));
@@ -354,6 +354,22 @@ pub fn running_log(root: &Path, base: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::read_env_file;
+
+    /// A hostile guard path must reach the echo line only in its
+    /// shell-quoted form: raw `$()`, backticks, or `"` inside the
+    /// double-quoted message would execute or break out when the
+    /// guard-hit branch runs.
+    #[test]
+    fn guard_echo_uses_quoted_form() {
+        for guard in ["runs/$(touch X).json", "runs/evil\".json", "runs/`id`.json"] {
+            let meta = crate::proto::task::TaskMeta { slug: "t".into(), guard: Some(guard.into()), workdir: None, env: Default::default(), cmd: vec!["true".into()], timeout_s: None };
+            let body = super::render_task(&meta);
+            let q = crate::server::transport::shell_quote(guard);
+            let line = format!("if [ -e {q} ]; then echo \"guard hit: {q} exists; skipping\"; exit 0; fi");
+            assert!(body.contains(&line), "body missing quoted guard line for {guard:?}: {body}");
+            assert!(!body.contains(&format!("echo \"guard hit: {guard}")), "raw guard leaked into echo for {guard:?}");
+        }
+    }
 
     /// The env file is literal KEY=value (design.md §3.12): spaces
     /// survive verbatim but quotes are never stripped — `K="a b"`
