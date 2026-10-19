@@ -3,7 +3,6 @@
 //! only the daemon-side orchestration around it.
 
 use serde_json::{json, Map};
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -65,15 +64,27 @@ pub(crate) fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bo
             dlog(root, "idle_shutdown_countdown", ev(json!({"remain_s": i})));
         }
     }
-    // final re-check immediately before exec
+    // final re-check immediately before firing
     let peers = shutdown::busy_peers(root);
     if flag.exists() && !shutdown::pending_nonempty(root) && running_empty && peers.is_empty() {
         let cmd = shutdown::resolve_cmd(root);
         dlog(root, "idle_shutdown_exec", ev(json!({"cmd": cmd})));
-        let _ = std::fs::remove_file(root.join("daemon.pid"));
-        shutdown::deregister_qroot(root);
-        let err = Command::new("sh").arg("-c").arg(&cmd).exec();
-        dlog(root, "idle_shutdown_exec_failed", ev(json!({"error": err.to_string()})));
+        // spawn, not exec: a failed launch must return here with the
+        // pidfile and registry entry still intact — tearing down
+        // before a failed exec left the daemon running headless,
+        // invisible to alive()/busy_peers (design.md §3.11). The
+        // spawned `sh -c` survives exit(0); on a spawn failure the
+        // poll loop simply re-arms the countdown next cycle.
+        match Command::new("sh").arg("-c").arg(&cmd).spawn() {
+            Ok(_) => {
+                let _ = std::fs::remove_file(root.join("daemon.pid"));
+                shutdown::deregister_qroot(root);
+                std::process::exit(0);
+            }
+            Err(e) => {
+                dlog(root, "idle_shutdown_exec_failed", ev(json!({"error": e.to_string()})));
+            }
+        }
     } else {
         dlog(root, "idle_shutdown_aborted", Map::new());
     }

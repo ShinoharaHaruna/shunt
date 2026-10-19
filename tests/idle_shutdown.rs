@@ -25,6 +25,33 @@ fn idle_shutdown_fires_marker() {
 }
 
 #[test]
+fn idle_shutdown_spawn_failure_keeps_daemon_registered() {
+    // design.md §3.11: when the shutdown command cannot even be
+    // spawned, the daemon must stay visible — the old exec() path
+    // removed daemon.pid and deregistered the qroot *before* exec,
+    // so a launch failure left a headless daemon (invisible to
+    // alive()/status/busy_peers). A PATH with no `sh` forces
+    // Command::new("sh").spawn() to fail without any real poweroff.
+    let q = Q::new("shutspawnfail");
+    std::fs::write(q.root.join("shutdown_cmd"), "/nonexistent-xyz").unwrap();
+    q.run_ok(&["shutdown", "on", "2"]);
+    let empty_bin = q.root.join("empty-bin");
+    std::fs::create_dir(&empty_bin).unwrap();
+    let mut c = Command::new(common::bin());
+    c.args(["daemon", "--root"]).arg(&q.root).env("POLL", "0.1").env("SHUNT_STATE", q.root.join("boxstate")).env("PATH", &empty_bin).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    let mut d = c.spawn().expect("spawn daemon");
+    wait_until(|| q.dlog().contains("idle_shutdown_exec_failed"), 15, "spawn failure logged");
+    assert!(q.daemon_pid().is_some(), "pidfile survives spawn failure");
+    assert!(d.try_wait().unwrap().is_none(), "daemon still running after spawn failure");
+    // A live daemon re-arms the countdown on the next poll cycle
+    // rather than going headless.
+    wait_until(|| q.dlog().matches("idle_shutdown_armed").count() >= 2, 10, "countdown re-armed");
+    q.stop();
+    let status = d.wait().unwrap();
+    assert!(status.success());
+}
+
+#[test]
 fn idle_shutdown_cancel_flag_removed() {
     let q = Q::new("shutflag");
     let fired = q.root.join("FIRED");

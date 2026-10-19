@@ -304,6 +304,21 @@ pub fn run(root: &Path) -> Result<()> {
     std::fs::write(root.join("daemon.pid"), format!("{}\n", std::process::id()))?;
     shutdown::register_qroot(root);
 
+    // The registry entry is removed on every exit path (§3.11): an
+    // error anywhere after registration must not leave the pidfile
+    // and box-level entry behind for lazy sweeping.
+    let result = run_registered(root);
+    if result.is_err() {
+        let _ = std::fs::remove_file(root.join("daemon.pid"));
+        shutdown::deregister_qroot(root);
+    }
+    result
+}
+
+/// Post-registration half of `run()`: signal handlers, orphan
+/// requeue, and the poll loop. Kept separate so `run()` can strip
+/// the pidfile/registry entry on any early error.
+fn run_registered(root: &Path) -> Result<()> {
     let got_signal = Arc::new(AtomicUsize::new(0));
     {
         let count = Arc::clone(&got_signal);
