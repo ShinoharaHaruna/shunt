@@ -135,9 +135,11 @@ fn workers_resize_raise_lower_invalid() {
     std::fs::write(q.root.join("workers"), "bogus\n").unwrap();
     std::fs::write(&rel, b"").unwrap();
     wait_until(|| q.exits("done").len() == 2, 15, "both tasks drain");
-    // get reports resolved value + source
+    // get reports resolved value + source — garbage file falls back
+    // to the daemon's persisted last-known (design.md §3.8), so
+    // status and the daemon agree instead of showing "default".
     let out = q.run_ok(&["workers"]);
-    assert!(out.contains("workers:"), "got {out}");
+    assert!(out.contains("workers: 1 (last-known)"), "got {out}");
     q.stop();
     let _ = d.wait();
 }

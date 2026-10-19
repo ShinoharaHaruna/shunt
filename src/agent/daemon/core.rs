@@ -180,6 +180,10 @@ impl Daemon {
         let workers = desired_workers_in(&self.root, self.last_workers);
         if Some(workers) != self.last_workers {
             dlog(&self.root, "workers_now", ev(json!({"workers": workers})));
+            // Persist the resolved value so one-shot `status`/`workers
+            // get` fall back to the same last-known the daemon runs
+            // (design.md §3.8).
+            super::workers::persist_last(&self.root, workers);
             self.last_workers = Some(workers);
         }
         // Snapshot the candidate list once per cycle: iterating the
@@ -315,7 +319,10 @@ pub fn run(root: &Path) -> Result<()> {
     dlog(&root, "daemon_start", ev(json!({"pid": std::process::id()})));
     requeue_orphans(&root)?;
 
-    let mut d = Daemon { root: root.clone(), runpids: HashMap::new(), last_workers: None, got_signal };
+    // Seed last-known from the previous daemon's persisted value:
+    // a garbage `workers` file falls back to it rather than default,
+    // matching what a concurrent `status` reports (design.md §3.8).
+    let mut d = Daemon { root: root.clone(), runpids: HashMap::new(), last_workers: super::workers::read_last(&root), got_signal };
     let poll = poll_interval();
     loop {
         if d.got_signal.load(Ordering::SeqCst) > 0 {
