@@ -85,9 +85,9 @@ impl super::Transport for SshTransport {
     fn exec(&self, client: &ClientEntry, argv: &[String], stdin: Option<&str>) -> Result<String> {
         let mut cmd = Command::new("ssh");
         cmd.args(Self::base_args(client)?)
-            // Half-open TCP detection for exec only — not in base_args:
-            // the tunnel sets its own ServerAlive policy and scp
-            // (bootstrap) has no liveness requirement.
+            // Half-open TCP detection — not in base_args because the
+            // tunnel sets its own ServerAlive policy. scp spells the
+            // same opts via copy_to below (design.md §5).
             .args(["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2"])
             .arg(Self::target(client))
             .arg(join_argv(argv));
@@ -165,6 +165,9 @@ impl super::Transport for SshTransport {
         // (scp spells it -P), then local source + user@host:path.
         let mut args = vec!["-P".into(), client.ssh.port.to_string()];
         args.extend(Self::base_args(client)?.into_iter().skip(2));
+        // Same double bound as exec (design.md §5): half-open TCP
+        // dies in ~30s instead of riding the full hard deadline.
+        args.extend(["-o".into(), "ServerAliveInterval=15".into(), "-o".into(), "ServerAliveCountMax=2".into()]);
         args.push(local.display().to_string());
         // The remote side of scp runs through the remote login
         // shell — the qroot-derived path must be quoted or spaces /
@@ -353,6 +356,28 @@ mod tests {
         std::fs::write(&local, "x").unwrap();
         SshTransport.copy_to(&ssh_client(), &local, "/remote/shunt").unwrap();
         assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "3", "two 255 flaps retried inside the call");
+        std::env::remove_var("SHUNT_HOME");
+        restore_path();
+    }
+
+    #[test]
+    fn scp_passes_serveralive() {
+        let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-scp-home4-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let dir = std::env::temp_dir().join(format!("shunt-fakescp-out4-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let argfile = dir.join("argv");
+        std::env::set_var("FAKE_ARGV", &argfile);
+        fake_scp("printf '%s\\n' \"$@\" > \"$FAKE_ARGV\"; exit 0");
+        let local = dir.join("bin");
+        std::fs::write(&local, "x").unwrap();
+        SshTransport.copy_to(&ssh_client(), &local, "/remote/shunt").unwrap();
+        let argv = std::fs::read_to_string(&argfile).unwrap();
+        assert!(argv.contains("ServerAliveInterval=15"), "{argv}");
+        assert!(argv.contains("ServerAliveCountMax=2"), "{argv}");
+        std::env::remove_var("FAKE_ARGV");
         std::env::remove_var("SHUNT_HOME");
         restore_path();
     }
