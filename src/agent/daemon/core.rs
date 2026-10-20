@@ -26,6 +26,20 @@ const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
 /// After the leader exits, finalize waits this long for the rest of
 /// the process group to drain before moving the entry anyway
 /// (design.md §3.9). `SHUNT_PGID_DRAIN_S` overrides (tests).
+/// §3.5 loud-orphan check for the signal-exit path: an armed
+/// `shutdown_on_idle` with pending work must be logged before exit —
+/// the daemon is the only process that can fire it, so a silent
+/// orphan would leave the box billing idle with queued work. A
+/// removed flag (clean disarm during the countdown) or a busy-peer
+/// block (`idle_shutdown_blocked` — a live sibling can still honor
+/// the flag) is not an orphan and logs nothing. dlog only: daemon
+/// stderr is daemon.log, which must stay strict JSONL (§3.1).
+fn warn_orphaned_shutdown_flag(root: &Path) {
+    if root.join("shutdown_on_idle").exists() && shutdown::pending_nonempty(root) {
+        dlog(root, "signal_left_shutdown_armed", ev(json!({"warning": "daemon exiting on signal with shutdown_on_idle armed and pending work; a restarted daemon will honor the flag"})));
+    }
+}
+
 fn pgid_drain_grace() -> Duration {
     std::env::var("SHUNT_PGID_DRAIN_S").ok().and_then(|s| s.parse::<u64>().ok()).map(Duration::from_secs).unwrap_or(Duration::from_secs(5))
 }
@@ -445,12 +459,15 @@ impl Daemon {
         }
         if self.root.join("shutdown_on_idle").exists() {
             if shutdown::pending_nonempty(&self.root) {
-                // dlog only — daemon stderr is daemon.log, which must
-                // stay strict JSONL (§3.1); no eprintln twin.
-                dlog(&self.root, "signal_left_shutdown_armed", ev(json!({"warning": "daemon exiting on signal with shutdown_on_idle armed and pending work; a restarted daemon will honor the flag"})));
+                warn_orphaned_shutdown_flag(&self.root);
             } else {
                 dlog(&self.root, "signal_honors_shutdown", Map::new());
                 maybe_shutdown(&self.root, self.runpids.is_empty(), false, Some(&self.got_signal));
+                // §3.5: a countdown cancelled by new pending work
+                // returns here with the flag still armed — the exit
+                // must carry the same loud-orphan WARNING as the
+                // pre-check branch, not fall through silently.
+                warn_orphaned_shutdown_flag(&self.root);
             }
         }
         let _ = std::fs::remove_file(self.root.join("daemon.pid"));
@@ -650,6 +667,29 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "remnant group survived its timeout KILL");
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// §3.5 loud-orphan predicate behind the signal-exit re-check:
+    /// only flag-armed AND pending-nonempty logs the WARNING — a
+    /// disarmed flag or an empty pending/ is not an orphan.
+    #[test]
+    fn warn_orphaned_flag_only_when_armed_with_pending() {
+        let root = std::env::temp_dir().join(format!("shunt-orphan-test-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("pending")).unwrap();
+        // No flag: nothing armed, nothing to warn about.
+        super::warn_orphaned_shutdown_flag(&root);
+        assert!(!root.join("daemon.log").exists(), "no flag, no log");
+        // Flag armed but pending/ empty: honored or disarmed, not orphaned.
+        std::fs::write(root.join("shutdown_on_idle"), b"").unwrap();
+        super::warn_orphaned_shutdown_flag(&root);
+        assert!(!root.join("daemon.log").exists(), "empty pending must not warn");
+        // Flag armed + pending work: the orphan must be loud.
+        std::fs::create_dir_all(root.join("pending/t1")).unwrap();
+        super::warn_orphaned_shutdown_flag(&root);
+        let log = std::fs::read_to_string(root.join("daemon.log")).unwrap();
+        assert!(log.contains("signal_left_shutdown_armed"), "{log}");
+        assert!(log.contains("\"warning\""), "{log}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

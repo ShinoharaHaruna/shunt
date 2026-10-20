@@ -232,3 +232,36 @@ fn term_with_pending_leaves_flag_armed_loudly() {
     assert!(!fired.exists(), "must not power off with pending work");
     assert_eq!(q.tasks("pending").len(), 1, "queued task survives for the next daemon");
 }
+
+#[test]
+fn term_countdown_cancelled_by_pending_exits_loudly() {
+    // design.md §3.5: pending was empty at signal time so the daemon
+    // entered the honoring countdown, but a task arrived mid-countdown
+    // and cancelled it — the flag is still armed with queued work, so
+    // the signal exit must log signal_left_shutdown_armed instead of
+    // falling through to exit(143) silently.
+    let q = Q::new("termcancel");
+    let fired = q.root.join("FIRED");
+    std::fs::write(q.root.join("shutdown_cmd"), format!("touch {}", fired.display())).unwrap();
+    // A running task keeps the pre-signal idle check from firing on
+    // its own; workers=1 keeps the late task parked in pending/.
+    std::fs::write(q.root.join("workers"), "1\n").unwrap();
+    q.enqueue_script("long", &sleep_task());
+    q.run_ok(&["shutdown", "on", "5"]);
+    let mut d = q.daemon();
+    wait_until(|| !q.tasks("running").is_empty(), 10, "task running");
+    let pid = q.daemon_pid().unwrap();
+    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    // The TERM'd task leaves running/ empty and pending/ is still
+    // empty at the pre-check, so the honoring countdown starts —
+    // then the late task cancels it.
+    wait_until(|| q.dlog().contains("signal_honors_shutdown"), 10, "signal path enters honoring");
+    q.enqueue_script("late", &sleep_task());
+    wait_until(|| q.dlog().contains("idle_shutdown_cancelled"), 10, "countdown cancelled by pending");
+    wait_until(|| q.dlog().contains("signal_left_shutdown_armed"), 10, "cancelled honoring must exit loudly");
+    assert!(q.dlog().contains("\"warning\""), "{}", q.dlog());
+    let status = d.wait().unwrap();
+    assert_eq!(status.code(), Some(143), "signal exit code");
+    assert!(q.root.join("shutdown_on_idle").exists(), "flag stays armed for a restarted daemon");
+    assert!(!fired.exists(), "must not power off with pending work");
+}
