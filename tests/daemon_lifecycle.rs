@@ -214,6 +214,29 @@ fn failed_finalize_quarantines_instead_of_ghosting() {
 }
 
 #[test]
+fn spawn_failure_finalize_failure_quarantines() {
+    // A task whose shell cannot be exec'd fails spawn and is
+    // finalized inline; if that finalize rename also fails (here: a
+    // non-empty failed/<name> collision), the entry must not be left
+    // pid-less in running/ — same ghost rule as the reap path
+    // (design.md §3.9).
+    let q = Q::new("spawnfinfail");
+    let name = q.enqueue_script("victim", &marker_task(&q.root.join("never-ran")));
+    std::fs::write(q.root.join("shell"), "/nonexistent/shunt-test-shell").unwrap();
+    std::fs::create_dir_all(q.root.join("failed").join(&name)).unwrap();
+    std::fs::write(q.root.join("failed").join(&name).join("blocker"), "x").unwrap();
+    let mut d = q.daemon();
+    wait_until(|| q.dlog().contains("spawn_failed"), 15, "spawn_failed event logged");
+    wait_until(|| q.dlog().contains("finalize_failed"), 10, "finalize_failed event logged");
+    wait_until(|| q.tasks("running").is_empty(), 10, "no ghost left in running/");
+    let failed = q.names("failed");
+    let entry = failed.iter().find(|n| n.contains("victim") && n.contains("quarantined")).unwrap_or_else(|| panic!("quarantined entry in failed/: {failed:?}"));
+    assert!(q.root.join("failed").join(entry).join("shunt_error").exists(), "quarantine note written: {entry}");
+    q.stop();
+    let _ = d.wait();
+}
+
+#[test]
 fn orphan_requeue_collision_quarantines() {
     // A running/ leftover whose requeue target in pending/ is already
     // taken must land in failed/ with a note, not stay an invisible

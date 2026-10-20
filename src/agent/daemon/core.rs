@@ -255,7 +255,20 @@ impl Daemon {
                 }
                 Err(e) => {
                     dlog(&self.root, "spawn_failed", ev(json!({"task": next, "error": e.to_string()})));
-                    let _ = exec::finalize(&self.root, &next, 1, None);
+                    // A failed finalize here leaves the same pid-less
+                    // ghost §3.9 forbids in the reap path — same
+                    // quarantine fallback, same ghost_entry warning.
+                    if let Err(e2) = exec::finalize(&self.root, &next, 1, None) {
+                        dlog(&self.root, "finalize_failed", ev(json!({"task": next, "rc": 1, "error": format!("{e2:#}")})));
+                        if let Err(e3) = exec::quarantine(&self.root, "running", &next, &format!("finalize failed after spawn failure (rc 1): {e2:#}")) {
+                            dlog(
+                                &self.root,
+                                "ghost_entry",
+                                ev(json!({"task": next, "error": e3.to_string(),
+                                   "warning": "entry stuck in running/ with no pid file; kill cannot reach it"})),
+                            );
+                        }
+                    }
                 }
             }
         }
