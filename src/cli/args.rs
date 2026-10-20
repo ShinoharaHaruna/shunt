@@ -127,7 +127,7 @@ pub struct StatusArgs {
     #[arg(short, long, conflicts_with = "all")]
     pub client: Option<String>,
     /// Local queue root (client side)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "all")]
     pub root: Option<String>,
     /// Emit a single JSON object (wire protocol)
     #[arg(long)]
@@ -616,6 +616,14 @@ mod tests {
             let Command::Init(a) = cli.command else { panic!() };
             assert_eq!(a.root.as_deref(), Some("/tmp/q"));
         }
+    }
+
+    /// `--all` is the server aggregate; a local `--root` would be
+    /// silently dropped, so clap rejects the mix like `--client`.
+    #[test]
+    fn status_root_conflicts_with_all() {
+        assert!(Cli::try_parse_from(["shunt", "status", "--all", "--root", "/tmp/q"]).is_err());
+        assert!(Cli::try_parse_from(["shunt", "status", "--root", "/tmp/q"]).is_ok());
     }
 
     #[test]
