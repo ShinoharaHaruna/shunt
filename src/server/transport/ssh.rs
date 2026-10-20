@@ -125,6 +125,20 @@ impl super::Transport for SshTransport {
             }
             let rc = out.status.code().unwrap_or(-1);
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            // rc 255 is the ssh-layer signal — it routes to retry /
+            // unreachable_err FIRST, regardless of stdout content. A
+            // dead or mux-replaying box can leave a stale
+            // `{"ok":false}` line on a 255 exit; reading it as a wire
+            // error would skip the retry and the conn_fail bump and
+            // hide the dead endpoint from the drift watchdog
+            // (design.md §4.1).
+            if rc == 255 {
+                if attempt == RETRY {
+                    return Err(unreachable_err(client, &stderr));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                continue;
+            }
             // Wire ops report failures as `{"ok":false,"error":"…"}`
             // on stdout with a nonzero exit — surface that message.
             // Raw argv (bootstrap's `sh -c`, probes) prints no wire
@@ -136,13 +150,7 @@ impl super::Transport for SshTransport {
                     }
                 }
             }
-            if rc != 255 || attempt == RETRY {
-                if rc == 255 {
-                    return Err(unreachable_err(client, &stderr));
-                }
-                anyhow::bail!("ssh {}@{}:{} rc={}: {}", client.ssh.user, client.ssh.host, client.ssh.port, rc, stderr);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1500));
+            anyhow::bail!("ssh {}@{}:{} rc={}: {}", client.ssh.user, client.ssh.host, client.ssh.port, rc, stderr);
         }
         unreachable!("retry loop always returns");
     }
@@ -269,6 +277,27 @@ mod tests {
         fake_ssh("printf '%s\\n' '{\"protocol\":1,\"ok\":false,\"error\":\"sequence space exhausted\"}'; exit 1");
         let err = SshTransport.exec(&ssh_client(), &["enqueue".into()], None).unwrap_err();
         assert!(err.to_string().contains("sequence space exhausted"), "{err}");
+        restore_path();
+    }
+
+    /// A stale `{"ok":false}` line on an rc-255 exit must NOT take
+    /// the wire-error path: rc 255 is the ssh-layer signal and always
+    /// routes to retry/conn_fail (a mux replaying buffered output or
+    /// a wedged remote echoing an old reply must not mask a dead box).
+    #[test]
+    fn ssh_exec_255_with_wire_line_still_retries() {
+        let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-ssh-home255-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let dir = std::env::temp_dir().join(format!("shunt-fakessh-255-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let count = dir.join("count");
+        fake_ssh(&format!("printf '%s\\n' '{{\"protocol\":1,\"ok\":false,\"error\":\"stale\"}}'; n=$(cat {0} 2>/dev/null || echo 0); echo $((n+1)) > {0}; exit 255", count.display()));
+        let err = SshTransport.exec(&ssh_client(), &["status".into(), "--json".into()], None).unwrap_err();
+        assert!(err.to_string().contains("unreachable rc=255"), "{err}");
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "3", "rc 255 flaps must retry despite the wire line");
+        std::env::remove_var("SHUNT_HOME");
         restore_path();
     }
 
