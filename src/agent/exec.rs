@@ -245,6 +245,7 @@ pub fn pgid_alive(pgid: u32) -> bool {
 /// names this task's leader — reaped by the daemon already, or the
 /// pid was recycled by the OS — so no signal was ever sent. The kill
 /// command reports this honestly instead of claiming a kill.
+#[derive(Debug)]
 pub enum KillOutcome {
     Signaled { pgid: u32, escalated: bool },
     Gone,
@@ -314,22 +315,33 @@ pub fn pgid_is_task_group(pgid: u32, recorded_start: Option<u64>) -> bool {
 /// so the remnant is provably ours). A fully dead group — pgid free
 /// to be recycled — reports `Gone` and is never signaled.
 pub fn kill_task(root: &Path, task_name: &str) -> Result<KillOutcome> {
+    kill_task_with(root, task_name, signal_pgid, std::thread::sleep)
+}
+
+/// `kill_task` with the signal sender and the drain-loop sleep
+/// swapped out — tests inject both to reach the ESRCH races that a
+/// real kill(2) can only hit by luck (group dying between the gate
+/// and the send).
+fn kill_task_with(root: &Path, task_name: &str, sig: fn(u32, &str) -> SignalOutcome, nap: fn(std::time::Duration)) -> Result<KillOutcome> {
     let (pgid, start) = read_pid_file(root, "running", task_name).with_context(|| format!("no pid file for {task_name}"))?;
     if !pgid_is_task_group(pgid, start) {
         return Ok(KillOutcome::Gone);
     }
     // A TERM that cannot be sent (EPERM, bad arg) is an error, not
     // a silent Signaled — the kill command must not claim a signal
-    // it never delivered (design.md §3.9a).
-    match signal_pgid(pgid, "TERM") {
-        SignalOutcome::Delivered | SignalOutcome::Gone => {}
+    // it never delivered (design.md §3.9a). An ESRCH here means the
+    // group died between the gate and the send: nothing was ever
+    // signaled, so the honest result is Gone, not Signaled.
+    match sig(pgid, "TERM") {
+        SignalOutcome::Delivered => {}
+        SignalOutcome::Gone => return Ok(KillOutcome::Gone),
         SignalOutcome::Failed(e) => return Err(e).with_context(|| format!("cannot TERM pgid {pgid}")),
     }
     for _ in 0..10 {
         if !pgid_alive(pgid) {
             return Ok(KillOutcome::Signaled { pgid, escalated: false });
         }
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        nap(std::time::Duration::from_secs(1));
     }
     // Re-verify before escalating (§3.9a): a leader that exited on
     // TERM while its group lives on still gets KILL — the live pgid
@@ -337,8 +349,12 @@ pub fn kill_task(root: &Path, task_name: &str) -> Result<KillOutcome> {
     if !pgid_is_task_group(pgid, start) {
         return Ok(KillOutcome::Signaled { pgid, escalated: false });
     }
-    match signal_pgid(pgid, "KILL") {
-        SignalOutcome::Delivered | SignalOutcome::Gone => Ok(KillOutcome::Signaled { pgid, escalated: true }),
+    match sig(pgid, "KILL") {
+        SignalOutcome::Delivered => Ok(KillOutcome::Signaled { pgid, escalated: true }),
+        // ESRCH at the KILL send means the group died post-TERM:
+        // TERM did land but no KILL was ever sent, so `escalated`
+        // must not claim one (§3.9a honesty).
+        SignalOutcome::Gone => Ok(KillOutcome::Signaled { pgid, escalated: false }),
         SignalOutcome::Failed(e) => Err(e).with_context(|| format!("cannot KILL pgid {pgid}")),
     }
 }
@@ -538,6 +554,49 @@ mod tests {
             }
             std::fs::remove_dir_all(&root).ok();
         }
+    }
+
+    /// §3.9a ESRCH races (design.md "a kill result is honest"): a
+    /// group that dies between the §3.9a gate and the TERM send was
+    /// never signaled — `kill_task` must report `Gone`, not a phantom
+    /// kill. A group that dies between the escalation re-check and
+    /// the KILL send did take the TERM but no KILL — `escalated`
+    /// must not claim a signal that never went out. Both races are
+    /// unreachable deterministically through real kill(2), so the
+    /// sender and the drain sleep are injected; the pid file points
+    /// at a real live process group so the real gates run.
+    #[test]
+    fn kill_esrch_races_report_honestly() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+        let pgid = child.id();
+        let root = std::env::temp_dir().join(format!("shunt-esrch-{}-{}", std::process::id(), pgid));
+        let entry = root.join("running").join("t");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(entry.join("task.sh"), "exit 0\n").unwrap();
+        std::fs::write(entry.join("pid"), format!("{pgid}\n")).unwrap();
+
+        // TERM hits ESRCH: nothing was sent -> Gone.
+        match super::kill_task_with(&root, "t", |_, _| super::SignalOutcome::Gone, |_| {}) {
+            Ok(super::KillOutcome::Gone) => {}
+            other => panic!("TERM-ESRCH must report Gone, got {other:?}"),
+        }
+
+        // TERM delivered, group stays live through the drain, KILL
+        // hits ESRCH: TERM landed but nothing escalated.
+        let sig = |_: u32, s: &str| match s {
+            "TERM" => super::SignalOutcome::Delivered,
+            "KILL" => super::SignalOutcome::Gone,
+            _ => unreachable!(),
+        };
+        match super::kill_task_with(&root, "t", sig, |_| {}) {
+            Ok(super::KillOutcome::Signaled { pgid: p, escalated: false }) => assert_eq!(p, pgid),
+            other => panic!("KILL-ESRCH must report Signaled{{escalated:false}}, got {other:?}"),
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A hostile guard path must reach the guard line only as a
