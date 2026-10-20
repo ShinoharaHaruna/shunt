@@ -88,32 +88,55 @@ pub(crate) fn exec_timeout_s() -> u64 {
 /// `process_group(0)` so the deadline can kill the whole group
 /// (pgid == child pid): a bare `kill()` would orphan grandchildren
 /// still holding the pipes, and the drain below could hang.
+///
+/// Reader threads signal pipe EOF over a channel and drain into a
+/// shared buffer: an in-group (or detached) process inheriting a
+/// pipe write end can outlive the child, so on the exit path the
+/// drain wait is bounded by the same deadline. If the bounded wait
+/// expires we return the bytes collected so far with the child's
+/// real status — the call DID succeed, so partial output beats an
+/// error that misreports it as a timeout.
 pub(crate) fn wait_deadline(mut child: std::process::Child, timeout_s: u64, what: &str) -> Result<std::process::Output> {
     use std::io::Read;
-    let mut out_pipe = child.stdout.take().expect("stdout piped");
-    let mut err_pipe = child.stderr.take().expect("stderr piped");
-    let out_t = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = out_pipe.read_to_end(&mut v);
-        v
-    });
-    let err_t = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = err_pipe.read_to_end(&mut v);
-        v
-    });
+    use std::sync::{mpsc, Arc, Mutex};
+    type Buf = Arc<Mutex<Vec<u8>>>;
+    fn drain(mut pipe: impl Read + Send + 'static, buf: Buf) -> mpsc::Receiver<()> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            while let Ok(n) = pipe.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                if let Ok(mut b) = buf.lock() {
+                    b.extend_from_slice(&chunk[..n]);
+                }
+            }
+            let _ = tx.send(());
+        });
+        rx
+    }
+    let out_buf: Buf = Arc::new(Mutex::new(Vec::new()));
+    let err_buf: Buf = Arc::new(Mutex::new(Vec::new()));
+    let out_rx = drain(child.stdout.take().expect("stdout piped"), out_buf.clone());
+    let err_rx = drain(child.stderr.take().expect("stderr piped"), err_buf.clone());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_s);
+    let take = |b: &Buf| b.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
     loop {
         match child.try_wait()? {
             Some(status) => {
-                let stdout = out_t.join().unwrap_or_default();
-                let stderr = err_t.join().unwrap_or_default();
-                return Ok(std::process::Output { status, stdout, stderr });
+                // Wait for pipe EOF, bounded by the same deadline: a
+                // pipe holder outliving the child must not stall the
+                // return past it. Reader handles were never kept —
+                // the threads end at EOF regardless.
+                let _ = out_rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
+                let _ = err_rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
+                return Ok(std::process::Output { status, stdout: take(&out_buf), stderr: take(&err_buf) });
             }
             None if std::time::Instant::now() >= deadline => {
                 // Group kill first (grandchildren included), the
-                // direct child as a belt. The reader handles drop
-                // unjoined: their threads end at pipe EOF, and an
+                // direct child as a belt. The receivers drop and
+                // the reader threads end at pipe EOF: an
                 // out-of-group pipe holder must not delay the bail.
                 let _ = crate::agent::exec::signal_pgid(child.id(), "KILL");
                 let _ = child.kill();
@@ -194,6 +217,25 @@ mod tests {
         assert_eq!(v, vec!["/tmp/qt/bin/shunt", "status", "--json", "--root", "/tmp/qt"]);
         let v2 = wire_argv(&c, &["init", "--root", "/other"]);
         assert_eq!(v2.iter().filter(|a| *a == "--root").count(), 1);
+    }
+
+    /// A process-group member (or detached grandchild) that keeps
+    /// a pipe write end open after the child exits must not stall
+    /// the return: the drain wait is bounded by the deadline and
+    /// yields the bytes collected so far.
+    #[test]
+    fn pipe_holder_outliving_child_bounds_drain() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        let mut c = Command::new("sh");
+        // The backgrounded sleep inherits stdout; `sh` exits at once
+        // while the pipe stays open for the sleep's full run.
+        let child = c.arg("-c").arg("sleep 10 & echo hi").stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).spawn().unwrap();
+        let t0 = std::time::Instant::now();
+        let out = wait_deadline(child, 1, "pipe-holder test").unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(8), "drain outlived the deadline");
     }
 
     #[test]
