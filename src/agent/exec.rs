@@ -417,7 +417,10 @@ pub fn render_task(meta: &crate::proto::task::TaskMeta) -> String {
     out.push_str("set -uo pipefail\n");
     if let Some(guard) = &meta.guard {
         let q = crate::server::transport::shell_quote(guard);
-        out.push_str(&format!("if [ -e {q} ]; then echo \"guard hit: {q} exists; skipping\"; exit 0; fi\n"));
+        // printf %s, not a double-quoted echo: inside `"..."` the
+        // single quotes around {q} are literal characters and a
+        // hostile guard's `$( )`/backticks would still expand.
+        out.push_str(&format!("if [ -e {q} ]; then printf 'guard hit: %s exists; skipping\\n' {q}; exit 0; fi\n"));
     }
     let cmd = meta.cmd.iter().map(|a| crate::server::transport::shell_quote(a)).collect::<Vec<_>>().join(" ");
     out.push_str(&format!("exec {cmd}\n"));
@@ -433,20 +436,44 @@ pub fn running_log(root: &Path, base: &str) -> PathBuf {
 mod tests {
     use super::read_env_file;
 
-    /// A hostile guard path must reach the echo line only in its
-    /// shell-quoted form: raw `$()`, backticks, or `"` inside the
-    /// double-quoted message would execute or break out when the
-    /// guard-hit branch runs.
+    /// A hostile guard path must reach the guard line only as a
+    /// single-quoted printf argv: inside a double-quoted message the
+    /// quotes are literal characters and `$()`, backticks, or `"`
+    /// would still expand when the guard-hit branch runs.
     #[test]
     fn guard_echo_uses_quoted_form() {
         for guard in ["runs/$(touch X).json", "runs/evil\".json", "runs/`id`.json"] {
             let meta = crate::proto::task::TaskMeta { slug: "t".into(), guard: Some(guard.into()), workdir: None, env: Default::default(), cmd: vec!["true".into()], timeout_s: None };
             let body = super::render_task(&meta);
             let q = crate::server::transport::shell_quote(guard);
-            let line = format!("if [ -e {q} ]; then echo \"guard hit: {q} exists; skipping\"; exit 0; fi");
+            let line = format!("if [ -e {q} ]; then printf 'guard hit: %s exists; skipping\\n' {q}; exit 0; fi");
             assert!(body.contains(&line), "body missing quoted guard line for {guard:?}: {body}");
-            assert!(!body.contains(&format!("echo \"guard hit: {guard}")), "raw guard leaked into echo for {guard:?}");
+            // The quoted guard must never sit inside a double-quoted
+            // string, where its `$()`/backticks would re-expand.
+            assert!(!body.contains(&format!("\"guard hit: {q}")), "quoted guard inside a double-quoted echo for {guard:?}");
         }
+    }
+
+    /// Bash smoke check: run the rendered body with a live hostile
+    /// guard and assert the `$( )` payload never executes — the
+    /// message prints the guard literally.
+    #[test]
+    fn guard_hit_branch_cannot_expand() {
+        let root = std::env::temp_dir().join(format!("shunt-guardhit-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pwned = root.join("PWNED");
+        // Relative guard name (bash runs with cwd=root) so the
+        // `$( )` payload carries no slashes of its own.
+        let guard = root.join("x$(touch PWNED).json");
+        std::fs::write(&guard, "").unwrap();
+        let meta = crate::proto::task::TaskMeta { slug: "t".into(), guard: Some("x$(touch PWNED).json".into()), workdir: None, env: Default::default(), cmd: vec!["true".into()], timeout_s: None };
+        let body = super::render_task(&meta);
+        let out = std::process::Command::new("bash").arg("-c").arg(&body).current_dir(&root).output().unwrap();
+        assert!(out.status.success(), "bash exited {:?}: {}", out.status, String::from_utf8_lossy(&out.stderr));
+        assert!(!pwned.exists(), "guard payload executed: {body}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("guard hit: x$(touch PWNED).json exists; skipping"), "unexpected stdout: {stdout}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// The env file is literal KEY=value (design.md §3.12): spaces

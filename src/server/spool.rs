@@ -63,7 +63,10 @@ fn merge_file_directives(body: &str, meta: &TaskMeta) -> String {
     }
     let guard_line = meta.guard.as_ref().map(|g| {
         let q = shell_quote(g);
-        format!("if [ -e {q} ]; then echo \"guard hit: {q} exists; skipping\"; exit 0; fi\n")
+        // printf %s, not a double-quoted echo: inside `"..."` the
+        // single quotes around {q} are literal and a hostile guard's
+        // `$( )`/backticks would still expand (same fix as exec.rs).
+        format!("if [ -e {q} ]; then printf 'guard hit: %s exists; skipping\\n' {q}; exit 0; fi\n")
     });
 
     let mut out = String::new();
@@ -320,9 +323,11 @@ mod tests {
             let meta = TaskMeta { slug: "t".into(), guard: Some(guard.into()), workdir: None, env: Default::default(), cmd: Vec::new(), timeout_s: None };
             let out = merge_file_directives("#!/usr/bin/env bash\necho hi\n", &meta);
             let q = shell_quote(guard);
-            let line = format!("if [ -e {q} ]; then echo \"guard hit: {q} exists; skipping\"; exit 0; fi");
+            let line = format!("if [ -e {q} ]; then printf 'guard hit: %s exists; skipping\\n' {q}; exit 0; fi");
             assert!(out.contains(&line), "merged body missing quoted guard line for {guard:?}: {out}");
-            assert!(!out.contains(&format!("echo \"guard hit: {guard}")), "raw guard leaked into echo for {guard:?}");
+            // The quoted guard must never sit inside a double-quoted
+            // string, where its `$()`/backticks would re-expand.
+            assert!(!out.contains(&format!("\"guard hit: {q}")), "quoted guard inside a double-quoted echo for {guard:?}");
         }
     }
 
