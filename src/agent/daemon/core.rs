@@ -85,8 +85,11 @@ impl Daemon {
         let now = std::time::Instant::now();
         for (pid, h) in self.runpids.iter_mut() {
             // Leader already reaped: the deadline check must not mark
-            // a finished task timed_out while its pgid drains.
-            if h.exited.is_some() {
+            // a finished task timed_out while its pgid drains. But a
+            // task ALREADY marked timed_out still owes the kill_at
+            // escalation — the leader may have died on TERM while
+            // detached grandchildren hold the group (§3.9a remnant).
+            if h.exited.is_some() && h.timed_out.is_none() {
                 continue;
             }
             if h.gone {
@@ -160,11 +163,12 @@ impl Daemon {
                 }
             } else if h.kill_at.is_some_and(|k| now >= k) {
                 h.kill_at = None;
+                // Reached on both live and reaped leaders: §3.9a
+                // group gate, same as kill_task's escalation — a
+                // leader that died on TERM while its group lives
+                // still gets KILL (the live pgid is unrecyclable);
+                // only a fully dead group is left alone.
                 if let Some((pgid, start)) = exec::read_pid_file(&self.root, "running", &h.base) {
-                    // §3.9a group gate, same as kill_task's
-                    // escalation: a leader that died on TERM while its
-                    // group lives still gets KILL (the live pgid is
-                    // unrecyclable); only a fully dead group is left.
                     if exec::pgid_is_task_group(pgid, start) {
                         exec::signal_pgid(pgid, "KILL");
                         dlog(&self.root, "task_timeout_kill", ev(json!({"task": h.base, "pgid": pgid})));
@@ -187,7 +191,14 @@ impl Daemon {
                 Some(ex) => {
                     if !exec::pgid_alive(*pid) {
                         done.push((*pid, h.base.clone(), ex.rc, false));
-                    } else if now >= ex.deadline {
+                    } else if now >= ex.deadline && h.kill_at.is_none() {
+                        // The drain grace (default 5 s) can expire
+                        // before a pending timeout-KILL (10 s grace):
+                        // linger-finalizing then would drop the handle
+                        // and orphan the remnant group un-KILL'd. Hold
+                        // the entry until enforce_timeouts has fired
+                        // (or refused) the escalation; the entry still
+                        // finalizes while the pgid lives, per §3.9.
                         done.push((*pid, h.base.clone(), ex.rc, true));
                     }
                 }
@@ -547,6 +558,7 @@ fn run_registered(root: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::agent::exec;
     use fs2::FileExt;
 
     /// Fail closed on an unreadable pending/ (§3.11): `pending` as a
@@ -594,6 +606,50 @@ mod tests {
         let child = &mut d.runpids.get_mut(&pid).unwrap().child;
         let _ = child.kill();
         let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// §3.13 remnant escalation: a task already marked timed_out whose
+    /// leader died on TERM but whose detached grandchild holds the pgid
+    /// must still get the kill_at KILL — the §3.9a gate accepts a
+    /// leader-dead-group-live remnant because a live pgid cannot be
+    /// recycled. Before the fix, `exited` skipped the whole enforce
+    /// pass and the escalation never ran.
+    #[test]
+    fn exited_timeout_still_escalates_kill_to_remnant_group() {
+        use std::os::unix::process::CommandExt;
+        let root = std::env::temp_dir().join(format!("shunt-remnant-kill-test-{}", std::process::id()));
+        let entry = root.join("running/t-remnant");
+        std::fs::create_dir_all(&entry).unwrap();
+        // Leader spawns a TERM-immune sleeper in its own process group
+        // (process_group(0) -> pgid = leader pid, children inherit) and
+        // exits — the `cmd &` remnant pattern from tests/kill.rs.
+        let mut child = std::process::Command::new("bash").args(["-c", "(trap '' TERM; exec sleep 300) & exit 0"]).process_group(0).spawn().unwrap();
+        let pgid = child.id();
+        let _ = child.wait();
+        // Wait for the remnant to be running so the group is live at
+        // enforce time; the leader is already dead.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !exec::pgid_alive(pgid) {
+            assert!(std::time::Instant::now() < deadline, "remnant group never came up");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Pid file with no start_time: the leader is dead so only the
+        // remnant clause of the §3.9a gate can pass.
+        std::fs::write(entry.join("pid"), format!("{pgid}\n")).unwrap();
+        let now = std::time::Instant::now();
+        let h = super::RunHandle { base: "t-remnant".into(), child, timeout_s: Some(1), deadline: Some(now - std::time::Duration::from_secs(20)), timed_out: Some(1), kill_at: Some(now - std::time::Duration::from_secs(1)), gone: false, unenforceable_warned: 0, exited: Some(super::Exited { rc: 143, deadline: now + std::time::Duration::from_secs(60) }) };
+        let mut d = super::Daemon { root: root.clone(), runpids: [(pgid, h)].into_iter().collect(), last_workers: None, got_signal: Default::default() };
+        d.enforce_timeouts();
+        let h = &d.runpids[&pgid];
+        assert!(h.kill_at.is_none(), "elapsed kill_at must be consumed");
+        let log = std::fs::read_to_string(root.join("daemon.log")).unwrap();
+        assert!(log.contains("task_timeout_kill"), "remnant group must get the KILL escalation: {log}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while exec::pgid_alive(pgid) {
+            assert!(std::time::Instant::now() < deadline, "remnant group survived its timeout KILL");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
