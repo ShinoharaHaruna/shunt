@@ -76,10 +76,20 @@ fn nvidia_smi() -> Option<(Option<String>, Option<String>, Option<String>)> {
     Some((gpu, driver, cuda))
 }
 
+/// Parse `df -Pk` output: take the Available column (4th field) from
+/// the last line and convert 1 KiB blocks to GiB. `-P` forbids line
+/// wrapping, so the last line is always the data row; still fail
+/// gracefully on short/garbage lines.
+fn parse_df_pk(out: &str) -> Option<f64> {
+    let line = out.lines().last()?;
+    let kib: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
+    Some(kib as f64 / 1_048_576.0)
+}
+
 fn disk_free_gb(path: &str) -> Option<f64> {
-    let out = run("df", &["-B1", "--output=avail", path])?;
-    let avail: u64 = out.lines().last()?.trim().parse().ok()?;
-    Some(avail as f64 / 1_073_741_824.0)
+    // POSIX `df -Pk`: busybox-compatible, unlike GNU-only -B1/--output.
+    let out = run("df", &["-Pk", path])?;
+    parse_df_pk(&out)
 }
 
 /// Can this box do root things: real root (`id -u` = 0) or
@@ -120,4 +130,24 @@ fn python_version() -> Option<String> {
 pub fn collect(deploy_root: &str) -> ProbeReport {
     let (gpu, driver, cuda) = nvidia_smi().unwrap_or((None, None, None));
     ProbeReport { protocol: crate::proto::wire::PROTOCOL_VERSION, gpu, driver, cuda, cores: cgroup_cores(), mem_gb: cgroup_mem_gb().map(|g| (g * 100.0).round() / 100.0), disk_free_gb: disk_free_gb(deploy_root).map(|g| (g * 100.0).round() / 100.0), python: python_version(), can_root: can_root(), shutdown_cmd: shutdown_cmd() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_df_pk;
+
+    #[test]
+    fn parses_df_pk_output() {
+        let out = "Filesystem     1024-blocks     Used Available Capacity Mounted on\n\
+                   /dev/vda1        51473868 20971520  30502348      41% /\n";
+        let gb = parse_df_pk(out).unwrap();
+        assert!((gb - 30502348.0 / 1_048_576.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert_eq!(parse_df_pk(""), None);
+        assert_eq!(parse_df_pk("df: /x: no such\n"), None);
+        assert_eq!(parse_df_pk("a b c\n"), None);
+    }
 }
