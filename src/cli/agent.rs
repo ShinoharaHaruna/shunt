@@ -403,6 +403,11 @@ pub(crate) fn workers_wire_tail(a: &WorkersArgs) -> Vec<String> {
 /// newline is a terminator, not an empty extra line; fewer than
 /// `n` lines returns the whole buffer.
 pub(crate) fn tail_bytes(bytes: &[u8], n: usize) -> &[u8] {
+    // `tail -n 0` prints nothing; the `seen == n` check below can only
+    // fire after `seen += 1`, so n = 0 must early-return here.
+    if n == 0 {
+        return &[];
+    }
     let mut end = bytes.len();
     if end > 0 && bytes[end - 1] == b'\n' {
         end -= 1;
@@ -561,6 +566,9 @@ mod tests {
         assert_eq!(tail_bytes(b"a\nb\nc", 1), b"c");
         assert_eq!(tail_bytes(b"", 3), b"");
         assert_eq!(tail_bytes(b"one\n", 1), b"one\n");
+        // L10 regression: -n 0 must print nothing, not the whole file.
+        assert_eq!(tail_bytes(b"a\nb\nc\n", 0), b"");
+        assert_eq!(tail_bytes(b"", 0), b"");
     }
 
     #[test]
