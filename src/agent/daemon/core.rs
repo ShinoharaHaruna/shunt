@@ -307,14 +307,17 @@ impl Daemon {
                     // would silently drop the old handle, leaving its
                     // running/ entry a pid-less ghost — invisible to
                     // kill, counted as running, blocking idle-shutdown.
-                    // Collision requires the old leader reaped (a live
-                    // leader's pid cannot be recycled), so exited is
-                    // Some; force-finalize it out first and log loud.
+                    // Collision requires the old leader dead (a live
+                    // leader's pid cannot be recycled), but the OS can
+                    // hand the pid out in the window between the
+                    // leader's exit and reap() observing it — so
+                    // exited may still be None. Force-finalize it out
+                    // first and log loud.
                     if let Some(mut stale) = self.runpids.remove(&pid) {
-                        // If the leader somehow wasn't reaped yet,
-                        // do it now — dropping Child does not wait.
-                        let _ = stale.child.try_wait();
-                        let rc = stale.exited.map(|e| e.rc).unwrap_or(1);
+                        // If reap() hasn't observed the exit yet, do
+                        // it now — dropping Child does not wait — and
+                        // recover the real rc rather than fabricate 1.
+                        let rc = stale.exited.map(|e| e.rc).or_else(|| stale.child.try_wait().ok().flatten().map(|s| exec::status_rc(&s))).unwrap_or(1);
                         dlog(
                             &self.root,
                             "pid_reused",
