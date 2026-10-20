@@ -422,12 +422,26 @@ pub fn finalize(root: &Path, base: &str, rc: i32, timeout_s: Option<u64>) -> Res
         // task.sh rename then leaves dest holding `exit` (+ the
         // caller's quarantine still applies to the flat remainder),
         // never a terminal entry without an exit marker.
+        let dest_preexisting = dest.exists();
         std::fs::create_dir_all(&dest)?;
         std::fs::write(dest.join("exit"), format!("{rc}\n"))?;
         if let Some(limit) = timeout_s {
             let _ = std::fs::write(dest.join("timeout"), format!("{limit}\n"));
         }
-        std::fs::rename(running.join(format!("{base}.sh")), dest.join("task.sh")).with_context(|| format!("cannot move {base} to {}", dest.display()))?;
+        if let Err(e) = std::fs::rename(running.join(format!("{base}.sh")), dest.join("task.sh")) {
+            // A `dest` we just created holds ONLY `exit` (+`timeout`):
+            // left behind it reports the task as done/failed via
+            // `list_entries` + `recent_exits` while the caller's
+            // quarantine also lands the flat remainder in failed/ —
+            // a phantom double-outcome. Remove it, but only when this
+            // call created it: a pre-existing `dest` may be a real
+            // older same-named entry whose data `remove_dir_all`
+            // would destroy.
+            if !dest_preexisting {
+                let _ = std::fs::remove_dir_all(&dest);
+            }
+            return Err(e).with_context(|| format!("cannot move {base} to {}", dest.display()));
+        }
         let log = running.join(format!("{base}.sh.log"));
         if log.exists() {
             std::fs::rename(&log, dest.join("log"))?;
@@ -696,6 +710,34 @@ mod tests {
         // The caller's fallback still sees a real entry to quarantine.
         super::quarantine(&root, "running", "0001_t", "finalize failed (rc 0)").unwrap();
         assert!(root.join("failed").join("0001_t").join("shunt_error").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A failed task.sh rename on a legacy flat entry must not strand
+    /// the just-created `dest` holding only `exit`: `list_entries`
+    /// counts any dir and `recent_exits` reads its `exit`, so the
+    /// task would report done (rc 0) while the caller's quarantine
+    /// also lands the flat remainder in failed/ — a phantom
+    /// double-outcome.
+    #[test]
+    fn finalize_flat_tasksh_rename_failure_removes_dest() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("shunt-finflat-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let running = root.join("running");
+        std::fs::create_dir_all(&running).unwrap();
+        std::fs::write(running.join("0001_t.sh"), "exit 0\n").unwrap();
+        std::fs::write(running.join("0001_t.sh.log"), "=== task 0001_t\n").unwrap();
+        std::fs::write(running.join("0001_t.sh.pid"), "12345\n").unwrap();
+        // Rename needs write perm on both parent dirs; read-only
+        // running/ fails the rename AFTER dest/exit were written.
+        std::fs::set_permissions(&running, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(super::finalize(&root, "0001_t", 0, None).is_err());
+        std::fs::set_permissions(&running, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!root.join("done").join("0001_t").exists(), "partial done/ entry survived failed rename");
+        // The flat source is untouched so quarantine can still move it.
+        assert!(running.join("0001_t.sh").exists());
+        super::quarantine(&root, "running", "0001_t", "finalize failed (rc 0)").unwrap();
+        assert!(root.join("failed").join("0001_t").join("task.sh").exists());
         std::fs::remove_dir_all(&root).ok();
     }
 }
