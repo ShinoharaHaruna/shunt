@@ -82,9 +82,10 @@ pub(crate) fn remote(name: &str, tail: &[&str], stdin: Option<&str>, expect_json
 /// What `remote` prints for one chunk of remote stdout. Wire ops
 /// answer a `{"protocol":1,…}` object that can sit inside login-shell
 /// noise (motd/.bashrc banners — design.md §5): extract renders the
-/// object pretty and drops the noise. A `protocol`-carrying object
-/// that fails extraction is binary drift — surface §5's steering
-/// error rather than printing the stale line raw.
+/// object pretty and drops the noise. A JSON object that fails
+/// extraction — wrong version or no `protocol` at all — is binary
+/// drift: surface §5's steering error rather than printing the
+/// stale line raw. Pure-noise output still prints verbatim.
 ///
 /// `expect_json` is the op's §5 response kind: wire ops answering a
 /// `{protocol:1,…}` object pass `true`; text ops (`logs`) pass `false`
@@ -97,7 +98,7 @@ fn remote_render(out: &str, expect_json: bool) -> Result<String> {
     match crate::proto::wire::extract(out) {
         Ok(v) => Ok(format!("{}\n", serde_json::to_string_pretty(&v)?)),
         Err(e) => {
-            let drift = out.lines().any(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok().is_some_and(|v| v.get("protocol").is_some()));
+            let drift = out.lines().any(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok().is_some_and(|v| v.is_object()));
             if drift {
                 return Err(e);
             }
@@ -347,6 +348,16 @@ mod tests {
         assert_eq!(remote_render("no trailing nl", true).unwrap(), "no trailing nl\n");
 
         let err = remote_render("banner\n{\"protocol\":2,\"ok\":true}\n", true).unwrap_err().to_string();
+        assert!(err.contains("protocol mismatch"), "{err}");
+
+        // A pre-v1 remote answering a bare JSON object (no `protocol`)
+        // is drift too — the §5 steering error must surface, not a
+        // verbatim print that exits 0.
+        let err = remote_render("{\"ok\":true,\"name\":\"0100_x\"}\n", true).unwrap_err().to_string();
+        assert!(err.contains("client bootstrap"), "{err}");
+
+        // Garbage around a protocol-bearing stale answer still errors.
+        let err = remote_render("\x1b[0mgarbage\n{\"protocol\":2}\ntrailing", true).unwrap_err().to_string();
         assert!(err.contains("protocol mismatch"), "{err}");
     }
 
