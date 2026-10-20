@@ -85,7 +85,7 @@ impl Daemon {
                 // Deadline passed: the task exceeded its budget
                 // regardless of how it dies from here.
                 if let Some((pgid, start)) = exec::read_pid_file(&self.root, "running", &h.base) {
-                    if exec::pgid_is_task_leader(pgid, start) {
+                    if exec::pgid_is_task_group(pgid, start) {
                         exec::signal_pgid(pgid, "TERM");
                     }
                 }
@@ -95,7 +95,11 @@ impl Daemon {
             } else if h.kill_at.is_some_and(|k| now >= k) {
                 h.kill_at = None;
                 if let Some((pgid, start)) = exec::read_pid_file(&self.root, "running", &h.base) {
-                    if exec::pgid_is_task_leader(pgid, start) {
+                    // §3.9a group gate, same as kill_task's
+                    // escalation: a leader that died on TERM while its
+                    // group lives still gets KILL (the live pgid is
+                    // unrecyclable); only a fully dead group is left.
+                    if exec::pgid_is_task_group(pgid, start) {
                         exec::signal_pgid(pgid, "KILL");
                         dlog(&self.root, "task_timeout_kill", ev(json!({"task": h.base, "pgid": pgid})));
                     }
@@ -286,15 +290,15 @@ impl Daemon {
     /// logged: a restarted daemon drains the queue and honors it.
     fn on_term(&mut self) -> ! {
         dlog(&self.root, "signal", ev(json!({"forwarded_to": self.runpids.len()})));
-        // §3.1 hard rule: signal only a pgid still provably led by
-        // the task's leader (same pid-file + start_time gate as
-        // kill_task). A handle whose leader already exited may have
-        // had its pgid recycled into a foreign process group — its
-        // lingering grandchildren are left behind rather than risk
-        // hitting a stranger.
+        // §3.9a group gate, same as kill_task: signal a pgid still
+        // provably naming the task's group — leader-verified, or
+        // leader dead but group live. A live pgid cannot be recycled,
+        // so a remnant group of detached grandchildren is still ours
+        // to kill; only a fully dead group (pgid possibly recycled to
+        // a stranger) is skipped.
         let signal_verified = |root: &Path, h: &RunHandle, sig: &str| {
             if let Some((pgid, start)) = exec::read_pid_file(root, "running", &h.base) {
-                if exec::pgid_is_task_leader(pgid, start) {
+                if exec::pgid_is_task_group(pgid, start) {
                     exec::signal_pgid(pgid, sig);
                 }
             }

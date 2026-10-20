@@ -271,14 +271,29 @@ pub fn pgid_is_task_leader(pgid: u32, recorded_start: Option<u64>) -> bool {
     }
 }
 
+/// Signal gate (design.md §3.9a): the recorded pgid provably still
+/// names this task's group when EITHER the leader check above holds,
+/// OR the leader pid is dead while the group still holds members — a
+/// pgid cannot be recycled while its group is live, so a live remnant
+/// is necessarily this task's own leftover group (detached
+/// grandchildren from `cmd &` survive a leader that exits on TERM).
+/// Only a fully dead group fails the gate: there the pgid may have
+/// been recycled to a stranger, and signaling must not happen. A live
+/// pid at `pgid` that fails the leader check is the recycled case
+/// (foreign leader took the pgid) — also refused.
+pub fn pgid_is_task_group(pgid: u32, recorded_start: Option<u64>) -> bool {
+    pgid_is_task_leader(pgid, recorded_start) || (proc_pgrp_start(pgid).is_none() && pgid_alive(pgid))
+}
+
 /// TERM → 10×1 s → KILL on the task's recorded pgid. The pgid comes
-/// only from the entry's `pid` file, never from a name match, and is
-/// verified as the task's leader before every signal — a reaped pid
-/// recycled into a foreign process group is reported `Gone`, not
-/// signaled (design.md §3.1).
+/// only from the entry's `pid` file, never from a name match, and
+/// every signal passes the §3.9a group gate: leader-verified, or
+/// leader dead but the group still live (a live pgid is unrecyclable,
+/// so the remnant is provably ours). A fully dead group — pgid free
+/// to be recycled — reports `Gone` and is never signaled.
 pub fn kill_task(root: &Path, task_name: &str) -> Result<KillOutcome> {
     let (pgid, start) = read_pid_file(root, "running", task_name).with_context(|| format!("no pid file for {task_name}"))?;
-    if !pgid_is_task_leader(pgid, start) {
+    if !pgid_is_task_group(pgid, start) {
         return Ok(KillOutcome::Gone);
     }
     // A TERM that cannot be sent (EPERM, bad arg) is an error, not
@@ -294,9 +309,10 @@ pub fn kill_task(root: &Path, task_name: &str) -> Result<KillOutcome> {
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
-    // Re-verify before escalating: the group may have died on TERM
-    // and the pgid been recycled during the grace window.
-    if !pgid_is_task_leader(pgid, start) {
+    // Re-verify before escalating (§3.9a): a leader that exited on
+    // TERM while its group lives on still gets KILL — the live pgid
+    // cannot name a stranger. Only a fully drained group is skipped.
+    if !pgid_is_task_group(pgid, start) {
         return Ok(KillOutcome::Signaled { pgid, escalated: false });
     }
     match signal_pgid(pgid, "KILL") {

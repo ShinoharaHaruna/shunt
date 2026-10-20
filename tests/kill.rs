@@ -64,6 +64,34 @@ fn kill_refuses_recycled_pgid() {
 }
 
 #[test]
+fn kill_dead_leader_still_kills_remnant_group() {
+    // §3.9a remnant case: the leader exits while a detached
+    // grandchild keeps the process group alive (the `cmd &`
+    // pattern). The pgid still provably names the task's group — a
+    // live pgid cannot be recycled — so kill must TERM, then
+    // escalate to KILL instead of reporting the remnant unreachable.
+    let q = Q::new("killremnant");
+    use std::os::unix::process::CommandExt;
+    // Leader spawns a TERM-immune sleeper in its own process group
+    // (process_group(0) → pgid = leader pid, children inherit) and
+    // exits immediately — mimicking a task leader that dies on TERM.
+    let leader = Command::new("bash").args(["-c", "(trap '' TERM; exec sleep 300) & exit 0"]).process_group(0).spawn().unwrap();
+    let pgid = leader.id();
+    let mut leader = leader;
+    let _ = leader.wait();
+    // Wait for the remnant member to be running before writing the
+    // pid file, so the group is demonstrably live at kill time.
+    wait_until(|| Command::new("kill").args(["-0", "--", &format!("-{pgid}")]).status().map(|s| s.success()).unwrap_or(false), 5, "remnant group alive");
+    std::fs::create_dir_all(q.root.join("running/0302_remnant")).unwrap();
+    std::fs::write(q.root.join("running/0302_remnant/task.sh"), sleep_task()).unwrap();
+    std::fs::write(q.root.join("running/0302_remnant/pid"), format!("{pgid}\n")).unwrap();
+    let out = q.run_ok(&["kill", "remnant"]);
+    assert!(out.contains("SIGKILL"), "leader-dead remnant must escalate to KILL, got {out}");
+    // The remnant group must actually be dead, not just reported.
+    wait_until(|| !Command::new("kill").args(["-0", "--", &format!("-{pgid}")]).status().map(|s| s.success()).unwrap_or(false), 5, "remnant group reaped");
+}
+
+#[test]
 fn kill_dead_leader_reports_gone() {
     // The task's leader pid is simply dead (already reaped/finalized
     // elsewhere): kill must not claim a kill.
