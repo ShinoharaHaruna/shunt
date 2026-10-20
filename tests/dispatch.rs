@@ -28,11 +28,14 @@ struct FakeTransport {
     /// `daemon.alive` in the `status` answer; false exercises the
     /// auto-heal `start` path.
     daemon_alive: bool,
+    /// When set, `enqueue` returns this raw wire line instead of the
+    /// normal `{ok,name}` ack — exercises malformed-ack handling.
+    ack_line: Option<String>,
     calls: Mutex<Vec<String>>,
 }
 
 fn fake(pending: &Path) -> FakeTransport {
-    FakeTransport { pending: pending.to_path_buf(), fail_enqueue: false, down: false, done_recent: Vec::new(), drift: false, daemon_alive: true, calls: Mutex::new(Vec::new()) }
+    FakeTransport { pending: pending.to_path_buf(), fail_enqueue: false, down: false, done_recent: Vec::new(), drift: false, daemon_alive: true, ack_line: None, calls: Mutex::new(Vec::new()) }
 }
 
 impl Transport for FakeTransport {
@@ -60,6 +63,9 @@ impl Transport for FakeTransport {
                 let dir = self.pending.join(name);
                 std::fs::create_dir_all(&dir)?;
                 std::fs::write(dir.join("task.sh"), body)?;
+                if let Some(line) = &self.ack_line {
+                    return Ok(format!("{line}\n"));
+                }
                 Ok(format!(r#"{{"protocol":1,"ok":true,"name":"{name}","client":"{}"}}"#, client.name))
             }
             _ => Ok(r#"{"protocol":1,"ok":true}"#.into()),
@@ -182,6 +188,33 @@ fn bad_spool_entry_quarantined_good_delivers() -> Result<()> {
     assert!(dir.join("zzz_corrupt.json.bad").exists());
     assert!(dir.join("zzz_corrupt.sh.bad").exists());
     assert!(!dir.join("zzz_corrupt.json").exists());
+
+    std::fs::remove_dir_all(&home).ok();
+    Ok(())
+}
+/// A clean `{ok:true}` ack whose `name` is missing, empty, or not
+/// `NNNN_<slug>` is a failed push: the spool entry is retained and
+/// no ledger record is written (a `queue_name:""` entry would
+/// report `unknown` forever, design.md §4.6).
+#[test]
+fn malformed_ack_retains_entry_and_skips_ledger() -> Result<()> {
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, _client) = fixture("badack")?;
+    let pending = home.join("pending");
+    std::fs::create_dir_all(&pending)?;
+
+    for (id, line) in [
+        ("b1", r#"{"protocol":1,"ok":true}"#),                  // name missing
+        ("b2", r#"{"protocol":1,"ok":true,"name":""}"#),        // name empty
+        ("b3", r#"{"protocol":1,"ok":true,"name":"zzz !!!"}"#), // not NNNN_<slug>
+        ("b4", r#"{"protocol":1,"ok":true,"name":"12345_x"}"#), // 5-digit seq
+    ] {
+        spool::stage(&entry(id, &format!("a-{id}")), "echo hi\n")?;
+        let t = FakeTransport { ack_line: Some(line.into()), ..fake(&pending) };
+        assert_eq!(dispatch::sweep_with(&t)?, 0, "{line}");
+        assert!(shunt::server::tasks::load(id).is_err(), "ledger must not record {line}");
+    }
+    assert_eq!(spool::list()?.len(), 4, "all bad-ack entries retained for retry");
 
     std::fs::remove_dir_all(&home).ok();
     Ok(())

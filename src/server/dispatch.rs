@@ -57,11 +57,26 @@ fn push(t: &dyn Transport, client: &registry::ClientEntry, entry: &crate::proto:
     // of degrading to a generic "enqueue rejected".
     let v = crate::proto::wire::extract(&out).map_err(|e| anyhow::anyhow!("enqueue on {}: {e:#}", client.name))?;
     if v.get("ok").and_then(|o| o.as_bool()) == Some(true) {
-        Ok(v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string())
+        let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        // A clean ack MUST carry the queue entry name: an empty or
+        // malformed one would land in the ledger as "" / garbage and
+        // match nothing in any status list forever (`task show`
+        // reports `unknown` with no diagnostic, design.md §4.6).
+        // Treat it as a failed push — the spool entry stays for retry.
+        anyhow::ensure!(queue_name_ok(name), "enqueue on {} acked ok but name {name:?} is not NNNN_<slug>", client.name);
+        Ok(name.to_string())
     } else {
         let msg = v.get("error").and_then(|e| e.as_str()).unwrap_or("enqueue rejected");
         anyhow::bail!("enqueue on {} failed: {msg}", client.name)
     }
+}
+
+/// A real queue entry name is `NNNN_<slug>` (design.md §3.1): four
+/// digits, `_`, then a non-empty tail in the `sanitize_slug` charset
+/// `[A-Za-z0-9_.-]`. Anything else on a clean ack is a lying remote.
+fn queue_name_ok(name: &str) -> bool {
+    let Some((seq, tail)) = name.split_once('_') else { return false };
+    seq.len() == 4 && seq.bytes().all(|b| b.is_ascii_digit()) && !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
 
 /// One sweep: push every spool entry whose client is reachable.
