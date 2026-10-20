@@ -82,16 +82,51 @@ impl Daemon {
                 if !expired {
                     continue;
                 }
-                // Deadline passed: the task exceeded its budget
-                // regardless of how it dies from here.
-                if let Some((pgid, start)) = exec::read_pid_file(&self.root, "running", &h.base) {
-                    if exec::pgid_is_task_group(pgid, start) {
-                        exec::signal_pgid(pgid, "TERM");
+                // Deadline passed: TERM through the same pid-file +
+                // §3.9a group gate as kill_task. `timed_out` is
+                // stamped ONLY when enforcement actually happened —
+                // TERM delivered, or the group provably died on its
+                // own (ESRCH race after the gate). The §3.9 marker
+                // means "killed for exceeding budget": a task that
+                // merely outlived its deadline unsignaled must not
+                // wear it — a clean rc-0 finish then correctly lands
+                // in done/, and a non-zero rc in failed/ as a plain
+                // failure, not a budget death.
+                match exec::read_pid_file(&self.root, "running", &h.base) {
+                    Some((pgid, start)) if exec::pgid_is_task_group(pgid, start) => match exec::signal_pgid(pgid, "TERM") {
+                        exec::SignalOutcome::Delivered | exec::SignalOutcome::Gone => {
+                            h.timed_out = h.timeout_s;
+                            h.kill_at = Some(now + TIMEOUT_GRACE);
+                            dlog(&self.root, "task_timeout", ev(json!({"task": h.base, "pgid": pid, "limit_s": h.timed_out})));
+                        }
+                        // Signal undeliverable but group alive
+                        // (EPERM, transient /proc fault): stay
+                        // unmarked and retry next poll — the deadline
+                        // stays expired, so a clearing fault is
+                        // enforced late rather than never.
+                        exec::SignalOutcome::Failed(e) => {
+                            dlog(
+                                &self.root,
+                                "timeout_unenforceable",
+                                ev(json!({"task": h.base, "pgid": pgid, "error": e.to_string(),
+                                   "warning": "deadline passed but TERM undeliverable; budget stays expired and enforcement retries next cycle"})),
+                            );
+                        }
+                    },
+                    // No pid file (the pid_write_failed blind spot) or
+                    // the §3.9a gate refused (group fully dead or pgid
+                    // recycled): nothing was signaled, so nothing is
+                    // marked. A dead group is finalized by reap with
+                    // its real rc; a live-but-ungated one retries.
+                    _ => {
+                        dlog(
+                            &self.root,
+                            "timeout_unenforceable",
+                            ev(json!({"task": h.base, "pgid": pid,
+                               "warning": "deadline passed but the task's group cannot be verified (no pid file or gate refused); budget stays expired and enforcement retries next cycle"})),
+                        );
                     }
                 }
-                h.timed_out = h.timeout_s;
-                h.kill_at = Some(now + TIMEOUT_GRACE);
-                dlog(&self.root, "task_timeout", ev(json!({"task": h.base, "pgid": pid, "limit_s": h.timed_out})));
             } else if h.kill_at.is_some_and(|k| now >= k) {
                 h.kill_at = None;
                 if let Some((pgid, start)) = exec::read_pid_file(&self.root, "running", &h.base) {
@@ -495,6 +530,32 @@ mod tests {
         assert!(d.runpids.is_empty(), "nothing may dispatch off an unreadable pending/");
         let log = std::fs::read_to_string(root.join("daemon.log")).unwrap();
         assert!(log.contains("pending_scan_failed"), "scan failure must be loud in daemon.log");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// §3.7/§3.9 timeout marker honesty: when the deadline has passed
+    /// but no TERM can be delivered (here: no pid file — the
+    /// pid_write_failed blind spot), `timed_out`/`kill_at` must stay
+    /// unset and a `timeout_unenforceable` WARNING logged. The marker
+    /// means "killed for exceeding budget"; stamping it on a task
+    /// that was never signaled would force a clean rc-0 finish into
+    /// failed/ as a fake budget death.
+    #[test]
+    fn unenforceable_timeout_stays_unmarked() {
+        let root = std::env::temp_dir().join(format!("shunt-timeout-test-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("running")).unwrap();
+        let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = child.id();
+        let h = super::RunHandle { base: "t-timeout".into(), child, timeout_s: Some(1), deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)), timed_out: None, kill_at: None, exited: None };
+        let mut d = super::Daemon { root: root.clone(), runpids: [(pid, h)].into_iter().collect(), last_workers: None, got_signal: Default::default() };
+        d.enforce_timeouts();
+        let h = &d.runpids[&pid];
+        assert!(h.timed_out.is_none() && h.kill_at.is_none(), "no signal delivered — nothing may be marked");
+        let log = std::fs::read_to_string(root.join("daemon.log")).unwrap();
+        assert!(log.contains("timeout_unenforceable"), "undeliverable TERM must be loud in daemon.log");
+        let child = &mut d.runpids.get_mut(&pid).unwrap().child;
+        let _ = child.kill();
+        let _ = child.wait();
         let _ = std::fs::remove_dir_all(&root);
     }
 
