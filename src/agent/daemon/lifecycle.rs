@@ -73,7 +73,16 @@ fn alive_impl(root: &Path, evict_stale: bool, read_cmdline: impl Fn(u32) -> std:
         Probe::Live | Probe::Unknown => Ok(Some(pid)),
         Probe::Dead => {
             if evict_stale {
-                let _ = std::fs::remove_file(&pidf);
+                // TOCTOU: `run()` writes its pidfile after taking
+                // daemon.lock while alive() callers hold no lock, so a
+                // new daemon's live pidfile can land between our read
+                // and this remove. Re-read and remove only when the
+                // content is still the pid we proved dead; a changed
+                // pidfile is owned by a live daemon (design.md §3.4).
+                let still = std::fs::read_to_string(&pidf).ok().and_then(|s| s.trim().parse::<u32>().ok()) == Some(pid);
+                if still {
+                    let _ = std::fs::remove_file(&pidf);
+                }
             }
             Ok(None)
         }
@@ -215,6 +224,31 @@ mod tests {
         let got = alive_impl(&root, false, foreign).unwrap();
         assert_eq!(got, None);
         assert!(pidf.exists(), "check_alive must never remove a peer's pidfile");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// TOCTOU on the stale-eviction path (M5): a new daemon can write
+    /// its live pidfile between our read and our remove — alive()
+    /// callers hold no lock. The dead-probe re-read must see the
+    /// changed content and leave the file; removing it would strand a
+    /// healthy daemon pidfile-less.
+    #[test]
+    fn dead_probe_keeps_rewritten_pidfile() {
+        let root = std::env::temp_dir().join(format!("shunt-alive-test-{}-r", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pidf = root.join("daemon.pid");
+        std::fs::write(&pidf, format!("{}", std::process::id())).unwrap();
+        // closure stands in for the race: new daemon rewrites the
+        // pidfile after our read, then our probe proves the OLD pid dead
+        let pidf2 = pidf.clone();
+        let race = move |_| -> std::io::Result<Vec<u8>> {
+            std::fs::write(&pidf2, format!("{}", std::process::id() + 1)).unwrap();
+            Ok(argv(&["sleep", "30"]))
+        };
+        let got = alive_impl(&root, true, race).unwrap();
+        assert_eq!(got, None);
+        assert!(pidf.exists(), "pidfile rewritten by a live daemon must not be removed");
+        assert_eq!(std::fs::read_to_string(&pidf).unwrap().trim().parse::<u32>().unwrap(), std::process::id() + 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 
