@@ -42,7 +42,7 @@ Not configured — repo is unpublished. Git hooks + `just check` are the only ga
 ## Conventions
 
 - Spec-first: `docs/design.md` §3 catalogs the queue state machine's edge cases (orphan requeue, pgid isolation, idle-shutdown) ported from the bash oracle; implement to the spec, don't invent semantics.
-- Skeleton phase: most handlers are stubs that print parsed intent and exit "not yet implemented". Registry CRUD and `mktask` are real.
+- Implementation phase: the tree is implemented end to end — registry CRUD, `mktask`, spool, dispatcher, ssh/local transports, tunnel, and the full client queue state machine (design.md §3). No stubbed handlers remain.
 - Client queue is a filesystem state machine: `pending/ running/ done/ failed/` under `$QROOT`; resolution order `--root` > `$SHUNT_ROOT` > configured qroot.
 - Registry lives at `~/.config/shunt/` (`$SHUNT_HOME` overrides for tests), human-editable TOML, one file per client/project.
 - Never put real hostnames, ports, or key paths in tracked files — use placeholders (see `etc/vendors/autodl.toml` FILL markers).

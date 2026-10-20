@@ -25,7 +25,7 @@ pub struct ClientEntry {
     /// Local transport: exec timeout in seconds.
     #[serde(default)]
     pub timeout_s: Option<u64>,
-    /// SSH transport: connect timeout override in seconds (default 10).
+    /// SSH transport: connect timeout override in seconds (default 15).
     #[serde(default)]
     pub ssh_timeout_s: Option<u64>,
     /// Command this box execs when idle-shutdown fires. Pushed to

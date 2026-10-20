@@ -1,6 +1,7 @@
 //! Registry: human-editable TOML rows under `~/.config/shunt/`
-//! (`$SHUNT_HOME` overrides for tests). Load/save here is real; the
-//! rest of the server is stubbed.
+//! (`$SHUNT_HOME` overrides for tests). Load/save here is real, as
+//! are the server subsystems that consume it (spool, dispatch,
+//! transports, tunnel).
 //!
 //! Module map:
 //! - `types` — row structs (`ClientEntry`, `ProjectEntry`, ...)

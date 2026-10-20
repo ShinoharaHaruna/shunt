@@ -1,8 +1,8 @@
 //! clap command tree and subcommand dispatch (design.md §10).
 //! Server subcommands operate the registry/spool on the dev machine;
 //! client subcommands are also the SSH wire surface (`--json`).
-//! Registry mutations are real; everything else prints parsed intent
-//! and reports itself unimplemented.
+//! Server handlers dispatch over the ssh/local transports; client
+//! handlers run the filesystem queue state machine (design.md §3).
 
 mod agent;
 mod args;
