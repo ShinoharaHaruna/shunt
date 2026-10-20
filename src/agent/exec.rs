@@ -103,7 +103,26 @@ pub fn spawn_task(root: &Path, task_name: &str) -> Result<(Child, Option<u64>)> 
         cmd.env_remove(v);
     }
     if let Some(threads) = env.get("TASK_THREADS") {
-        let n = if threads == "auto" { crate::agent::probe::cgroup_cores().unwrap_or(1) } else { queue::digits_only(threads).unwrap_or(1) };
+        // Values are literal (§3.12), so exact `auto` is the norm;
+        // the trim only rescues padded whitespace like `auto `.
+        let n = if threads.trim() == "auto" {
+            crate::agent::probe::cgroup_cores().unwrap_or(1)
+        } else {
+            match queue::digits_only(threads) {
+                Some(n) => n,
+                // Fail loud, not silently capped: a value with no
+                // digits (`x`, `half`) carries no number at all, so
+                // capping at 1 without a word would be silent
+                // degradation. Still cap at 1 — unlimited threads
+                // thrash a cgroup-capped box — but say so in the log.
+                None => {
+                    if let Ok(mut log) = std::fs::OpenOptions::new().append(true).open(&log_path) {
+                        let _ = writeln!(log, "=== warn: TASK_THREADS={threads:?} has no digits; capping threads to 1");
+                    }
+                    1
+                }
+            }
+        };
         let n = n.max(1).to_string();
         cmd.env("OMP_NUM_THREADS", &n);
         cmd.env("MKL_NUM_THREADS", &n);
@@ -720,6 +739,32 @@ mod tests {
         assert_eq!(envs, vec![("EARLY".to_string(), "1".to_string()), ("LATE".to_string(), "2".to_string())]);
         assert_eq!(timeout_s, Some(60));
         std::fs::remove_file(&task).ok();
+    }
+
+    /// `TASK_THREADS` is literal env data (§3.12): padded `auto `
+    /// still resolves to the cgroup probe, but a value with no
+    /// digits caps at 1 *and* says so in the task log instead of
+    /// silently degrading the task.
+    #[test]
+    fn task_threads_garbage_caps_loudly_and_padded_auto_works() {
+        for (value, expect_warn) in [("x", true), ("auto ", false)] {
+            let root = std::env::temp_dir().join(format!("shunt-threads-{}-{}", std::process::id(), value.replace(' ', "_")));
+            std::fs::create_dir_all(root.join("running")).unwrap();
+            std::fs::write(root.join("running").join("t.sh"), "#!/usr/bin/env bash\necho \"OMP=$OMP_NUM_THREADS\"\n").unwrap();
+            std::fs::write(root.join("env"), format!("TASK_THREADS={value}\n")).unwrap();
+            let (mut child, _) = super::spawn_task(&root, "t").unwrap();
+            assert_eq!(child.wait().unwrap().code(), Some(0));
+            let log = std::fs::read_to_string(root.join("running").join("t.sh.log")).unwrap();
+            let omp = log.lines().find_map(|l| l.strip_prefix("OMP=")).and_then(|v| v.parse::<u32>().ok());
+            if expect_warn {
+                assert!(log.contains("=== warn: TASK_THREADS=\"x\" has no digits; capping threads to 1"), "log: {log}");
+                assert_eq!(omp, Some(1), "log: {log}");
+            } else {
+                assert!(!log.contains("has no digits"), "log: {log}");
+                assert!(omp.unwrap_or(0) >= 1, "log: {log}");
+            }
+            std::fs::remove_dir_all(&root).ok();
+        }
     }
 
     /// A NUL-bearing `<qroot>/shell` must fall back to bash: spawn
