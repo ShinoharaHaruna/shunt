@@ -231,7 +231,9 @@ pub struct WorkersArgs {
     #[command(subcommand)]
     pub action: Option<WorkerAction>,
     /// Forward to a client over SSH (server side)
-    #[arg(short, long)]
+    // global: spec §10 order is `workers set 5 -c x` — a non-global
+    // flag on the parent rejects args placed after the subcommand.
+    #[arg(short, long, global = true)]
     pub client: Option<String>,
     #[arg(long, global = true)]
     pub root: Option<String>,
@@ -256,7 +258,8 @@ pub struct ShutdownArgs {
     #[command(subcommand)]
     pub action: ShutdownAction,
     /// Forward to a client over SSH (server side)
-    #[arg(short, long)]
+    // global: spec order is `shutdown on -c x` (§10 / arm path §4).
+    #[arg(short, long, global = true)]
     pub client: Option<String>,
     #[arg(long, global = true)]
     pub root: Option<String>,
@@ -304,7 +307,8 @@ pub struct TunnelArgs {
     #[command(subcommand)]
     pub action: TunnelAction,
     /// Client name (default: server.toml `default_client`)
-    #[arg(short, long)]
+    // global: spec §10 documents `tunnel up|down|status -c client`.
+    #[arg(short, long, global = true)]
     pub client: Option<String>,
 }
 
@@ -539,4 +543,67 @@ pub enum ProjectAction {
         #[arg(long)]
         client: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pin `global = true` on `-c` for the subcommand-grouped Args
+    //! structs: spec §10 documents the flag after the action
+    //! (`tunnel up -c x`, `shutdown on -c x`, `workers set 5 -c x`).
+    //! Global flags must keep parsing in the pre-action position too.
+
+    use super::*;
+
+    fn parse(argv: &[&str]) -> Cli {
+        Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?} failed: {e}"))
+    }
+
+    #[test]
+    fn tunnel_client_after_subcommand() {
+        let cli = parse(&["shunt", "tunnel", "up", "-c", "box1"]);
+        let Command::Tunnel(t) = cli.command else { panic!() };
+        assert_eq!(t.client.as_deref(), Some("box1"));
+        assert!(matches!(t.action, TunnelAction::Up { port: None }));
+    }
+
+    #[test]
+    fn tunnel_client_before_subcommand_still_works() {
+        let cli = parse(&["shunt", "tunnel", "-c", "box1", "status"]);
+        let Command::Tunnel(t) = cli.command else { panic!() };
+        assert_eq!(t.client.as_deref(), Some("box1"));
+        assert!(matches!(t.action, TunnelAction::Status));
+    }
+
+    #[test]
+    fn shutdown_client_after_subcommand() {
+        let cli = parse(&["shunt", "shutdown", "on", "-c", "box1", "--json"]);
+        let Command::Shutdown(s) = cli.command else { panic!() };
+        assert_eq!(s.client.as_deref(), Some("box1"));
+        assert!(s.json);
+        assert!(matches!(s.action, ShutdownAction::On { grace_s: None, .. }));
+    }
+
+    #[test]
+    fn shutdown_client_before_subcommand_still_works() {
+        let cli = parse(&["shunt", "shutdown", "-c", "box1", "status"]);
+        let Command::Shutdown(s) = cli.command else { panic!() };
+        assert_eq!(s.client.as_deref(), Some("box1"));
+        assert!(matches!(s.action, ShutdownAction::Status));
+    }
+
+    #[test]
+    fn workers_client_after_subcommand() {
+        let cli = parse(&["shunt", "workers", "set", "5", "-c", "box1"]);
+        let Command::Workers(w) = cli.command else { panic!() };
+        assert_eq!(w.client.as_deref(), Some("box1"));
+        assert!(matches!(w.action, Some(WorkerAction::Set { n: 5 })));
+    }
+
+    #[test]
+    fn workers_get_client_after_subcommand() {
+        let cli = parse(&["shunt", "workers", "get", "-c", "box1"]);
+        let Command::Workers(w) = cli.command else { panic!() };
+        assert_eq!(w.client.as_deref(), Some("box1"));
+        assert!(matches!(w.action, Some(WorkerAction::Get)));
+    }
 }
