@@ -17,15 +17,20 @@ pub(crate) fn requeue_orphans(root: &Path) -> Result<()> {
     let failed = root.join("failed");
     for base in queue::running_list(root)? {
         if let Some((pgid, start)) = exec::read_pid_file(root, "running", &base) {
-            // A recorded start_time that no longer matches means the
-            // pgid was recycled — the leftover group is a stranger's,
-            // so no warning (and nothing is ever signaled here).
-            let ours = start.is_none_or(|s| exec::proc_pgrp_start(pgid).map(|(_, st)| st == s).unwrap_or(false));
-            if ours && exec::pgid_alive(pgid) {
+            // Two live-group proofs (the §3.9a gate, same as the
+            // signal path): a start_time-verified live leader, OR a
+            // dead leader while the group still holds members — a
+            // live pgid can't be recycled, so that remnant is
+            // provably this task's own (detached grandchildren from
+            // `cmd &` survive the leader). A live pid at pgid with a
+            // mismatched start_time is a recycled stranger's group
+            // and stays silent.
+            if exec::pgid_is_task_group(pgid, start) {
                 dlog(
                     root,
                     "orphan_live_pgid",
                     ev(json!({"task": base, "pgid": pgid,
+                           "leader_dead": exec::proc_pgrp_start(pgid).is_none(),
                            "warning": "process group still alive; requeued anyway, rerun should be a no-op via the task guard"})),
                 );
             }
@@ -185,6 +190,38 @@ mod tests {
         requeue_orphans(&root).unwrap();
         assert!(root.join("pending/0100_x.sh").is_file());
         assert!(root.join("pending/0100_x/task.sh").is_file());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A dead leader with a live remnant group (the `cmd &` pattern)
+    /// must still log `orphan_live_pgid` — a live pgid can't be
+    /// recycled, so the group is provably the task's own (§3.9a).
+    /// Before the fix the start_time-match gate silenced this case.
+    #[test]
+    fn requeue_warns_on_leader_dead_remnant_group() {
+        use std::os::unix::process::CommandExt;
+        let root = tmp_root("remnant");
+        let entry = root.join("running/0100_x");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(entry.join("task.sh"), "echo hi\n").unwrap();
+        // Leader spawns a sleeper in its own group and exits —
+        // proc_pgrp_start(pgid) is None while pgid_alive(pgid) holds.
+        let mut child = std::process::Command::new("bash").args(["-c", "(trap '' TERM; exec sleep 300) & exit 0"]).process_group(0).spawn().unwrap();
+        let pgid = child.id();
+        let _ = child.wait();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !exec::pgid_alive(pgid) {
+            assert!(std::time::Instant::now() < deadline, "remnant group never came up");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        std::fs::write(entry.join("pid"), format!("{pgid}\n")).unwrap();
+        requeue_orphans(&root).unwrap();
+        let log = std::fs::read_to_string(root.join("daemon.log")).unwrap();
+        assert!(log.contains("orphan_live_pgid"), "remnant group must warn: {log}");
+        assert!(log.contains("\"leader_dead\":true"), "warning must flag the dead leader: {log}");
+        assert!(root.join("pending/0000_requeued_0100_x").is_dir());
+        // Clean up the remnant so it can't outlive the test.
+        unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
         std::fs::remove_dir_all(&root).ok();
     }
 }
