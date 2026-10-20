@@ -208,6 +208,15 @@ pub fn signal_pgid(pgid: u32, sig: &str) -> SignalOutcome {
     if !(0..64).contains(&num) {
         return SignalOutcome::Failed(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown signal {sig}")));
     }
+    // pgid 0/1 are never task groups — a spawned leader is a real
+    // pid — and they are catastrophically special to kill(2):
+    // `kill(0, sig)` signals the CALLER's own process group (the
+    // daemon's / ssh session's) and `kill(-1, sig)` broadcasts to
+    // every process the uid can reach. A corrupted pid file must not
+    // turn `shunt kill` into a self-kill (design.md §3.9a).
+    if pgid < 2 {
+        return SignalOutcome::Failed(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("refusing to signal pgid {pgid}")));
+    }
     // Negative pid targets the whole process group |pgid|.
     let rc = unsafe { libc::kill(-(pgid as i32), num) };
     if rc == 0 {
@@ -248,7 +257,10 @@ pub enum KillOutcome {
 pub fn read_pid_file(root: &Path, track: &str, name: &str) -> Option<(u32, Option<u64>)> {
     let s = std::fs::read_to_string(queue::piece_file(root, track, name, "pid")).ok()?;
     let mut it = s.split_whitespace();
-    let pgid = it.next()?.parse().ok()?;
+    // pgid < 2 parses but is never a valid task pgid (0/1 are kill(2)
+    // specials — see signal_pgid); treat it as unparseable so every
+    // downstream gate sees "no pid", not a group to probe.
+    let pgid: u32 = it.next()?.parse().ok().filter(|&p| p >= 2)?;
     let start = it.next().and_then(|t| t.parse().ok());
     Some((pgid, start))
 }
@@ -287,7 +299,12 @@ pub fn pgid_is_task_leader(pgid: u32, recorded_start: Option<u64>) -> bool {
 /// pid at `pgid` that fails the leader check is the recycled case
 /// (foreign leader took the pgid) — also refused.
 pub fn pgid_is_task_group(pgid: u32, recorded_start: Option<u64>) -> bool {
-    pgid_is_task_leader(pgid, recorded_start) || (proc_pgrp_start(pgid).is_none() && pgid_alive(pgid))
+    // Belt at the gate, same bound as signal_pgid: pgid 0 would pass
+    // the dead-leader branch (proc_pgrp_start(0) fails but
+    // pgid_alive(0) probes our own group and succeeds), and pgid 1
+    // can pass the leader check in containers where init's pgrp is 1
+    // — neither may ever authorize a signal (design.md §3.9a).
+    pgid >= 2 && (pgid_is_task_leader(pgid, recorded_start) || (proc_pgrp_start(pgid).is_none() && pgid_alive(pgid)))
 }
 
 /// TERM → 10×1 s → KILL on the task's recorded pgid. The pgid comes
@@ -475,6 +492,39 @@ pub fn running_log(root: &Path, base: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::read_env_file;
+
+    /// pgid 0/1 in a `pid` file are kill(2) specials, never task
+    /// groups: `kill(0, sig)` would signal the daemon's own process
+    /// group and `kill(-1, sig)` would broadcast to every signalable
+    /// process. `read_pid_file` must reject them, the §3.9a gate must
+    /// refuse them even when probed directly (pgid_alive(0) succeeds
+    /// on our own group, and init's pgrp is 1 in containers), and
+    /// `kill_task` must never reach a signal for either. Asserting on
+    /// the gate predicate only — no kill(2) is ever issued here.
+    #[test]
+    fn kill_special_pgids_are_never_signaled() {
+        for pgid in [0u32, 1] {
+            assert!(!super::pgid_is_task_group(pgid, None), "pgid {pgid} passed the signal gate");
+            match super::signal_pgid(pgid, "TERM") {
+                super::SignalOutcome::Failed(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput),
+                _ => panic!("signal_pgid({pgid}) did not refuse"),
+            }
+
+            let root = std::env::temp_dir().join(format!("shunt-badpgid-{pgid}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let entry = root.join("running").join("t");
+            std::fs::create_dir_all(&entry).unwrap();
+            std::fs::write(entry.join("task.sh"), "exit 0\n").unwrap();
+            std::fs::write(entry.join("pid"), format!("{pgid}\n")).unwrap();
+            assert_eq!(super::read_pid_file(&root, "running", "t"), None);
+            // No pid parses -> "no pid file" error; a pgid that did
+            // parse would have to come back Gone, never Signaled.
+            match super::kill_task(&root, "t") {
+                Err(_) | Ok(super::KillOutcome::Gone) => {}
+                Ok(super::KillOutcome::Signaled { .. }) => panic!("kill_task signaled pgid {pgid}"),
+            }
+            std::fs::remove_dir_all(&root).ok();
+        }
+    }
 
     /// A hostile guard path must reach the guard line only as a
     /// single-quoted printf argv: inside a double-quoted message the
