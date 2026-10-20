@@ -187,9 +187,7 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
     let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
     let err = log.try_clone()?;
 
-    let mut args = vec!["ssh".to_string()];
-    args.extend(ssh_conn_args(client)?);
-    args.extend(["-N".into(), "-R".into(), port.to_string(), "-o".into(), "ExitOnForwardFailure=yes".into(), "-o".into(), "ServerAliveInterval=30".into(), "-o".into(), "ServerAliveCountMax=3".into()]);
+    let args = up_argv(client, port)?;
     let mut child = Command::new("ssh").args(&args[1..]).stdin(Stdio::null()).stdout(log).stderr(err).process_group(0).spawn().context("spawn ssh tunnel")?;
     // ExitOnForwardFailure makes a bad bind exit fast; give it a beat.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -273,6 +271,23 @@ fn heal_in(dir: &Path, t: &dyn Transport, client: &ClientEntry, alive: bool, rec
             Ok(Heal::Stripped)
         }
     }
+}
+
+/// The tunnel's ssh argv: the shared conn flags (auth, known_hosts,
+/// timeouts, target) PLUS the long-lived session options. The mux
+/// options are overridden OFF: `ssh_conn_args` carries
+/// `ControlMaster=auto`/`ControlPath=<cm>/<name>.sock`, which would
+/// either make the tunnel itself the mux master (pinning the socket
+/// and routing every later exec through this session) or join an
+/// existing master (so `ssh -O exit` / master death kills the
+/// forward invisibly to the pid bookkeeping). ssh resolves each `-o`
+/// parameter first-value-wins, so the `none` overrides must precede
+/// the inherited args.
+fn up_argv(client: &ClientEntry, port: u16) -> Result<Vec<String>> {
+    let mut args = vec!["ssh".to_string(), "-o".into(), "ControlMaster=no".into(), "-o".into(), "ControlPath=none".into()];
+    args.extend(ssh_conn_args(client)?);
+    args.extend(["-N".into(), "-R".into(), port.to_string(), "-o".into(), "ExitOnForwardFailure=yes".into(), "-o".into(), "ServerAliveInterval=30".into(), "-o".into(), "ServerAliveCountMax=3".into()]);
+    Ok(args)
 }
 
 /// Tear it down: TERM the ssh process group, drop state files, and
@@ -438,6 +453,32 @@ mod tests {
         assert!(status_in(&state, "tun-test", None).stale);
         std::fs::remove_dir_all(&state).ok();
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The tunnel ssh must ride NO mux: `ControlPath=none` (and
+    /// `ControlMaster=no`) must precede the inherited
+    /// `ControlPath=<cm>/<name>.sock` from `ssh_conn_args` — ssh
+    /// resolves each `-o` first-value-wins. Auth/known_hosts options
+    /// (-p, -i, UserKnownHostsFile) must survive.
+    #[test]
+    fn tunnel_argv_disables_mux_before_conn_args() {
+        let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let _g = crate::server::transport::ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-tun-home-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let mut c = entry(Path::new("/q"));
+        c.local = false;
+        c.ssh.user = "u".into();
+        c.ssh.host = "h".into();
+        c.ssh.port = 2222;
+        c.ssh.key = "/k".into();
+        let argv = up_argv(&c, 1080).unwrap();
+        std::env::remove_var("SHUNT_HOME");
+        // First occurrence of each -o parameter is the effective one.
+        let pos = |needle: &str| argv.iter().position(|a| a == needle).unwrap_or(usize::MAX);
+        assert!(pos("ControlPath=none") < argv.iter().position(|a| a.starts_with("ControlPath=") && *a != "ControlPath=none").unwrap_or(usize::MAX), "{argv:?}");
+        assert!(pos("ControlMaster=no") < pos("ControlMaster=auto"), "{argv:?}");
+        assert!(argv.contains(&"/k".to_string()) && argv.contains(&"u@h".to_string()), "{argv:?}");
     }
 
     /// A bare `ssh -R` cmdline must NOT pass liveness when the
