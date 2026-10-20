@@ -41,9 +41,11 @@ fn env_write(t: &dyn Transport, client: &ClientEntry, key: &str, value: Option<&
     const SCRIPT: &str = r#"
 f="$1/env"; k="$2"; v="$3"
 mkdir -p "$1"; touch "$f"
-grep -v "^$k=" "$f" > "$f.tmp" 2>/dev/null || true
-[ -n "$v" ] && echo "$k=$v" >> "$f.tmp"
-mv "$f.tmp" "$f"
+t=$(mktemp "$1/.env.XXXXXX") || exit 1
+trap 'rm -f "$t"' EXIT
+grep -v "^$k=" "$f" > "$t" 2>/dev/null || true
+[ -n "$v" ] && echo "$k=$v" >> "$t"
+mv "$t" "$f"
 "#;
     let argv = ["sh".to_string(), "-c".to_string(), SCRIPT.to_string(), "sh".to_string(), client.qroot.clone(), key.to_string(), value.unwrap_or("").to_string()];
     t.exec(client, &argv, None)?;
