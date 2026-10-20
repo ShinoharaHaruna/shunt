@@ -533,12 +533,18 @@ fn follow_dlog(path: &std::path::Path) -> Result<()> {
 pub(crate) fn agent_dlog(a: &RootArgs, tail: Option<usize>) -> Result<()> {
     let root = agent_root(&a.root)?;
     let path = root.join("daemon.log");
-    // Render JSONL human-readable: `[ts] event k=v`.
+    // Render JSONL human-readable: `[ts] event k=v`. `--json` skips
+    // the render — daemon.log IS JSONL, so the wire form is the file
+    // verbatim (still tail-sliced).
     if let Ok(text) = std::fs::read_to_string(&path) {
         let lines: Vec<&str> = text.lines().collect();
         let skip = tail.map_or(0, |n| lines.len().saturating_sub(n));
         for line in &lines[skip..] {
-            println!("{}", render_dlog_line(line));
+            if a.json {
+                println!("{line}");
+            } else {
+                println!("{}", render_dlog_line(line));
+            }
         }
     }
     Ok(())

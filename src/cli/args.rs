@@ -155,7 +155,9 @@ pub struct LogsArgs {
 #[derive(Args)]
 pub struct RootArgs {
     /// Queue root; falls back to $SHUNT_ROOT
-    #[arg(long)]
+    // visible `--qroot`: spec §5's wire table spells the flag after
+    // the registry row's field name; accepting it costs nothing.
+    #[arg(long, visible_alias = "qroot")]
     pub root: Option<String>,
     /// Emit JSON (wire protocol)
     #[arg(long)]
@@ -603,6 +605,17 @@ mod tests {
         let Command::Workers(w) = cli.command else { panic!() };
         assert_eq!(w.client.as_deref(), Some("box1"));
         assert!(matches!(w.action, Some(WorkerAction::Set { n: 5 })));
+    }
+
+    /// Spec §5's wire table spells the queue-root flag `--qroot`;
+    /// the visible alias keeps a spec-literal caller working.
+    #[test]
+    fn root_accepts_qroot_alias() {
+        for flag in ["--root", "--qroot"] {
+            let cli = parse(&["shunt", "init", flag, "/tmp/q"]);
+            let Command::Init(a) = cli.command else { panic!() };
+            assert_eq!(a.root.as_deref(), Some("/tmp/q"));
+        }
     }
 
     #[test]

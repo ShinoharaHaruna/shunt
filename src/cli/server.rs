@@ -75,11 +75,28 @@ pub(crate) fn remote(name: &str, tail: &[&str], stdin: Option<&str>) -> Result<(
     let argv = wire_argv(&client, tail);
     let t = transport_for(&client);
     let out = t.exec(&client, &argv, stdin)?;
-    print!("{out}");
-    if !out.ends_with('\n') {
-        println!();
-    }
+    print!("{}", remote_render(&out)?);
     Ok(())
+}
+
+/// What `remote` prints for one chunk of remote stdout. Wire ops
+/// answer a `{"protocol":1,…}` object that can sit inside login-shell
+/// noise (motd/.bashrc banners — design.md §5): extract renders the
+/// object pretty and drops the noise. A `protocol`-carrying object
+/// that fails extraction is binary drift — surface §5's steering
+/// error rather than printing the stale line raw. Output with no
+/// wire object at all (`logs`, ad-hoc text) prints verbatim.
+fn remote_render(out: &str) -> Result<String> {
+    match crate::proto::wire::extract(out) {
+        Ok(v) => Ok(format!("{}\n", serde_json::to_string_pretty(&v)?)),
+        Err(e) => {
+            let drift = out.lines().any(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok().is_some_and(|v| v.get("protocol").is_some()));
+            if drift {
+                return Err(e);
+            }
+            Ok(if out.ends_with('\n') { out.to_string() } else { format!("{out}\n") })
+        }
+    }
 }
 
 /// No queue context: no --root flag and no SHUNT_ROOT env — the
@@ -297,6 +314,23 @@ mod tests {
         let err = required_client(&None).unwrap_err().to_string();
         assert!(err.contains("default_client"), "{err}");
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Wire stdout buried in login-shell noise renders as the
+    /// pretty object; non-wire output (logs, ad-hoc text) stays
+    /// verbatim; a wrong-protocol object surfaces §5's drift error.
+    #[test]
+    fn remote_render_extracts_wire_from_noise() {
+        let noisy = "Welcome to AutoDL\n{\"protocol\":1,\"ok\":true,\"name\":\"0100_x\"}\n";
+        let r = remote_render(noisy).unwrap();
+        assert!(r.contains("\"protocol\": 1") && r.contains("\"name\": \"0100_x\""), "{r}");
+        assert!(!r.contains("Welcome"), "{r}");
+
+        assert_eq!(remote_render("task log line\nmore\n").unwrap(), "task log line\nmore\n");
+        assert_eq!(remote_render("no trailing nl").unwrap(), "no trailing nl\n");
+
+        let err = remote_render("banner\n{\"protocol\":2,\"ok\":true}\n").unwrap_err().to_string();
+        assert!(err.contains("protocol mismatch"), "{err}");
     }
 
     #[test]
