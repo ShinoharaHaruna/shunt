@@ -19,8 +19,10 @@ pub struct LocalTransport {
     /// `env!("CARGO_BIN_EXE_shunt")` or any path.
     pub bin: std::path::PathBuf,
     /// Exec timeout (client row `timeout_s`); on expiry the child is
-    /// killed and the call errors. None = `exec_timeout_s()` default
-    /// ceiling — a wedged wire op must not stall the dispatcher.
+    /// killed and the call errors. None/0 = `exec_timeout_s()` default
+    /// ceiling — a wedged wire op must not stall the dispatcher; 0 is
+    /// the "unset" convention (same as `# shunt:timeout_s=` and
+    /// `exec_timeout_s()` itself, both `.filter(|&n| n > 0)`).
     pub timeout_s: Option<u64>,
 }
 
@@ -57,7 +59,11 @@ impl super::Transport for LocalTransport {
                 let _ = w.write_all(body.as_bytes());
             });
         }
-        let out = super::wait_deadline(child, self.timeout_s.unwrap_or_else(super::exec_timeout_s), &format!("local exec {}", prog.display()))?;
+        // `.filter(|&n| n > 0)` normalizes a row's `timeout_s = 0` to
+        // "no override" — an instant deadline would brick every wire
+        // op on that client (same 0=unset rule as exec.rs:154).
+        let deadline_s = self.timeout_s.filter(|&n| n > 0).unwrap_or_else(super::exec_timeout_s);
+        let out = super::wait_deadline(child, deadline_s, &format!("local exec {}", prog.display()))?;
         if !out.status.success() {
             // Same wire convention as the ssh transport: a wire op's
             // `{"ok":false,"error":"…"}` on stdout carries the real
@@ -128,10 +134,10 @@ mod tests {
 
     #[test]
     fn local_exec_timeout_kills() {
-        // timeout_s=0 fires immediately; the child must be killed,
-        // not orphaned.
+        // A positive row timeout fires at its deadline; the child
+        // (sleep 30) must be killed at ~1s, not orphaned.
         let c = local_client();
-        let t = LocalTransport { bin: PathBuf::from("/bin/sleep"), timeout_s: Some(0) };
+        let t = LocalTransport { bin: PathBuf::from("/bin/sleep"), timeout_s: Some(1) };
         let err = t.exec(&c, &[shunt_bin(&c), "30".into()], None).unwrap_err();
         assert!(err.to_string().contains("timed out"), "{err}");
     }
@@ -145,6 +151,25 @@ mod tests {
         std::env::set_var("SHUNT_SSH_EXEC_TIMEOUT_S", "1");
         let c = local_client();
         let t = LocalTransport { bin: PathBuf::from("/bin/sleep"), timeout_s: None };
+        let err = t.exec(&c, &[shunt_bin(&c), "30".into()], None).unwrap_err();
+        std::env::remove_var("SHUNT_SSH_EXEC_TIMEOUT_S");
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
+    #[test]
+    fn local_exec_zero_timeout_uses_default_deadline() {
+        // Row timeout_s=0 must NOT be an instant deadline: 0 is the
+        // "unset" convention, so the wire op falls back to the shared
+        // exec ceiling exactly like None (SHUNT_SSH_EXEC_TIMEOUT_S=1
+        // keeps this fast). Regressing to `unwrap_or_else` on the raw
+        // Option would brick every wire op on that client.
+        let _g = super::super::ENV_LOCK.lock().unwrap();
+        std::env::set_var("SHUNT_SSH_EXEC_TIMEOUT_S", "1");
+        let c = local_client();
+        let t = LocalTransport { bin: PathBuf::from("/bin/sleep"), timeout_s: Some(0) };
+        // Quick op completes under the default ceiling; a 0-deadline
+        // would fail it with "timed out after 0s".
+        t.exec(&c, &[shunt_bin(&c), "0".into()], None).unwrap();
         let err = t.exec(&c, &[shunt_bin(&c), "30".into()], None).unwrap_err();
         std::env::remove_var("SHUNT_SSH_EXEC_TIMEOUT_S");
         assert!(err.to_string().contains("timed out"), "{err}");
