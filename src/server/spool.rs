@@ -199,12 +199,17 @@ pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slu
 }
 
 /// Persist a spool entry + rendered task body, each file via
-/// write-temp-then-rename.
+/// write-temp-then-rename. The `.sh` body commits FIRST and the
+/// `.json` marker LAST: `list()` keys on `.json`, so a crash
+/// mid-stage must never leave a parseable `.json` whose body is
+/// missing (dispatch would retain and re-log it every sweep
+/// forever). A crash here instead orphans only the `.sh`, which
+/// `list()` never sees.
 pub fn stage(entry: &SpoolEntry, body: &str) -> Result<()> {
     let dir = spool_dir()?;
     crate::server::fsutil::private_dir(&dir)?;
     let json = serde_json::to_string_pretty(entry)?;
-    for (name, contents) in [(format!("{}.json", entry.id), json), (format!("{}.sh", entry.id), body.to_string())] {
+    for (name, contents) in [(format!("{}.sh", entry.id), body.to_string()), (format!("{}.json", entry.id), json)] {
         // Same pid-tagged tmp convention as queue.rs enqueue: ids are
         // unique per entry so collisions are unlikely, but a shared
         // tmp name is still the wrong primitive under concurrency.
