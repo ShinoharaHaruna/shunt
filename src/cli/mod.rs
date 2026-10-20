@@ -144,7 +144,25 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Client(c) => match c.action {
             ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { host: a.host, port: a.port, user: a.user, key: a.key, password: a.password, qroot: a.qroot, deploy_root: a.deploy_root, local: a.local, expire: a.expire, env_setup: a.env_setup, shell: a.shell, endpoint_rotates: a.endpoint_rotates }),
             ClientAction::Rename { old, new } => crate::server::client_ops::rename(&old, &new),
-            ClientAction::Update { name, host, port, user, password, endpoint_rotates } => crate::server::client_ops::update(&name, crate::server::client_ops::EndpointUpdate { host, port, user, password, endpoint_rotates }),
+            // Fold the --endpoint-rotates / --no-endpoint-rotates pair
+            // into tri-state: Some(true) sets, Some(false) clears,
+            // None leaves the row field untouched.
+            ClientAction::Update { name, host, port, user, password, endpoint_rotates, no_endpoint_rotates } => crate::server::client_ops::update(
+                &name,
+                crate::server::client_ops::EndpointUpdate {
+                    host,
+                    port,
+                    user,
+                    password,
+                    endpoint_rotates: if endpoint_rotates {
+                        Some(true)
+                    } else if no_endpoint_rotates {
+                        Some(false)
+                    } else {
+                        None
+                    },
+                },
+            ),
             ClientAction::Exec { name, cmd } => {
                 let c = registry::load_client(&name)?;
                 let t = crate::server::transport::transport_for(&c);

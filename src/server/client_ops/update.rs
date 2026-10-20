@@ -9,13 +9,15 @@ use anyhow::Result;
 
 /// Field-level changes for `client update` (endpoint drift, design.md
 /// §4.1). Any unset Option leaves the row field untouched; an empty
-/// `--password ""` clears it.
+/// `--password ""` clears it. `endpoint_rotates` is tri-state:
+/// Some(true) marks, Some(false) clears a mislabeled row, None leaves
+/// the flag alone — a one-way bool had no path back to false.
 pub struct EndpointUpdate {
     pub host: Option<String>,
     pub port: Option<u16>,
     pub user: Option<String>,
     pub password: Option<String>,
-    pub endpoint_rotates: bool,
+    pub endpoint_rotates: Option<bool>,
 }
 
 /// `shunt client update <name> [flags]`: rewrite the row's ssh
@@ -30,7 +32,7 @@ pub struct EndpointUpdate {
 /// Server-local: no reachability check; verify with `status -c`.
 pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
     let endpoint_moved = u.host.is_some() || u.port.is_some() || u.user.is_some();
-    if !endpoint_moved && u.password.is_none() && !u.endpoint_rotates {
+    if !endpoint_moved && u.password.is_none() && u.endpoint_rotates.is_none() {
         anyhow::bail!("nothing to update — pass --host/--port/--user/--password/--endpoint-rotates (other row fields — qroot, deploy_root, expire, env_setup — are hand-edited in clients/<name>.toml)");
     }
     if u.port == Some(0) {
@@ -56,9 +58,11 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
         changes.push(if pw.is_empty() { "ssh.password: cleared".into() } else { "ssh.password: set".into() });
         e.ssh.password = pw;
     }
-    if u.endpoint_rotates && !e.endpoint_rotates {
-        changes.push("endpoint_rotates: -> true".into());
-        e.endpoint_rotates = true;
+    if let Some(v) = u.endpoint_rotates {
+        if v != e.endpoint_rotates {
+            changes.push(format!("endpoint_rotates: -> {v}"));
+            e.endpoint_rotates = v;
+        }
     }
     let path = registry::save_client(&e)?;
     println!("updated {name}: {}", changes.join(", "));

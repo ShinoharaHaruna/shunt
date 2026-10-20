@@ -461,9 +461,15 @@ pub enum ClientAction {
         /// New SSH password (empty string clears)
         #[arg(long)]
         password: Option<String>,
-        /// Mark the vendor as one that reassigns IP/port on restart
-        #[arg(long)]
+        /// Mark the vendor as one that reassigns IP/port on restart.
+        /// Pairs with --no-endpoint-rotates so a mislabeled row can
+        /// be cleared (§4.1 keeps the flag update-managed); last one
+        /// wins via overrides_with.
+        #[arg(long, overrides_with = "no_endpoint_rotates")]
         endpoint_rotates: bool,
+        /// Clear the endpoint_rotates mark on the row
+        #[arg(long, overrides_with = "endpoint_rotates")]
+        no_endpoint_rotates: bool,
     },
     /// Deregister a box: remote stop + key revocation (best-effort),
     /// then row/keys/mux/state/spool/binding removal locally. On the
