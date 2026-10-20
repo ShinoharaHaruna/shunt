@@ -131,6 +131,10 @@ pub struct ShutdownState {
     pub cmd: String,
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// `shunt probe --json` machine facts (design.md §8). Fields are
 /// cgroup-aware; `nproc`/`free` values are marked suspect, never trusted.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -141,7 +145,16 @@ pub struct ProbeReport {
     pub driver: Option<String>,
     pub cuda: Option<String>,
     pub cores: Option<u32>,
+    /// `cores` came from the host (`nproc`), not a cgroup quota —
+    /// suspect sizing data on capped containers (§8). Omitted when
+    /// the cgroup path answered.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cores_suspect: bool,
     pub mem_gb: Option<f64>,
+    /// `mem_gb` came from host `/proc/meminfo`, not a cgroup limit —
+    /// same suspect caveat as `cores_suspect` (§8).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mem_gb_suspect: bool,
     pub disk_free_gb: Option<f64>,
     pub python: Option<String>,
     /// `id -u == 0` or passwordless `sudo -n` — "can this box do root
@@ -196,6 +209,23 @@ mod tests {
         assert!(err.contains("client bootstrap"), "{err}");
         // Non-numeric protocol counts as mismatch, not as valid.
         assert!(extract("{\"protocol\":\"one\"}\n").is_err());
+    }
+
+    /// §8: suspect markers ride the wire only when a host fallback
+    /// produced the value — a clean cgroup probe emits neither flag.
+    #[test]
+    fn probe_report_suspect_flags_are_opt_in() {
+        let clean: ProbeReport = serde_json::from_str(r#"{"protocol":1,"cores":14}"#).unwrap();
+        assert!(!clean.cores_suspect && !clean.mem_gb_suspect);
+        let v = serde_json::to_value(&clean).unwrap();
+        assert!(v.get("cores_suspect").is_none() && v.get("mem_gb_suspect").is_none());
+
+        let suspect = ProbeReport { cores: Some(112), cores_suspect: true, mem_gb: Some(512.0), mem_gb_suspect: true, ..Default::default() };
+        let v = serde_json::to_value(&suspect).unwrap();
+        assert_eq!(v["cores_suspect"], true);
+        assert_eq!(v["mem_gb_suspect"], true);
+        let back: ProbeReport = serde_json::from_value(v).unwrap();
+        assert!(back.cores_suspect && back.mem_gb_suspect);
     }
 
     #[test]

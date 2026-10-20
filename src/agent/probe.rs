@@ -21,14 +21,22 @@ fn read(path: &str) -> Option<String> {
 /// Cgroup-aware CPU count: `cpu.max` (v2) or cfs quota/period (v1);
 /// `nproc` only as a suspect fallback (it reports the host on AutoDL).
 pub fn cgroup_cores() -> Option<u32> {
+    cores_and_source().0
+}
+
+/// `cores` plus its provenance: `true` = host-reported `nproc`
+/// fallback — suspect sizing data (design.md §8).
+fn cores_and_source() -> (Option<u32>, bool) {
     if let Some(max) = read("/sys/fs/cgroup/cpu.max") {
         let mut it = max.split_whitespace();
-        let quota = it.next()?;
+        let Some(quota) = it.next() else {
+            return (None, true);
+        };
         let period: u64 = it.next().and_then(|p| p.parse().ok()).unwrap_or(100_000);
         if quota != "max" {
             if let Ok(q) = quota.parse::<u64>() {
                 if period > 0 {
-                    return Some((q.div_ceil(period)).max(1) as u32);
+                    return (Some((q.div_ceil(period)).max(1) as u32), false);
                 }
             }
         }
@@ -37,28 +45,28 @@ pub fn cgroup_cores() -> Option<u32> {
     let period = read("/sys/fs/cgroup/cpu/cpu.cfs_period_us").and_then(|s| s.parse::<u64>().ok());
     if let (Some(q), Some(p)) = (quota, period) {
         if q > 0 && p > 0 {
-            return Some(((q as u64).div_ceil(p)).max(1) as u32);
+            return (Some(((q as u64).div_ceil(p)).max(1) as u32), false);
         }
     }
-    run("nproc", &[]).and_then(|s| s.trim().parse().ok())
+    (run("nproc", &[]).and_then(|s| s.trim().parse().ok()), true)
 }
 
-/// Cgroup-aware memory in GiB; falls back to /proc/meminfo (host value
-/// on AutoDL — suspect, like `nproc`).
-fn cgroup_mem_gb() -> Option<f64> {
+/// Cgroup-aware memory in GiB plus provenance; the /proc/meminfo
+/// fallback is a host value on AutoDL — suspect, like `nproc`.
+fn mem_gb_and_source() -> (Option<f64>, bool) {
     const GIB: f64 = 1_073_741_824.0;
     if let Some(max) = read("/sys/fs/cgroup/memory.max") {
         if let Ok(b) = max.parse::<u64>() {
-            return Some(b as f64 / GIB);
+            return (Some(b as f64 / GIB), false);
         }
     }
     if let Some(b) = read("/sys/fs/cgroup/memory/memory.limit_in_bytes").and_then(|s| s.parse::<u64>().ok()) {
         // v1 reports ~i64::MAX when unbounded
         if b < (1u64 << 60) {
-            return Some(b as f64 / GIB);
+            return (Some(b as f64 / GIB), false);
         }
     }
-    read("/proc/meminfo").and_then(|s| s.lines().find(|l| l.starts_with("MemTotal:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()).map(|kb| kb as f64 * 1024.0 / GIB))
+    (read("/proc/meminfo").and_then(|s| s.lines().find(|l| l.starts_with("MemTotal:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()).map(|kb| kb as f64 * 1024.0 / GIB)), true)
 }
 
 fn nvidia_smi() -> Option<(Option<String>, Option<String>, Option<String>)> {
@@ -140,7 +148,9 @@ fn python_version() -> Option<String> {
 /// Collect facts about this box (design.md §8).
 pub fn collect(deploy_root: &str) -> ProbeReport {
     let (gpu, driver, cuda) = nvidia_smi().unwrap_or((None, None, None));
-    ProbeReport { protocol: crate::proto::wire::PROTOCOL_VERSION, gpu, driver, cuda, cores: cgroup_cores(), mem_gb: cgroup_mem_gb().map(|g| (g * 100.0).round() / 100.0), disk_free_gb: disk_free_gb(deploy_root).map(|g| (g * 100.0).round() / 100.0), python: python_version(), can_root: can_root(), shutdown_cmd: shutdown_cmd() }
+    let (cores, cores_suspect) = cores_and_source();
+    let (mem_gb, mem_gb_suspect) = mem_gb_and_source();
+    ProbeReport { protocol: crate::proto::wire::PROTOCOL_VERSION, gpu, driver, cuda, cores, cores_suspect, mem_gb: mem_gb.map(|g| (g * 100.0).round() / 100.0), mem_gb_suspect, disk_free_gb: disk_free_gb(deploy_root).map(|g| (g * 100.0).round() / 100.0), python: python_version(), can_root: can_root(), shutdown_cmd: shutdown_cmd() }
 }
 
 #[cfg(test)]
