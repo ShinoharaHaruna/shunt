@@ -193,7 +193,24 @@ impl Daemon {
         // Snapshot the candidate list once per cycle: iterating the
         // head and `continue`ing on a failed claim would hot-spin on
         // the same unclaimable entry for the whole poll.
-        let candidates = queue::pending_list(&self.root).unwrap_or_default();
+        let candidates = match queue::pending_list(&self.root) {
+            Ok(v) => v,
+            Err(e) => {
+                // Fail closed (§3.11): an unreadable pending/ is not
+                // "empty" — it is unknown. Log loudly and skip
+                // dispatch this cycle; the idle-shutdown check below
+                // reads pending_nonempty, which fails closed too, so
+                // a transient fs fault can never masquerade as a
+                // drained queue for the poweroff decision.
+                dlog(
+                    &self.root,
+                    "pending_scan_failed",
+                    ev(json!({"error": format!("{e:#}"),
+                           "warning": "pending/ unreadable; dispatch skipped this cycle and the queue is treated as non-empty"})),
+                );
+                Vec::new()
+            }
+        };
         for next in candidates {
             if self.runpids.len() >= workers as usize {
                 break;
@@ -435,6 +452,24 @@ fn run_registered(root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use fs2::FileExt;
+
+    /// Fail closed on an unreadable pending/ (§3.11): `pending` as a
+    /// plain file makes pending_list error (ENOTDIR); dispatch must
+    /// skip the cycle without spawning, and the event must be in
+    /// daemon.log — a silent "empty" would feed idle-shutdown a
+    /// phantom drained queue.
+    #[test]
+    fn dispatch_skips_cycle_on_unreadable_pending() {
+        let root = std::env::temp_dir().join(format!("shunt-dispatch-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("pending"), b"not a dir").unwrap();
+        let mut d = super::Daemon { root: root.clone(), runpids: Default::default(), last_workers: None, got_signal: Default::default() };
+        d.dispatch();
+        assert!(d.runpids.is_empty(), "nothing may dispatch off an unreadable pending/");
+        let log = std::fs::read_to_string(root.join("daemon.log")).unwrap();
+        assert!(log.contains("pending_scan_failed"), "scan failure must be loud in daemon.log");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// Startup mutex (§3.4): a held daemon.lock means a live daemon —
     /// run() must bail "already running" immediately rather than

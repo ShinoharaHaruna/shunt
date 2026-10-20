@@ -71,9 +71,18 @@ pub fn resolve_cmd(root: &Path) -> String {
     std::env::var("SHUTDOWN_CMD").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/usr/bin/shutdown".to_string())
 }
 
-/// True when pending/ holds at least one entry (dir or `.sh` file).
+/// True when pending/ holds at least one entry (dir or `.sh` file)
+/// OR when it cannot be proven empty: a read error means a real task
+/// may sit there unseen, so poweroff judgments fail closed — same
+/// direction as Probe::Unknown ⇒ alive for liveness (§3.4/§3.11).
 pub fn pending_nonempty(root: &Path) -> bool {
-    queue::pending_list(root).map(|v| !v.is_empty()).unwrap_or(false)
+    queue::pending_list(root).map(|v| !v.is_empty()).unwrap_or(true)
+}
+
+/// Same fail-closed judgment for running/ (busy_peers only): an
+/// unreadable running/ must block a box-level poweroff, not clear it.
+fn running_nonempty(root: &Path) -> bool {
+    queue::running_list(root).map(|v| !v.is_empty()).unwrap_or(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +164,10 @@ fn busy_peers_in(dir: &Path, root: &Path) -> Vec<PathBuf> {
             Err(_) => continue,
         };
         match crate::agent::daemon::check_alive(&peer) {
-            Ok(Some(_)) if pending_nonempty(&peer) || queue::running_list(&peer).map(|v| !v.is_empty()).unwrap_or(false) => {
+            // Queue scans fail closed (§3.11): a live sibling whose
+            // pending/ or running/ cannot be read still counts as
+            // busy — cannot prove empty ⇒ do not power off under it.
+            Ok(Some(_)) if pending_nonempty(&peer) || running_nonempty(&peer) => {
                 busy.push(peer);
             }
             Ok(Some(_)) => {}
@@ -171,6 +183,26 @@ fn busy_peers_in(dir: &Path, root: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Queue-emptiness fails closed (§3.11): `pending`/`running` that
+    /// exist but cannot be listed (here: a file where the dir should
+    /// be → ENOTDIR) report non-empty, so an unreadable queue can
+    /// never arm the poweroff countdown or clear a busy peer.
+    #[test]
+    fn queue_nonempty_fails_closed_on_read_error() {
+        let root = std::env::temp_dir().join(format!("shunt-failclosed-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("pending"), b"not a dir").unwrap();
+        std::fs::write(root.join("running"), b"not a dir").unwrap();
+        assert!(pending_nonempty(&root), "unreadable pending/ must count as non-empty");
+        assert!(running_nonempty(&root), "unreadable running/ must count as non-empty");
+        // Control: a genuinely absent/empty pending/ still reads empty.
+        std::fs::remove_file(root.join("pending")).unwrap();
+        assert!(!pending_nonempty(&root));
+        std::fs::create_dir_all(root.join("pending")).unwrap();
+        assert!(!pending_nonempty(&root));
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     /// `shutdown on` with no grace argument arms at the default
     /// (design.md §3.11: ''|0 → 60); a previous explicit grace must
