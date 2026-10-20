@@ -9,22 +9,34 @@ use std::time::Duration;
 
 use crate::agent::queue;
 
-/// NUL-separated `/proc/<pid>/cmdline` → this is our daemon when
-/// argv[0]'s basename equals this binary's basename AND argv[1] —
+/// True when argv[0]'s basename is a shunt-family binary name:
+/// `shunt`, `shuntd`, or `shunt-<anything>` (versioned installs like
+/// `shunt-1.2`). Sibling daemons on one box (design.md §3.11 qroot
+/// registry) may run under any of these — a `shuntd` daemon probed by
+/// `shunt` must read Live, not Dead, or `busy_peers` sweeps its
+/// registry entry and idle-shutdown fires under live work. A
+/// `-shunt` SUFFIX (`foo-shunt`) stays rejected: the name must start
+/// with `shunt` to count as family.
+fn is_shunt_family(base: &[u8]) -> bool {
+    base == b"shunt" || base == b"shuntd" || base.starts_with(b"shunt-")
+}
+
+/// NUL-separated `/proc/<pid>/cmdline` → this is a shunt daemon when
+/// argv[0]'s basename is shunt-family (`is_shunt_family`) AND argv[1] —
 /// the subcommand slot; this CLI has no pre-subcommand global flags —
 /// is exactly `queue::DAEMON_IDENTITY`. Anchoring at argv[1] keeps a
 /// recycled pid running `shunt logs daemon`/`kill daemon` (pattern
-/// positional) from false-identifying as the daemon. Basename +
-/// whole-element beats a substring test: a binary installed as
-/// `shuntd`/`shunt-1.2` still matches itself, while an unrelated
-/// `foo-shunt daemon` cannot false-match (design.md §3.4).
-fn is_daemon_cmdline(cmdline: &[u8], exe_name: &str) -> bool {
+/// positional) from false-identifying as the daemon. Basename-family +
+/// whole-element beats both a substring test and an exact-name match:
+/// an unrelated `foo-shunt daemon` cannot false-match, while a
+/// differently-named sibling daemon still does (design.md §3.4, §3.11).
+fn is_daemon_cmdline(cmdline: &[u8]) -> bool {
     let mut argv = cmdline.split(|&b| b == 0).filter(|a| !a.is_empty());
     let Some(argv0) = argv.next() else {
         return false;
     };
     let base = argv0.rsplit(|&b| b == b'/').next().unwrap_or(argv0);
-    if base != exe_name.as_bytes() {
+    if !is_shunt_family(base) {
         return false;
     }
     argv.next().is_some_and(|a| a == queue::DAEMON_IDENTITY.as_bytes())
@@ -43,12 +55,12 @@ enum Probe {
     Unknown,
 }
 
-fn probe_pid(pid: u32, exe_name: &str, read_cmdline: impl Fn(u32) -> std::io::Result<Vec<u8>>) -> Probe {
+fn probe_pid(pid: u32, read_cmdline: impl Fn(u32) -> std::io::Result<Vec<u8>>) -> Probe {
     if !Path::new(&format!("/proc/{pid}")).exists() {
         return Probe::Dead;
     }
     match read_cmdline(pid) {
-        Ok(c) if is_daemon_cmdline(&c, exe_name) => Probe::Live,
+        Ok(c) if is_daemon_cmdline(&c) => Probe::Live,
         Ok(_) => Probe::Dead, // read succeeded, identity mismatch: pid recycled
         Err(_) => Probe::Unknown,
     }
@@ -65,11 +77,7 @@ fn alive_impl(root: &Path, evict_stale: bool, read_cmdline: impl Fn(u32) -> std:
         Some(p) => p,
         None => return Ok(None),
     };
-    let Some(exe_name) = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())) else {
-        // cannot determine own identity → cannot prove anything
-        return Ok(Some(pid));
-    };
-    match probe_pid(pid, &exe_name, read_cmdline) {
+    match probe_pid(pid, read_cmdline) {
         Probe::Live | Probe::Unknown => Ok(Some(pid)),
         Probe::Dead => {
             if evict_stale {
@@ -167,26 +175,31 @@ mod tests {
         v
     }
 
-    /// Identity = argv[0] basename == our exe basename + argv[1] ==
-    /// `daemon` (design.md §3.4): renamed binaries self-match,
-    /// unrelated `foo-shunt daemon` does not, and `daemon` at any
-    /// other argv position (pattern positional of `logs`/`kill`/
-    /// `cancel`) must not match.
+    /// Identity = shunt-family argv[0] basename + argv[1] ==
+    /// `daemon` (design.md §3.4): renamed binaries and cross-named
+    /// siblings all match, unrelated `foo-shunt daemon` does not, and
+    /// `daemon` at any other argv position (pattern positional of
+    /// `logs`/`kill`/`cancel`) must not match.
     #[test]
     fn cmdline_identity_basename_plus_element() {
-        assert!(is_daemon_cmdline(&argv(&["/usr/bin/shunt", "daemon", "--root", "/q"]), "shunt"));
-        assert!(is_daemon_cmdline(&argv(&["shunt", "daemon", "--root", "/q"]), "shunt"));
-        // same binary installed under another basename
-        assert!(is_daemon_cmdline(&argv(&["shuntd", "daemon", "--root", "/q"]), "shuntd"));
+        assert!(is_daemon_cmdline(&argv(&["/usr/bin/shunt", "daemon", "--root", "/q"])));
+        assert!(is_daemon_cmdline(&argv(&["shunt", "daemon", "--root", "/q"])));
+        // sibling daemon under another shunt-family name (M6): a
+        // `shuntd`/`shunt-1.2` daemon probed by `shunt` must read Live
+        assert!(is_daemon_cmdline(&argv(&["shuntd", "daemon", "--root", "/q"])));
+        assert!(is_daemon_cmdline(&argv(&["shunt-1.2", "daemon", "--root", "/q"])));
+        assert!(is_daemon_cmdline(&argv(&["/opt/shunt/bin/shunt-2.0-rc1", "daemon"])));
         // basename mismatch: foreign binary must not match
-        assert!(!is_daemon_cmdline(&argv(&["/usr/bin/foo-shunt", "daemon"]), "shunt"));
+        assert!(!is_daemon_cmdline(&argv(&["/usr/bin/foo-shunt", "daemon"])));
+        assert!(!is_daemon_cmdline(&argv(&["my-shunt", "daemon"])));
+        assert!(!is_daemon_cmdline(&argv(&["shuntfoo", "daemon"])));
         // `daemon` at a later argv position is a pattern, not the subcommand
-        assert!(!is_daemon_cmdline(&argv(&["shunt", "logs", "daemon"]), "shunt"));
-        assert!(!is_daemon_cmdline(&argv(&["shunt", "kill", "daemon"]), "shunt"));
+        assert!(!is_daemon_cmdline(&argv(&["shunt", "logs", "daemon"])));
+        assert!(!is_daemon_cmdline(&argv(&["shunt", "kill", "daemon"])));
         // `daemon` only as a substring of an argv element
-        assert!(!is_daemon_cmdline(&argv(&["shunt", "daemonesque"]), "shunt"));
-        assert!(!is_daemon_cmdline(&argv(&["shunt", "--root", "/q"]), "shunt"));
-        assert!(!is_daemon_cmdline(&[], "shunt"));
+        assert!(!is_daemon_cmdline(&argv(&["shunt", "daemonesque"])));
+        assert!(!is_daemon_cmdline(&argv(&["shunt", "--root", "/q"])));
+        assert!(!is_daemon_cmdline(&[]));
     }
 
     /// A live pid whose cmdline cannot be read (EACCES, transient
@@ -259,7 +272,7 @@ mod tests {
         while std::path::Path::new(&format!("/proc/{pid}")).exists() {
             pid += 1;
         }
-        let probe = super::probe_pid(pid, "shunt", |_| Ok(vec![]));
+        let probe = super::probe_pid(pid, |_| Ok(vec![]));
         assert_eq!(probe, Probe::Dead);
     }
 }
