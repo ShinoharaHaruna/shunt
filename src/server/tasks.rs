@@ -223,12 +223,18 @@ pub fn observe(t: &dyn Transport, client: &ClientEntry, rec: &mut TaskRecord) ->
         _ => return Ok(obs),
     };
     rec.outcome = Some(TaskOutcome { state: state.into(), rc, observed_at: now_iso() });
-    save(rec)?;
+    // Event BEFORE the outcome save: the outcome is write-once, so
+    // save-then-append would permanently lose this line if the
+    // append failed — a re-observe never retries once `outcome` is
+    // persisted. With this order a save failure just means the next
+    // `task show` re-observes and re-appends (a duplicate finish
+    // line beats a missing one).
     append_event(serde_json::json!({
         "event": if state == "done" { "finish" } else { "fail" },
         "id": rec.id, "client": rec.client, "queue": rec.queue_name,
         "rc": rc,
     }))?;
+    save(rec)?;
     Ok(obs)
 }
 
