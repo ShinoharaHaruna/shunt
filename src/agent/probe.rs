@@ -121,9 +121,20 @@ fn shutdown_cmd() -> Option<String> {
 }
 
 fn python_version() -> Option<String> {
-    // python3 --version prints to stdout on 3.x
-    let out = run("python3", &["--version"])?;
-    out.trim().strip_prefix("Python ").map(|s| s.to_string()).or_else(|| Some(out.trim().to_string()))
+    // `python3 --version` prints to stdout on 3.x, but some builds
+    // answer on stderr — and either way a success-with-empty-output
+    // must report `null`, never a bogus `""`.
+    let out = Command::new("python3").arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let s = if stdout.trim().is_empty() { stderr.trim() } else { stdout.trim() };
+    if s.is_empty() {
+        return None;
+    }
+    Some(s.strip_prefix("Python ").unwrap_or(s).to_string())
 }
 
 /// Collect facts about this box (design.md §8).
