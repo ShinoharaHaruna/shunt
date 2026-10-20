@@ -265,6 +265,32 @@ impl Daemon {
                         );
                     }
                     let deadline = timeout_s.map(|s| std::time::Instant::now() + Duration::from_secs(s));
+                    // Pid-reuse guard (§3.9): a reaped leader's handle
+                    // can sit in runpids for up to pgid_drain_grace
+                    // while its pid is already free for the OS to
+                    // hand to this very spawn. A colliding insert
+                    // would silently drop the old handle, leaving its
+                    // running/ entry a pid-less ghost — invisible to
+                    // kill, counted as running, blocking idle-shutdown.
+                    // Collision requires the old leader reaped (a live
+                    // leader's pid cannot be recycled), so exited is
+                    // Some; force-finalize it out first and log loud.
+                    if let Some(mut stale) = self.runpids.remove(&pid) {
+                        // If the leader somehow wasn't reaped yet,
+                        // do it now — dropping Child does not wait.
+                        let _ = stale.child.try_wait();
+                        let rc = stale.exited.map(|e| e.rc).unwrap_or(1);
+                        dlog(
+                            &self.root,
+                            "pid_reused",
+                            ev(json!({"task": stale.base, "pgid": pid,
+                               "warning": "OS recycled a reaped leader's pid inside the drain grace; force-finalizing the stale entry before tracking the new spawn"})),
+                        );
+                        if let Err(e) = exec::finalize(&self.root, &stale.base, rc, stale.timed_out) {
+                            dlog(&self.root, "finalize_failed", ev(json!({"task": stale.base, "rc": rc, "error": format!("{e:#}")})));
+                            let _ = exec::quarantine(&self.root, "running", &stale.base, &format!("finalize failed after pid reuse (rc {rc}): {e:#}"));
+                        }
+                    }
                     self.runpids.insert(pid, RunHandle { base: next.clone(), child, timeout_s, deadline, timed_out: None, kill_at: None, exited: None });
                     dlog(
                         &self.root,
