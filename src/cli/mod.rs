@@ -52,7 +52,7 @@ pub fn run(cli: Cli) -> Result<()> {
             if a.all {
                 return crate::server::status::run_all(a.json);
             }
-            dual_mode(&a.client, &a.root, "status", |name| remote(name, &["status", "--json"], None), || agent_status(&a))
+            dual_mode(&a.client, &a.root, "status", |name| remote(name, &["status", "--json"], None, true), || agent_status(&a))
         }
         Command::Logs(a) => {
             dual_mode(
@@ -68,7 +68,7 @@ pub fn run(cli: Cli) -> Result<()> {
                     }
                     let tail = logs_wire_tail(&a);
                     let refs: Vec<&str> = tail.iter().map(String::as_str).collect();
-                    remote(name, &refs, None)
+                    remote(name, &refs, None, false)
                 },
                 || agent_logs(&a),
             )
@@ -352,18 +352,18 @@ pub fn run(cli: Cli) -> Result<()> {
             print!("{}", crate::agent::exec::render_task(&meta));
             Ok(())
         }
-        Command::Cancel(a) => dual_mode(&a.client, &a.root, "cancel", |name| remote(name, &["cancel", "--json", "--", &a.pattern], None), || agent_cancel(&a)),
+        Command::Cancel(a) => dual_mode(&a.client, &a.root, "cancel", |name| remote(name, &["cancel", "--json", "--", &a.pattern], None, true), || agent_cancel(&a)),
         Command::Prio(a) => dual_mode(
             &a.client,
             &a.root,
             "prio",
             |name| {
                 let n = a.n.to_string();
-                remote(name, &["prio", "--json", "--", &a.pattern, &n], None)
+                remote(name, &["prio", "--json", "--", &a.pattern, &n], None, true)
             },
             || agent_prio(&a),
         ),
-        Command::Kill(a) => dual_mode(&a.client, &a.root, "kill", |name| remote(name, &["kill", "--json", "--", &a.pattern], None), || agent_kill(&a)),
+        Command::Kill(a) => dual_mode(&a.client, &a.root, "kill", |name| remote(name, &["kill", "--json", "--", &a.pattern], None, true), || agent_kill(&a)),
         Command::Workers(a) => dual_mode(
             &a.client,
             &a.root,
@@ -372,7 +372,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 let tail = workers_wire_tail(&a);
                 let mut refs: Vec<&str> = tail.iter().map(String::as_str).collect();
                 refs.push("--json");
-                remote(name, &refs, None)
+                remote(name, &refs, None, true)
             },
             || agent_workers(&a),
         ),
@@ -402,10 +402,10 @@ pub fn run(cli: Cli) -> Result<()> {
                             }
                             tail.push("--json".into());
                             let refs: Vec<&str> = tail.iter().map(String::as_str).collect();
-                            remote(name, &refs, None)
+                            remote(name, &refs, None, true)
                         }
-                        ShutdownAction::Off => remote(name, &["shutdown", "off", "--json"], None),
-                        ShutdownAction::Status => remote(name, &["shutdown", "status", "--json"], None),
+                        ShutdownAction::Off => remote(name, &["shutdown", "off", "--json"], None, true),
+                        ShutdownAction::Status => remote(name, &["shutdown", "status", "--json"], None, true),
                     }
                 },
                 || agent_shutdown(&a),

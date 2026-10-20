@@ -68,14 +68,14 @@ pub(crate) fn task_show(id: &str, json: bool) -> Result<()> {
 /// Forward one wire op to a client and print remote stdout.
 /// The remote argv is `<qroot>/bin/shunt <tail...> --root <qroot>`;
 /// transport is `ssh` or the `localhost` loopback (design.md §5).
-pub(crate) fn remote(name: &str, tail: &[&str], stdin: Option<&str>) -> Result<()> {
+pub(crate) fn remote(name: &str, tail: &[&str], stdin: Option<&str>, expect_json: bool) -> Result<()> {
     use crate::server::registry;
     use crate::server::transport::{transport_for, wire_argv};
     let client = registry::load_client(name)?;
     let argv = wire_argv(&client, tail);
     let t = transport_for(&client);
     let out = t.exec(&client, &argv, stdin)?;
-    print!("{}", remote_render(&out)?);
+    print!("{}", remote_render(&out, expect_json)?);
     Ok(())
 }
 
@@ -84,9 +84,16 @@ pub(crate) fn remote(name: &str, tail: &[&str], stdin: Option<&str>) -> Result<(
 /// noise (motd/.bashrc banners — design.md §5): extract renders the
 /// object pretty and drops the noise. A `protocol`-carrying object
 /// that fails extraction is binary drift — surface §5's steering
-/// error rather than printing the stale line raw. Output with no
-/// wire object at all (`logs`, ad-hoc text) prints verbatim.
-fn remote_render(out: &str) -> Result<String> {
+/// error rather than printing the stale line raw.
+///
+/// `expect_json` is the op's §5 response kind: wire ops answering a
+/// `{protocol:1,…}` object pass `true`; text ops (`logs`) pass `false`
+/// and their stdout prints verbatim — a log line that happens to be a
+/// protocol-shaped JSON object is log content, never a wire answer.
+fn remote_render(out: &str, expect_json: bool) -> Result<String> {
+    if !expect_json {
+        return Ok(verbatim(out));
+    }
     match crate::proto::wire::extract(out) {
         Ok(v) => Ok(format!("{}\n", serde_json::to_string_pretty(&v)?)),
         Err(e) => {
@@ -94,8 +101,18 @@ fn remote_render(out: &str) -> Result<String> {
             if drift {
                 return Err(e);
             }
-            Ok(if out.ends_with('\n') { out.to_string() } else { format!("{out}\n") })
+            Ok(verbatim(out))
         }
+    }
+}
+
+/// Pass remote stdout through unchanged, adding one trailing newline
+/// when the stream lacked it (keeps the user's next prompt clean).
+fn verbatim(out: &str) -> String {
+    if out.ends_with('\n') {
+        out.to_string()
+    } else {
+        format!("{out}\n")
     }
 }
 
@@ -322,15 +339,29 @@ mod tests {
     #[test]
     fn remote_render_extracts_wire_from_noise() {
         let noisy = "Welcome to AutoDL\n{\"protocol\":1,\"ok\":true,\"name\":\"0100_x\"}\n";
-        let r = remote_render(noisy).unwrap();
+        let r = remote_render(noisy, true).unwrap();
         assert!(r.contains("\"protocol\": 1") && r.contains("\"name\": \"0100_x\""), "{r}");
         assert!(!r.contains("Welcome"), "{r}");
 
-        assert_eq!(remote_render("task log line\nmore\n").unwrap(), "task log line\nmore\n");
-        assert_eq!(remote_render("no trailing nl").unwrap(), "no trailing nl\n");
+        assert_eq!(remote_render("task log line\nmore\n", true).unwrap(), "task log line\nmore\n");
+        assert_eq!(remote_render("no trailing nl", true).unwrap(), "no trailing nl\n");
 
-        let err = remote_render("banner\n{\"protocol\":2,\"ok\":true}\n").unwrap_err().to_string();
+        let err = remote_render("banner\n{\"protocol\":2,\"ok\":true}\n", true).unwrap_err().to_string();
         assert!(err.contains("protocol mismatch"), "{err}");
+    }
+
+    /// Text ops (`logs`) never touch extract: a task log containing a
+    /// protocol-shaped line prints verbatim — it is neither collapsed
+    /// to that object nor read as binary drift (design.md §5).
+    #[test]
+    fn remote_render_text_op_prints_verbatim() {
+        let log = "epoch 1 loss 0.5\n{\"protocol\":1,\"ok\":true}\nepoch 2 loss 0.4\n";
+        assert_eq!(remote_render(log, false).unwrap(), log);
+
+        let drift_looking = "epoch 1\n{\"protocol\":2,\"ok\":true}\n";
+        assert_eq!(remote_render(drift_looking, false).unwrap(), drift_looking);
+
+        assert_eq!(remote_render("log without newline", false).unwrap(), "log without newline\n");
     }
 
     #[test]
