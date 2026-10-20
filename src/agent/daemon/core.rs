@@ -339,8 +339,9 @@ impl Daemon {
         }
         if self.root.join("shutdown_on_idle").exists() {
             if shutdown::pending_nonempty(&self.root) {
+                // dlog only — daemon stderr is daemon.log, which must
+                // stay strict JSONL (§3.1); no eprintln twin.
                 dlog(&self.root, "signal_left_shutdown_armed", ev(json!({"warning": "daemon exiting on signal with shutdown_on_idle armed and pending work; a restarted daemon will honor the flag"})));
-                eprintln!("[shunt] WARNING: exiting on signal; shutdown_on_idle still armed with pending tasks — restart the daemon to honor it");
             } else {
                 dlog(&self.root, "signal_honors_shutdown", Map::new());
                 maybe_shutdown(&self.root, self.runpids.is_empty(), false, Some(&self.got_signal));

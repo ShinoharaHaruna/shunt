@@ -37,8 +37,10 @@ pub(crate) fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bo
     }
     let grace = shutdown::grace(root);
     let base = abort_at.map(|c| c.load(Ordering::SeqCst));
+    // No eprintln twin of this event: `shunt daemon`'s stderr IS
+    // daemon.log (§3.1 strict JSONL), and `shunt shutdown on`
+    // already tells the arming user on its own stdout.
     dlog(root, "idle_shutdown_armed", ev(json!({"grace_s": grace})));
-    eprintln!("[shunt] IDLE-SHUTDOWN ARMED: poweroff in {grace}s (cancel: shunt shutdown off / shunt stop / enqueue a task)");
     for i in (1..=grace).rev() {
         std::thread::sleep(Duration::from_secs(1));
         if let (Some(count), Some(base)) = (abort_at, base) {
