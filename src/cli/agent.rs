@@ -65,7 +65,7 @@ fn enqueue_impl(a: &EnqueueArgs) -> Result<()> {
         } else {
             std::fs::read_to_string(&a.file).with_context(|| format!("no such file: {}", a.file))?
         };
-        let raw_slug = match &a.slug {
+        let raw_slug = match a.slug.as_ref().or(a.slug_opt.as_ref()) {
             Some(s) => s.clone(),
             None if a.file == "-" => anyhow::bail!("slug required for stdin form"),
             None => std::path::Path::new(&a.file).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),

@@ -170,6 +170,10 @@ pub struct EnqueueArgs {
     pub file: String,
     /// Slug; required for the stdin form
     pub slug: Option<String>,
+    /// Slug as an option — the §5 wire form `enqueue - --slug x`.
+    /// Merged with the positional; specifying both is an error.
+    #[arg(long = "slug", conflicts_with = "slug")]
+    pub slug_opt: Option<String>,
     #[arg(long)]
     pub root: Option<String>,
     #[arg(long)]
@@ -616,6 +620,22 @@ mod tests {
             let Command::Init(a) = cli.command else { panic!() };
             assert_eq!(a.root.as_deref(), Some("/tmp/q"));
         }
+    }
+
+    /// Spec §5's wire table spells the enqueue slug as `--slug`;
+    /// the option and the positional merge into one value.
+    #[test]
+    fn enqueue_accepts_slug_flag() {
+        let cli = parse(&["shunt", "enqueue", "-", "--slug", "train", "--json"]);
+        let Command::Enqueue(a) = cli.command else { panic!() };
+        assert_eq!(a.slug_opt.as_deref(), Some("train"));
+        assert!(a.slug.is_none());
+    }
+
+    #[test]
+    fn enqueue_slug_flag_conflicts_with_positional() {
+        assert!(Cli::try_parse_from(["shunt", "enqueue", "-", "pos", "--slug", "flag"]).is_err());
+        assert!(Cli::try_parse_from(["shunt", "enqueue", "-", "pos"]).is_ok());
     }
 
     /// `--all` is the server aggregate; a local `--root` would be

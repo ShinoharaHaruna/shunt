@@ -49,9 +49,9 @@ fn probe_client(t: &dyn Transport, client: &registry::ClientEntry) -> Reach {
 /// `entry.meta.slug` is already the collision-mangled `<slug>-<id>`
 /// (spool::submit); the remote uses it for the pending filename.
 fn push(t: &dyn Transport, client: &registry::ClientEntry, entry: &crate::proto::task::SpoolEntry, body: &str) -> Result<String> {
-    // `--` keeps a dash-leading slug positional on the remote; the
-    // submit-side slug check should prevent those entirely.
-    let out = t.exec(client, &wire_argv(client, &["enqueue", "--json", "--", "-", &entry.meta.slug]), Some(body))?;
+    // `--slug` is the §5 wire spelling; the submit-side slug check
+    // guarantees the value never leads with a dash.
+    let out = t.exec(client, &wire_argv(client, &["enqueue", "--json", "--slug", &entry.meta.slug, "--", "-"]), Some(body))?;
     // Propagate extract failures (no wire line, protocol mismatch):
     // the entry stays spooled and the error names the cause instead
     // of degrading to a generic "enqueue rejected".
