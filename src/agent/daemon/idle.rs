@@ -23,6 +23,18 @@ use crate::agent::shutdown;
 /// honoring through §3.5).
 pub(crate) fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bool, abort_at: Option<&Arc<AtomicUsize>>) {
     let flag = root.join("shutdown_on_idle");
+    // running/ is never re-checked during the countdown — the
+    // entry-time bool is the only running check, and no dispatch
+    // runs during the countdown so runpids cannot grow. A nonempty
+    // running/ at entry therefore cannot drain inside the countdown
+    // either (the signal path already TERM+KILLed and reaped what it
+    // could): sleeping the whole grace just to reach the final
+    // recheck's `running_empty` gate buys nothing. Bail now instead
+    // (§3.5/§3.11).
+    if !running_empty {
+        dlog(root, "idle_shutdown_aborted", ev(json!({"why": "tasks survived signal path"})));
+        return;
+    }
     let grace = shutdown::grace(root);
     let base = abort_at.map(|c| c.load(Ordering::SeqCst));
     dlog(root, "idle_shutdown_armed", ev(json!({"grace_s": grace})));
@@ -87,5 +99,26 @@ pub(crate) fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bo
         }
     } else {
         dlog(root, "idle_shutdown_aborted", Map::new());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// running/ nonempty at entry cannot drain inside the countdown
+    /// (§3.5: the signal path already TERM+KILLed; nothing reaps
+    /// during honoring). maybe_shutdown must bail immediately
+    /// instead of sleeping the full grace to reach the same verdict.
+    #[test]
+    fn nonempty_running_skips_countdown() {
+        let root = std::env::temp_dir().join(format!("shunt-idle-test-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("pending")).unwrap();
+        std::fs::write(root.join("shutdown_on_idle"), b"").unwrap();
+        let t0 = std::time::Instant::now();
+        super::maybe_shutdown(&root, false, false, None);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "countdown slept despite live running tasks");
+        let log = std::fs::read_to_string(root.join("daemon.log")).unwrap();
+        assert!(log.contains("idle_shutdown_aborted"), "early bail must be logged");
+        assert!(root.join("shutdown_on_idle").exists(), "flag stays armed");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
