@@ -111,7 +111,7 @@ impl Daemon {
                         exec::SignalOutcome::Delivered => {
                             h.timed_out = h.timeout_s;
                             h.kill_at = Some(now + TIMEOUT_GRACE);
-                            dlog(&self.root, "task_timeout", ev(json!({"task": h.base, "pgid": pid, "limit_s": h.timed_out})));
+                            dlog(&self.root, "task_timeout", ev(json!({"task": h.base, "pgid": pgid, "limit_s": h.timed_out})));
                         }
                         // ESRCH race: the group died on its own
                         // between the gate and the kill. Nothing was
