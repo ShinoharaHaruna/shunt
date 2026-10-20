@@ -118,9 +118,16 @@ pub fn iso_utc(secs: u64) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-/// New server-side task id: `<unix>-<pid>`, deduped against spool dir.
+/// New server-side task id: `<unix>-<pidseq>`, deduped against the
+/// spool dir. `pidseq` packs pid<<16 | per-process seq so two
+/// same-second submits still differ in the 8-char tail `submit`
+/// embeds in the pushed slug — §4.4 wants a re-pushed task
+/// recognizable, which identical slugs would defeat.
 fn new_task_id(dir: &std::path::Path) -> String {
-    let base = format!("{:x}-{:x}", now_unix(), std::process::id());
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let tag = ((std::process::id() as u64) << 16) | (SEQ.fetch_add(1, Ordering::Relaxed) & 0xffff);
+    let base = format!("{:x}-{:x}", now_unix(), tag);
     for i in 0..1000 {
         let id = if i == 0 { base.clone() } else { format!("{base}-{i}") };
         if !dir.join(format!("{id}.json")).exists() {
@@ -169,7 +176,10 @@ pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slu
     let dir = spool_dir()?;
     crate::server::fsutil::private_dir(&dir)?;
     let id = new_task_id(&dir);
-    let shortid: String = id.chars().take(8).collect();
+    // Tail, not head: the unix hex is >=8 chars until 2106, so
+    // take(8) would capture only the timestamp — the discriminating
+    // pidseq lives at the end of the id.
+    let shortid: String = id.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
     meta.slug = format!("{slug}-{shortid}");
 
     crate::proto::task::validate_meta(&meta)?;
@@ -332,6 +342,23 @@ mod tests {
             // string, where its `$()`/backticks would re-expand.
             assert!(!out.contains(&format!("\"guard hit: {q}")), "quoted guard inside a double-quoted echo for {guard:?}");
         }
+    }
+
+    /// Two consecutive ids minted in the same process (i.e. possibly
+    /// the same second) must differ in the tail `submit` uses as
+    /// shortid, and both must fit the valid_task_id charset.
+    #[test]
+    fn same_second_ids_differ_in_shortid_tail() {
+        let dir = std::env::temp_dir().join(format!("shunt-spool-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (new_task_id(&dir), new_task_id(&dir));
+        assert_ne!(a, b);
+        let tail = |s: &str| s.chars().rev().take(8).collect::<String>();
+        assert_ne!(tail(&a), tail(&b), "same-second submits would share a pushed slug: {a} vs {b}");
+        for id in [a, b] {
+            valid_task_id(&id).unwrap();
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
