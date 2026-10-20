@@ -169,7 +169,13 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
 
     // --- local teardown ---
     if !e.local {
-        rekey(&e)?; // drops OUR known_hosts entries + kills the mux master
+        // Best-effort: `ssh-keygen -R` exits 1 when the spec is not
+        // in the file (some OpenSSH builds), and a local hygiene
+        // miss must not wedge the deregistration the way update.rs
+        // already treats its drop_hostkey calls.
+        if let Err(err) = rekey(&e) {
+            eprintln!("warn: could not drop known_hosts entries ({err:#})");
+        }
     }
     std::fs::remove_file(&row)?;
     let default_key = registry::client_key_path(name)?;

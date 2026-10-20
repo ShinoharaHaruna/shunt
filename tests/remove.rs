@@ -8,8 +8,14 @@ use shunt::server::registry::{self, Binding, ClientEntry, ProjectEntry, SshEndpo
 use shunt::server::{client_ops, spool};
 use std::collections::BTreeMap;
 
+// SHUNT_HOME is process-global; tests in this binary run on
+// parallel threads, so every test that sets it must hold this lock
+// for its whole body or the two paths interleave.
+static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn remove_cleans_row_keys_state_spool_and_bindings() -> Result<()> {
+    let _g = HOME_LOCK.lock().unwrap();
     let home = std::env::temp_dir().join(format!("shunt-remove-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
 
@@ -39,6 +45,31 @@ fn remove_cleans_row_keys_state_spool_and_bindings() -> Result<()> {
     // Guards: localhost refused, missing row errors.
     assert!(client_ops::remove("localhost", false).is_err());
     assert!(client_ops::remove("gone", false).is_err());
+
+    std::fs::remove_dir_all(&home).ok();
+    Ok(())
+}
+
+#[test]
+fn remove_survives_rekey_failure() -> Result<()> {
+    let _g = HOME_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("shunt-remove-rekey-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &home);
+
+    // A non-local row whose known_hosts file exists but does NOT
+    // contain the host: `ssh-keygen -R` exits 1 there, and the
+    // failure must warn, not wedge the deregistration. Port 1 makes
+    // the best-effort remote stop fail fast (connection refused).
+    let kh = registry::known_hosts_path("sshbox")?;
+    std::fs::create_dir_all(kh.parent().unwrap())?;
+    std::fs::write(&kh, "unrelated.example ssh-ed25519 AAAA\n")?;
+    let e = ClientEntry { name: "sshbox".into(), local: false, disabled: false, local_bin: None, timeout_s: Some(2), ssh_timeout_s: Some(2), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 1, user: "u".into(), key: "/nonexistent/key".into(), password: String::new() }, qroot: "/q".into(), deploy_root: String::new(), facts: BTreeMap::new(), billing: None };
+    registry::save_client(&e)?;
+
+    client_ops::remove("sshbox", false)?;
+
+    assert!(registry::load_client("sshbox").is_err());
+    assert!(!kh.exists());
 
     std::fs::remove_dir_all(&home).ok();
     Ok(())
