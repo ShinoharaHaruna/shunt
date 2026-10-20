@@ -118,6 +118,26 @@ pub(crate) fn requeue_orphans(root: &Path) -> Result<()> {
     if let Ok(rd) = std::fs::read_dir(&pending) {
         for ent in rd.flatten() {
             let fname = ent.file_name().to_string_lossy().into_owned();
+            // Enqueue staging dirs (`.tmp.<pid>.<n>/`, queue.rs
+            // enqueue) stranded by kill -9 are DELETED, not
+            // recovered: an enqueue that never completed its rename
+            // was never acked, so the submitter believes the submit
+            // failed (the server respools it) — materializing it
+            // here would run a task nobody expects and risk a
+            // duplicate when the respush lands. Claim stages are
+            // different: the task was already queued and claimed,
+            // so losing it would be a silent drop.
+            if let Some(rest) = fname.strip_prefix(".tmp.") {
+                if !rest.starts_with("claim.") {
+                    let mut parts = rest.split('.');
+                    let looks_like_enqueue_stage = matches!((parts.next(), parts.next(), parts.next()), (Some(a), Some(b), None) if [a, b].iter().all(|p| p.chars().all(|c| c.is_ascii_digit())));
+                    if looks_like_enqueue_stage {
+                        let _ = std::fs::remove_dir_all(ent.path());
+                        dlog(root, "enqueue_stage_swept", ev(json!({"dir": fname})));
+                    }
+                    continue;
+                }
+            }
             let Some(rest) = fname.strip_prefix(".tmp.claim.") else {
                 continue;
             };
@@ -190,6 +210,28 @@ mod tests {
         requeue_orphans(&root).unwrap();
         assert!(root.join("pending/0100_x.sh").is_file());
         assert!(root.join("pending/0100_x/task.sh").is_file());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// An enqueue staging dir (`.tmp.<pid>.<n>/`) stranded by a
+    /// kill -9 mid-enqueue is litter: the submit was never acked, so
+    /// the submitter believes it failed and the spool will respush.
+    /// The sweep must DELETE it — recovering it to pending/ would
+    /// resurrect an unexpected task and risk a duplicate run.
+    #[test]
+    fn requeue_deletes_stranded_enqueue_stage() {
+        let root = tmp_root("enqstage");
+        let stage = root.join("pending/.tmp.4242.0007");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("task.sh"), "echo hi\n").unwrap();
+        // A non-numeric `.tmp.*` name is not an enqueue stage — leave it.
+        std::fs::create_dir_all(root.join("pending/.tmp.abc")).unwrap();
+        requeue_orphans(&root).unwrap();
+        assert!(!stage.exists(), "un-acked enqueue stage must be deleted, not recovered");
+        assert!(root.join("pending/.tmp.abc").exists(), "non-enqueue .tmp.* litter is out of scope");
+        assert!(queue::pending_list(&root).unwrap().is_empty());
+        let log = std::fs::read_to_string(root.join("daemon.log")).unwrap();
+        assert!(log.contains("enqueue_stage_swept"), "sweep must be loud: {log}");
         std::fs::remove_dir_all(&root).ok();
     }
 
