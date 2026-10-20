@@ -118,7 +118,10 @@ pub fn run_all(json: bool) -> Result<()> {
             .iter()
             .zip(handles)
             .map(|(c, h)| match h {
-                Some(h) => h.join().expect("status probe thread panicked"),
+                // A panicked probe degrades to an error row like
+                // every other failure mode here — one bad thread
+                // must never abort the whole aggregate.
+                Some(h) => h.join().unwrap_or_else(|_| ClientStatus { reachable: false, report: None, error: Some("probe panicked".into()), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None }),
                 None => ClientStatus { reachable: false, report: None, error: Some(format!("cannot load row: {:#}", c.as_ref().unwrap_err())), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None },
             })
             .collect()
@@ -135,9 +138,19 @@ pub fn run_all(json: bool) -> Result<()> {
         }
         out.insert(name.clone(), serde_json::to_value(&st)?);
     }
-    let staged = crate::server::spool::list()?;
+    // spool::list() quarantines corrupt entries (`*.bad`, §4.4)
+    // even on this read path — accepted: fault isolation wins over
+    // read purity, and a status run should surface the same clean
+    // spool the dispatcher sees. What it must NOT do is fail the
+    // whole command on an unreadable staging dir: degrade to a
+    // spool_error field / note line.
+    let staged = crate::server::spool::list();
     if json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "protocol": crate::proto::wire::PROTOCOL_VERSION, "clients": out, "spool_pending": staged.len() }))?);
+        let (pending, err) = match &staged {
+            Ok(v) => (serde_json::json!(v.len()), serde_json::Value::Null),
+            Err(e) => (serde_json::Value::Null, serde_json::json!(format!("{e:#}"))),
+        };
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "protocol": crate::proto::wire::PROTOCOL_VERSION, "clients": out, "spool_pending": pending, "spool_error": err }))?);
         return Ok(());
     }
 
@@ -161,12 +174,14 @@ pub fn run_all(json: bool) -> Result<()> {
         line(r);
     }
     println!();
-    if staged.is_empty() {
-        println!("== spool ==  empty");
-    } else {
-        println!("== spool ==  {} staged for dispatch", staged.len());
-        for e in &staged {
-            println!("  {}  {} -> {}  {} ({})", e.id, e.project, e.client, e.meta.slug, e.submitted_at);
+    match &staged {
+        Err(e) => println!("== spool ==  unreadable: {e:#}"),
+        Ok(staged) if staged.is_empty() => println!("== spool ==  empty"),
+        Ok(staged) => {
+            println!("== spool ==  {} staged for dispatch", staged.len());
+            for e in staged {
+                println!("  {}  {} -> {}  {} ({})", e.id, e.project, e.client, e.meta.slug, e.submitted_at);
+            }
         }
     }
     Ok(())
