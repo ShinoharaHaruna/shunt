@@ -54,6 +54,14 @@ struct RunHandle {
     /// already dead. Logged once, then left to reap — never marked
     /// timed_out, since nothing was signaled.
     gone: bool,
+    /// Once-guard bitmask for `timeout_unenforceable`: bit 0 = TERM
+    /// undeliverable (Failed), bit 1 = group unverifiable (no pid
+    /// file / gate refused). Without it an unenforceable deadline
+    /// would re-log the WARNING every poll (~2 s) for as long as
+    /// the condition persists. Each arm logs its own text once;
+    /// a later Delivered (task_timeout) or Gone (task_timeout_gone)
+    /// ends the condition on its own, so the bits never reset.
+    unenforceable_warned: u8,
     /// Set once the leader is reaped; finalize waits out the pgid.
     exited: Option<Exited>,
 }
@@ -122,12 +130,15 @@ impl Daemon {
                         // stays expired, so a clearing fault is
                         // enforced late rather than never.
                         exec::SignalOutcome::Failed(e) => {
-                            dlog(
-                                &self.root,
-                                "timeout_unenforceable",
-                                ev(json!({"task": h.base, "pgid": pgid, "error": e.to_string(),
-                                   "warning": "deadline passed but TERM undeliverable; budget stays expired and enforcement retries next cycle"})),
-                            );
+                            if h.unenforceable_warned & 0b01 == 0 {
+                                h.unenforceable_warned |= 0b01;
+                                dlog(
+                                    &self.root,
+                                    "timeout_unenforceable",
+                                    ev(json!({"task": h.base, "pgid": pgid, "error": e.to_string(),
+                                       "warning": "deadline passed but TERM undeliverable; budget stays expired and enforcement retries next cycle"})),
+                                );
+                            }
                         }
                     },
                     // No pid file (the pid_write_failed blind spot) or
@@ -136,12 +147,15 @@ impl Daemon {
                     // marked. A dead group is finalized by reap with
                     // its real rc; a live-but-ungated one retries.
                     _ => {
-                        dlog(
-                            &self.root,
-                            "timeout_unenforceable",
-                            ev(json!({"task": h.base, "pgid": pid,
-                               "warning": "deadline passed but the task's group cannot be verified (no pid file or gate refused); budget stays expired and enforcement retries next cycle"})),
-                        );
+                        if h.unenforceable_warned & 0b10 == 0 {
+                            h.unenforceable_warned |= 0b10;
+                            dlog(
+                                &self.root,
+                                "timeout_unenforceable",
+                                ev(json!({"task": h.base, "pgid": pid,
+                                   "warning": "deadline passed but the task's group cannot be verified (no pid file or gate refused); budget stays expired and enforcement retries next cycle"})),
+                            );
+                        }
                     }
                 }
             } else if h.kill_at.is_some_and(|k| now >= k) {
@@ -346,7 +360,7 @@ impl Daemon {
                             let _ = exec::quarantine(&self.root, "running", &stale.base, &format!("finalize failed after pid reuse (rc {rc}): {e:#}"));
                         }
                     }
-                    self.runpids.insert(pid, RunHandle { base: next.clone(), child, timeout_s, deadline, timed_out: None, kill_at: None, gone: false, exited: None });
+                    self.runpids.insert(pid, RunHandle { base: next.clone(), child, timeout_s, deadline, timed_out: None, kill_at: None, gone: false, unenforceable_warned: 0, exited: None });
                     dlog(
                         &self.root,
                         "start",
@@ -566,13 +580,17 @@ mod tests {
         std::fs::create_dir_all(root.join("running")).unwrap();
         let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
         let pid = child.id();
-        let h = super::RunHandle { base: "t-timeout".into(), child, timeout_s: Some(1), deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)), timed_out: None, kill_at: None, gone: false, exited: None };
+        let h = super::RunHandle { base: "t-timeout".into(), child, timeout_s: Some(1), deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)), timed_out: None, kill_at: None, gone: false, unenforceable_warned: 0, exited: None };
         let mut d = super::Daemon { root: root.clone(), runpids: [(pid, h)].into_iter().collect(), last_workers: None, got_signal: Default::default() };
         d.enforce_timeouts();
         let h = &d.runpids[&pid];
         assert!(h.timed_out.is_none() && h.kill_at.is_none(), "no signal delivered — nothing may be marked");
+        // Second poll while still unenforceable: the WARNING is a
+        // once-per-state event, not one line per cycle.
+        d.enforce_timeouts();
         let log = std::fs::read_to_string(root.join("daemon.log")).unwrap();
-        assert!(log.contains("timeout_unenforceable"), "undeliverable TERM must be loud in daemon.log");
+        let n = log.matches("timeout_unenforceable").count();
+        assert_eq!(n, 1, "undeliverable TERM must be loud once, not once per poll ({n} lines)");
         let child = &mut d.runpids.get_mut(&pid).unwrap().child;
         let _ = child.kill();
         let _ = child.wait();
