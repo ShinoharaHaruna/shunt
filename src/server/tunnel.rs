@@ -195,6 +195,13 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
         anyhow::bail!("ssh tunnel exited during setup; see {}", dir.join(format!("{}.log", client.name)).display());
     }
     let pid = child.id();
+    // The tunnel must outlive `up`'s caller (the dispatcher calls this
+    // from heal), so the ssh stays detached — but a dropped Child is
+    // still our child and zombies on death until wait()ed. Hand it to
+    // a reaper thread: non-blocking for us, reaped for the kernel.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     crate::server::fsutil::write_private(&pid_path(&dir, &client.name), format!("{pid}\n"))?;
     crate::server::fsutil::write_private(&port_path(&dir, &client.name), format!("{port}\n"))?;
 
