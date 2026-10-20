@@ -147,6 +147,12 @@ fn task_directives(task: &Path) -> (Option<String>, Vec<(String, String)>, Optio
     let mut envs = Vec::new();
     let mut timeout_s = None;
     for line in text.lines() {
+        // trim_start like read_env_file: an indented `#` is still a
+        // comment to the shell, so leading whitespace must neither
+        // end the head scan nor hide a directive (§3.13's "first
+        // non-comment line"). Value literals are unaffected — the
+        // trim only touches bytes before `#`.
+        let line = line.trim_start();
         if let Some(w) = line.strip_prefix("# shunt:workdir=") {
             // Value is literal like the env file (§3.12) — no trim.
             // NUL would panic `Command::arg` at spawn — drop the
@@ -699,6 +705,21 @@ mod tests {
         assert_eq!(workdir, None, "NUL workdir directive must be dropped");
         assert_eq!(envs, vec![("OK".to_string(), "yes".to_string())]);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// An indented `#` is still a comment to the shell, so it must
+    /// neither end the §3.13 head scan nor hide a directive — the
+    /// same trim_start rule read_env_file already applies. A plain
+    /// indented comment between directives keeps the scan going, and
+    /// an indented `# shunt-env:` is honored outright.
+    #[test]
+    fn indented_comments_do_not_end_directive_head() {
+        let task = std::env::temp_dir().join(format!("shunt-indent-{}", std::process::id()));
+        std::fs::write(&task, "#!/usr/bin/env bash\n# shunt-env:EARLY=1\n  # an indented note\n\t# shunt-env:LATE=2\n   # shunt:timeout_s=60\necho hi\n# shunt-env:NEVER=seen\n").unwrap();
+        let (_, envs, timeout_s) = super::task_directives(&task);
+        assert_eq!(envs, vec![("EARLY".to_string(), "1".to_string()), ("LATE".to_string(), "2".to_string())]);
+        assert_eq!(timeout_s, Some(60));
+        std::fs::remove_file(&task).ok();
     }
 
     /// A NUL-bearing `<qroot>/shell` must fall back to bash: spawn
