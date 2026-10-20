@@ -50,6 +50,10 @@ struct RunHandle {
     deadline: Option<std::time::Instant>,
     timed_out: Option<u64>,
     kill_at: Option<std::time::Instant>,
+    /// ESRCH race: the §3.9a gate passed but TERM found the group
+    /// already dead. Logged once, then left to reap — never marked
+    /// timed_out, since nothing was signaled.
+    gone: bool,
     /// Set once the leader is reaped; finalize waits out the pgid.
     exited: Option<Exited>,
 }
@@ -77,6 +81,9 @@ impl Daemon {
             if h.exited.is_some() {
                 continue;
             }
+            if h.gone {
+                continue;
+            }
             if h.timed_out.is_none() {
                 let expired = h.deadline.is_some_and(|d| now >= d);
                 if !expired {
@@ -85,19 +92,29 @@ impl Daemon {
                 // Deadline passed: TERM through the same pid-file +
                 // §3.9a group gate as kill_task. `timed_out` is
                 // stamped ONLY when enforcement actually happened —
-                // TERM delivered, or the group provably died on its
-                // own (ESRCH race after the gate). The §3.9 marker
-                // means "killed for exceeding budget": a task that
-                // merely outlived its deadline unsignaled must not
-                // wear it — a clean rc-0 finish then correctly lands
-                // in done/, and a non-zero rc in failed/ as a plain
-                // failure, not a budget death.
+                // TERM delivered. The §3.9 marker means "killed for
+                // exceeding budget": a task that merely outlived its
+                // deadline unsignaled must not wear it — a clean rc-0
+                // finish then correctly lands in done/, and a
+                // non-zero rc in failed/ as a plain failure, not a
+                // budget death.
                 match exec::read_pid_file(&self.root, "running", &h.base) {
                     Some((pgid, start)) if exec::pgid_is_task_group(pgid, start) => match exec::signal_pgid(pgid, "TERM") {
-                        exec::SignalOutcome::Delivered | exec::SignalOutcome::Gone => {
+                        exec::SignalOutcome::Delivered => {
                             h.timed_out = h.timeout_s;
                             h.kill_at = Some(now + TIMEOUT_GRACE);
                             dlog(&self.root, "task_timeout", ev(json!({"task": h.base, "pgid": pid, "limit_s": h.timed_out})));
+                        }
+                        // ESRCH race: the group died on its own
+                        // between the gate and the kill. Nothing was
+                        // signaled, so nothing is marked — reap
+                        // finalizes with the real rc. The `gone`
+                        // flag stops this arm re-logging every poll
+                        // until then; retrying TERM on a provably
+                        // dead group is pointless.
+                        exec::SignalOutcome::Gone => {
+                            h.gone = true;
+                            dlog(&self.root, "task_timeout_gone", ev(json!({"task": h.base, "pgid": pgid})));
                         }
                         // Signal undeliverable but group alive
                         // (EPERM, transient /proc fault): stay
@@ -329,7 +346,7 @@ impl Daemon {
                             let _ = exec::quarantine(&self.root, "running", &stale.base, &format!("finalize failed after pid reuse (rc {rc}): {e:#}"));
                         }
                     }
-                    self.runpids.insert(pid, RunHandle { base: next.clone(), child, timeout_s, deadline, timed_out: None, kill_at: None, exited: None });
+                    self.runpids.insert(pid, RunHandle { base: next.clone(), child, timeout_s, deadline, timed_out: None, kill_at: None, gone: false, exited: None });
                     dlog(
                         &self.root,
                         "start",
@@ -549,7 +566,7 @@ mod tests {
         std::fs::create_dir_all(root.join("running")).unwrap();
         let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
         let pid = child.id();
-        let h = super::RunHandle { base: "t-timeout".into(), child, timeout_s: Some(1), deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)), timed_out: None, kill_at: None, exited: None };
+        let h = super::RunHandle { base: "t-timeout".into(), child, timeout_s: Some(1), deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)), timed_out: None, kill_at: None, gone: false, exited: None };
         let mut d = super::Daemon { root: root.clone(), runpids: [(pid, h)].into_iter().collect(), last_workers: None, got_signal: Default::default() };
         d.enforce_timeouts();
         let h = &d.runpids[&pid];
