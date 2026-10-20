@@ -350,9 +350,11 @@ pub fn run(cli: Cli) -> Result<()> {
             &a.client,
             &a.root,
             "workers",
-            |name| match a.n {
-                Some(n) => remote(name, &["workers", "set", &n.to_string(), "--json"], None),
-                None => remote(name, &["workers", "get", "--json"], None),
+            |name| {
+                let tail = workers_wire_tail(&a);
+                let mut refs: Vec<&str> = tail.iter().map(String::as_str).collect();
+                refs.push("--json");
+                remote(name, &refs, None)
             },
             || agent_workers(&a),
         ),

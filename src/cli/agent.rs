@@ -382,6 +382,23 @@ pub(crate) fn logs_wire_tail(a: &LogsArgs) -> Vec<String> {
     tail
 }
 
+/// Wire argv for a remote `workers`: `workers set N` when either
+/// spelling asks for a set (positional `N` or `set {N}` — same
+/// resolution as `agent_workers`), else `workers get`. Without
+/// this, `workers -c box set 5` would send `get` and report the
+/// old value as if the set had landed.
+pub(crate) fn workers_wire_tail(a: &WorkersArgs) -> Vec<String> {
+    let set_to = match (&a.n, &a.action) {
+        (Some(n), _) => Some(*n),
+        (None, Some(WorkerAction::Set { n })) => Some(*n),
+        _ => None,
+    };
+    match set_to {
+        Some(n) => vec!["workers".into(), "set".into(), n.to_string()],
+        None => vec!["workers".into(), "get".into()],
+    }
+}
+
 /// The last `n` newline-terminated lines of `bytes`. A trailing
 /// newline is a terminator, not an empty extra line; fewer than
 /// `n` lines returns the whole buffer.
@@ -507,6 +524,19 @@ mod tests {
         // match every task log instead of the daemon log.
         let bare = LogsArgs { pattern: None, ..a };
         assert_eq!(logs_wire_tail(&bare), vec!["logs", "-n", "50"]);
+    }
+
+    /// `set 5` spelled via the subcommand must cross the wire as
+    /// `workers set 5`, not `workers get` (which would report the
+    /// old value as a silent no-op).
+    #[test]
+    fn workers_wire_tail_honors_set_subcommand() {
+        let wa = |n, action| WorkersArgs { n, action, client: None, root: None, json: false };
+        assert_eq!(workers_wire_tail(&wa(None, Some(WorkerAction::Set { n: 5 }))), vec!["workers", "set", "5"]);
+        // Positional `N` still sets; `get` and bare both fetch.
+        assert_eq!(workers_wire_tail(&wa(Some(3), None)), vec!["workers", "set", "3"]);
+        assert_eq!(workers_wire_tail(&wa(None, Some(WorkerAction::Get))), vec!["workers", "get"]);
+        assert_eq!(workers_wire_tail(&wa(None, None)), vec!["workers", "get"]);
     }
 
     /// prio must refuse a flat entry renaming onto a same-named
