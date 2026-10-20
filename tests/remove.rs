@@ -33,12 +33,18 @@ fn remove_cleans_row_keys_state_spool_and_bindings() -> Result<()> {
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
     std::fs::write(state.join("gone.fail"), "2\n")?;
+    // A dead mux master never unlinks its own socket; §4.1 counts
+    // cm/<name>.sock among the deregistered state.
+    let sock = home.join("cm").join("gone.sock");
+    std::fs::create_dir_all(sock.parent().unwrap())?;
+    std::fs::write(&sock, "")?;
 
     client_ops::remove("gone", false)?;
 
     assert!(registry::load_client("gone").is_err());
     assert!(!key.exists() && !key.with_extension("pub").exists());
     assert!(!state.join("gone.fail").exists());
+    assert!(!sock.exists());
     assert!(spool::list()?.is_empty());
     assert!(registry::load_project("p")?.bind.is_empty());
 

@@ -183,6 +183,12 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
             eprintln!("warn: could not drop known_hosts entries ({err:#})");
         }
     }
+    // After rekey's `ssh -O exit` ask: a dead master never removes
+    // cm/<name>.sock itself — §4.1 counts it among the deregistered
+    // state (rename already unlinks its old socket above).
+    if let Ok(sock) = crate::server::transport::cm_dir().map(|d| d.join(format!("{name}.sock"))) {
+        let _ = std::fs::remove_file(sock);
+    }
     std::fs::remove_file(&row)?;
     let default_key = registry::client_key_path(name)?;
     if e.ssh.key == default_key.display().to_string() {
