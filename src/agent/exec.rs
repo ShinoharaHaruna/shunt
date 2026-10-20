@@ -35,11 +35,14 @@ pub fn read_env_file(root: &Path) -> BTreeMap<String, String> {
             }
             if let Some((k, v)) = line.split_once('=') {
                 let k = k.trim();
-                // `Command::env` panics on an empty key — a `=foo`
-                // line must be dropped here, not crash the daemon
-                // mid-dispatch.
-                if !k.is_empty() {
-                    map.insert(k.to_string(), v.trim().to_string());
+                let v = v.trim();
+                // `Command::env` panics on an empty key or on NUL in
+                // key/value — a `=foo` or NUL-bearing line must be
+                // dropped here, not crash the daemon mid-dispatch
+                // (a claimed entry that panics dispatch requeues as
+                // an orphan and crash-loops forever, design.md §3.6).
+                if !k.is_empty() && !k.contains('\0') && !v.contains('\0') {
+                    map.insert(k.to_string(), v.to_string());
                 }
             }
         }
@@ -76,7 +79,10 @@ pub fn spawn_task(root: &Path, task_name: &str) -> Result<(Child, Option<u64>)> 
     // before exec'ing the task (design.md §3.12) — conda activate /
     // `source env.sh` work because env mutations survive exec; a
     // missing or erroring file never blocks the task.
-    let shell = std::fs::read_to_string(root.join("shell")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "bash".into());
+    // A NUL-bearing shell path would panic `Command::new`/`arg` —
+    // treat it like a missing file and fall back to bash rather than
+    // crash dispatch.
+    let shell = std::fs::read_to_string(root.join("shell")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && !s.contains('\0')).unwrap_or_else(|| "bash".into());
     let mut cmd = Command::new(&shell);
     cmd.arg("-c")
         // rc 97 when the workdir is unreachable (design.md §3.12)
@@ -138,18 +144,25 @@ fn task_directives(task: &Path) -> (Option<String>, Vec<(String, String)>, Optio
     let mut timeout_s = None;
     for line in text.lines() {
         if let Some(w) = line.strip_prefix("# shunt:workdir=") {
-            workdir = Some(w.trim().to_string());
+            // NUL would panic `Command::arg` at spawn — drop the
+            // directive so the env-file/default workdir applies.
+            let w = w.trim();
+            if !w.contains('\0') {
+                workdir = Some(w.to_string());
+            }
         } else if let Some(t) = line.strip_prefix("# shunt:timeout_s=") {
             timeout_s = t.trim().parse::<u64>().ok().filter(|&n| n > 0);
         } else if let Some(kv) = line.strip_prefix("# shunt-env:") {
             if let Some((k, v)) = kv.split_once('=') {
                 let k = k.trim();
+                let v = v.trim();
                 // Same panic guard as the env file: `# shunt-env:=x`
-                // yields an empty key that `Command::env` rejects.
-                if !k.is_empty() {
+                // yields an empty key and a NUL in either half is a
+                // `Command::env` panic — both must be dropped.
+                if !k.is_empty() && !k.contains('\0') && !v.contains('\0') {
                     // Trim like the env file: same literal semantics
                     // for the two KEY=value surfaces.
-                    envs.push((k.to_string(), v.trim().to_string()));
+                    envs.push((k.to_string(), v.to_string()));
                 }
             }
         } else if !line.starts_with('#') && !line.trim().is_empty() {
@@ -471,6 +484,41 @@ mod tests {
         let (_, envs, _) = super::task_directives(&task);
         assert_eq!(envs, vec![("OK".to_string(), "yes".to_string())]);
         std::fs::remove_file(&task).ok();
+    }
+
+    /// NUL is valid UTF-8, so `read_to_string` passes it through —
+    /// but `Command::env`/`arg`/`new` panic on it. Every parsed
+    /// surface must drop NUL-bearing entries the same way empty keys
+    /// are dropped, or a hostile file crash-loops the daemon
+    /// (panic in dispatch → orphan requeue → panic again).
+    #[test]
+    fn nul_entries_are_dropped_not_panics() {
+        let root = std::env::temp_dir().join(format!("shunt-nul-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("env"), "BAD\u{0}KEY=v\nK2=v\u{0}x\nGOOD=1\n").unwrap();
+        let m = read_env_file(&root);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m["GOOD"], "1");
+
+        let task = root.join("t.sh");
+        std::fs::write(&task, "#!/usr/bin/env bash\n# shunt:workdir=/x\u{0}y\n# shunt-env:A\u{0}B=x\n# shunt-env:C=d\u{0}e\n# shunt-env:OK=yes\necho hi\n").unwrap();
+        let (workdir, envs, _) = super::task_directives(&task);
+        assert_eq!(workdir, None, "NUL workdir directive must be dropped");
+        assert_eq!(envs, vec![("OK".to_string(), "yes".to_string())]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A NUL-bearing `<qroot>/shell` must fall back to bash: spawn
+    /// must return a live child, never panic inside dispatch.
+    #[test]
+    fn nul_shell_file_falls_back_to_bash() {
+        let root = std::env::temp_dir().join(format!("shunt-nulshell-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(root.join("running")).unwrap();
+        std::fs::write(root.join("running").join("t.sh"), "#!/usr/bin/env bash\nexit 0\n").unwrap();
+        std::fs::write(root.join("shell"), "bash\u{0}evil").unwrap();
+        let (mut child, _) = super::spawn_task(&root, "t").expect("spawn_task must not fail on NUL shell file");
+        assert_eq!(child.wait().unwrap().code(), Some(0));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Quarantine with a missing source is a no-op: when the entry
