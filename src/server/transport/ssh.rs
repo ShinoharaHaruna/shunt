@@ -39,32 +39,37 @@ fn unreachable_err(client: &ClientEntry, stderr: &str) -> anyhow::Error {
     anyhow::anyhow!("ssh {}@{}:{} unreachable rc=255: {}{}", client.ssh.user, client.ssh.host, client.ssh.port, stderr, hint)
 }
 
-fn cm_sock(client: &ClientEntry) -> String {
-    cm_dir().map(|d| d.join(format!("{}.sock", client.name)).display().to_string()).unwrap_or_else(|_| "/dev/null".into())
+fn cm_sock(client: &ClientEntry) -> Result<String> {
+    Ok(cm_dir()?.join(format!("{}.sock", client.name)).display().to_string())
 }
 
 impl SshTransport {
     /// ssh connection flags (-p, BatchMode, timeouts, TOFU known_hosts,
     /// key, user@host, mux). Shared by exec, scp, and the tunnel
     /// manager.
-    pub(crate) fn base_args(client: &ClientEntry) -> Vec<String> {
+    /// There is no safe fallback for a failed `shunt_home()` (HOME
+    /// and SHUNT_HOME both unset — cron/systemd/forced-command
+    /// contexts): the old code degraded known_hosts and ControlPath
+    /// to /dev/null and chmodded a /tmp fallback, stripping /tmp's
+    /// sticky bit. Errors now propagate to the caller instead.
+    pub(crate) fn base_args(client: &ClientEntry) -> Result<Vec<String>> {
         // Per-client TOFU store: two rows can legitimately share one
         // host:port behind a NAT gateway while the boxes carry
         // different host keys — a shared file would deadlock the
         // second client on REMOTE HOST IDENTIFICATION HAS CHANGED.
-        let kh = crate::server::registry::known_hosts_path(&client.name).map(|p| p.display().to_string()).unwrap_or_else(|_| "/dev/null".into());
+        let kh = crate::server::registry::known_hosts_path(&client.name)?.display().to_string();
         // ControlMaster mux: every exec/scp rides one TCP session per
         // client. Boxes behind startup-limited proxies (`Exceeded
         // MaxStartups`) reject back-to-back handshakes — muxing is the
         // fix, not retries. The socket lives under $SHUNT_HOME/cm/ so
         // nothing touches the user's own ssh config.
-        let _ = crate::server::fsutil::private_dir(&cm_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp")));
-        let mut v = vec!["-p".into(), client.ssh.port.to_string(), "-o".into(), "BatchMode=yes".into(), "-o".into(), format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)), "-o".into(), "StrictHostKeyChecking=accept-new".into(), "-o".into(), format!("UserKnownHostsFile={kh}"), "-o".into(), "ControlMaster=auto".into(), "-o".into(), format!("ControlPath={}", cm_sock(client)), "-o".into(), "ControlPersist=60".into()];
+        crate::server::fsutil::private_dir(&cm_dir()?)?;
+        let mut v = vec!["-p".into(), client.ssh.port.to_string(), "-o".into(), "BatchMode=yes".into(), "-o".into(), format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)), "-o".into(), "StrictHostKeyChecking=accept-new".into(), "-o".into(), format!("UserKnownHostsFile={kh}"), "-o".into(), "ControlMaster=auto".into(), "-o".into(), format!("ControlPath={}", cm_sock(client)?), "-o".into(), "ControlPersist=60".into()];
         if !client.ssh.key.is_empty() {
             v.push("-i".into());
             v.push(client.ssh.key.clone());
         }
-        v
+        Ok(v)
     }
 
     /// `user@host` — appended by each caller that needs a target
@@ -79,7 +84,7 @@ impl SshTransport {
 impl super::Transport for SshTransport {
     fn exec(&self, client: &ClientEntry, argv: &[String], stdin: Option<&str>) -> Result<String> {
         let mut cmd = Command::new("ssh");
-        cmd.args(Self::base_args(client))
+        cmd.args(Self::base_args(client)?)
             // Half-open TCP detection for exec only — not in base_args:
             // the tunnel sets its own ServerAlive policy and scp
             // (bootstrap) has no liveness requirement.
@@ -151,7 +156,7 @@ impl super::Transport for SshTransport {
         // base_args is flags-only now: drop its leading `-p PORT`
         // (scp spells it -P), then local source + user@host:path.
         let mut args = vec!["-P".into(), client.ssh.port.to_string()];
-        args.extend(Self::base_args(client).into_iter().skip(2));
+        args.extend(Self::base_args(client)?.into_iter().skip(2));
         args.push(local.display().to_string());
         // The remote side of scp runs through the remote login
         // shell — the qroot-derived path must be quoted or spaces /
@@ -276,6 +281,17 @@ mod tests {
         assert!(err.to_string().contains("timed out"), "{err}");
         std::env::remove_var("SHUNT_SSH_EXEC_TIMEOUT_S");
         restore_path();
+    }
+
+    /// A failed shunt_home()/cm-dir setup must reach the caller as an
+    /// error — not degrade to /dev/null ControlPath + a chmodded /tmp
+    /// (the fallback once stripped /tmp's sticky bit).
+    #[test]
+    fn base_args_errs_when_home_unusable() {
+        let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        std::env::set_var("SHUNT_HOME", "/proc/shunt-cannot-exist");
+        assert!(SshTransport::base_args(&ssh_client()).is_err());
+        std::env::remove_var("SHUNT_HOME");
     }
 
     /// Install a fake `scp` ahead on PATH (same pattern as `fake_ssh`).

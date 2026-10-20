@@ -188,7 +188,7 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
     let err = log.try_clone()?;
 
     let mut args = vec!["ssh".to_string()];
-    args.extend(ssh_conn_args(client));
+    args.extend(ssh_conn_args(client)?);
     args.extend(["-N".into(), "-R".into(), port.to_string(), "-o".into(), "ExitOnForwardFailure=yes".into(), "-o".into(), "ServerAliveInterval=30".into(), "-o".into(), "ServerAliveCountMax=3".into()]);
     let mut child = Command::new("ssh").args(&args[1..]).stdin(Stdio::null()).stdout(log).stderr(err).process_group(0).spawn().context("spawn ssh tunnel")?;
     // ExitOnForwardFailure makes a bad bind exit fast; give it a beat.

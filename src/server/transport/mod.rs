@@ -25,10 +25,10 @@ pub fn shell_quote(arg: &str) -> String {
 
 /// ssh connection args for ad-hoc uses (tunnel manager): the same
 /// flags exec/scp use, without a remote command appended.
-pub fn ssh_conn_args(client: &ClientEntry) -> Vec<String> {
-    let mut v = SshTransport::base_args(client);
+pub fn ssh_conn_args(client: &ClientEntry) -> Result<Vec<String>> {
+    let mut v = SshTransport::base_args(client)?;
     v.push(SshTransport::target(client));
-    v
+    Ok(v)
 }
 
 /// Join argv into one remote shell command string.
