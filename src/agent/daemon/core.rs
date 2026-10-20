@@ -565,6 +565,18 @@ fn run_registered(root: &Path) -> Result<()> {
             // STOP set while tasks run: no new dispatches, drain only
         } else {
             d.dispatch();
+            // The own-queue idle gate is `runpids`, not a running/
+            // listing — deliberately asymmetric with busy_peers'
+            // fail-closed running_nonempty (design.md §3.11). A
+            // running/ entry with no tracked runpid is either a
+            // ghost_entry quarantine failure (a dir nobody can kill;
+            // gating poweroff on it would pin the box, and the bill,
+            // forever on unrecoverable litter) or an operator's
+            // manual mv. Firing poweroff past a ghost is the
+            // recoverable direction: the next daemon's
+            // requeue_orphans puts it back in pending/. A peer
+            // daemon cannot make that distinction from outside, so
+            // its gate stays fail-closed on the listing.
             if d.root.join("shutdown_on_idle").exists() && d.runpids.is_empty() && !shutdown::pending_nonempty(&d.root) {
                 maybe_shutdown(&d.root, true, false, Some(&d.got_signal));
             }
