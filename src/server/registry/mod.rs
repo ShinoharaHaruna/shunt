@@ -14,7 +14,7 @@ mod paths;
 mod state;
 mod types;
 
-pub use io::{list_clients, list_names, load_client, load_project, load_server_config, remove, save_client, save_project};
+pub use io::{list_clients, list_names, load_client, load_project, load_server_config, remove, retarget_default_client, save_client, save_project};
 pub use paths::{client_key_path, known_hosts_path, shunt_home, valid_name};
 pub use state::{conn_fail_bump, conn_fail_read, conn_fail_reset, CONN_FAIL_ESCALATE};
 pub use types::{Billing, Binding, ClientEntry, ProjectDefaults, ProjectEntry, ServerConfig, SshEndpoint};

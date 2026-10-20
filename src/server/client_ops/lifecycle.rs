@@ -88,6 +88,14 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
             registry::save_project(&pj)?;
         }
     }
+    // server.toml's default_client is part of the identity too
+    // (§4.1): left pointing at `old` it fails every -c-less
+    // command, and a later re-registration of `old` would silently
+    // hijack the default. Best-effort — a broken server.toml must
+    // not wedge the rename.
+    if let Err(e) = registry::retarget_default_client(old, Some(new)) {
+        eprintln!("warn: could not retarget default_client in server.toml ({e:#})");
+    }
     println!("renamed {old} -> {new} ({})", written.display());
     Ok(())
 }
@@ -186,6 +194,14 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
             registry::save_project(&pj)?;
             eprintln!("project {pname}: unbound {name}");
         }
+    }
+    // A removed client has no successor, so clear the key rather
+    // than warn-and-leave: a dangling default_client would silently
+    // bind a future re-registration of `name`, whereas removing it
+    // makes required_client report the clean "no default" error.
+    // Best-effort, same as rename.
+    if let Err(e) = registry::retarget_default_client(name, None) {
+        eprintln!("warn: could not clear default_client in server.toml ({e:#})");
     }
     println!("removed {name}");
     Ok(())

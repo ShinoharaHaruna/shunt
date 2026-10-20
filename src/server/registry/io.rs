@@ -170,6 +170,72 @@ pub fn load_server_config() -> Result<ServerConfig> {
     }
 }
 
+/// Surgical rewrite of `default_client` in `server.toml` for
+/// `client rename` (`new = Some`) and `client rm` (`new = None`):
+/// the name is load-bearing there too (design.md §4.1 — rename
+/// "moves the whole identity"), and a dangling default fails every
+/// `-c`-less command or silently retargets a future
+/// re-registration of the old name. Line-level edit, not a
+/// reserialize: server.toml is hand-editable and toml::to_string
+/// would strip comments. Returns Ok(false) when nothing applies —
+/// no file, a different/missing default, or a parsed key with no
+/// matching bare line (e.g. `"default_client" = "x"` form, left
+/// for the human). Bad TOML and IO errors propagate; callers treat
+/// them as warn-only.
+pub fn retarget_default_client(old: &str, new: Option<&str>) -> Result<bool> {
+    let path = shunt_home()?.join("server.toml");
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+    // Parse first: only a valid config whose default really is `old`
+    // is rewritten. A successful parse also guarantees at most one
+    // top-level `default_client` (TOML rejects duplicate keys), so
+    // the first bare-key line before any [section] is THE key.
+    let cfg: ServerConfig = toml::from_str(&text).with_context(|| format!("bad TOML in {}", path.display()))?;
+    if cfg.default_client.as_deref() != Some(old) {
+        return Ok(false);
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut in_section = false;
+    let mut done = false;
+    for line in text.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let t = body.trim_start();
+        if t.starts_with('[') {
+            in_section = true;
+        }
+        let is_key = !done && !in_section && !t.starts_with('#') && t.strip_prefix("default_client").is_some_and(|rest| rest.trim_start().starts_with('='));
+        if is_key {
+            done = true;
+            if let Some(n) = new {
+                // Registry names are [A-Za-z0-9_.-] (valid_name) —
+                // safe inside TOML quotes with no escaping. The
+                // original indentation is kept; a trailing comment
+                // on the line is dropped (rare, acceptable).
+                out.push_str(&body[..body.len() - t.len()]);
+                out.push_str(&format!("default_client = \"{n}\""));
+                if line.ends_with('\n') {
+                    out.push('\n');
+                }
+            } // else: rm — drop the line so required_client gives
+              // the clean "no default" error.
+            continue;
+        }
+        out.push_str(line);
+    }
+    if !done {
+        return Ok(false);
+    }
+    // Same tmp+rename + 0600 discipline as save_with_header: a
+    // concurrent reader must never see a truncated server.toml.
+    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
+    write_private(&tmp, out)?;
+    fs::rename(&tmp, &path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(true)
+}
+
 /// List entry names under a registry subdir (`clients`, `projects`).
 pub fn list_names(dir: &str) -> Result<Vec<String>> {
     let path = shunt_home()?.join(dir);

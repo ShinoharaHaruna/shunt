@@ -79,6 +79,44 @@ fn registry_files_are_private() {
     std::fs::remove_dir_all(&tmp).ok();
 }
 
+/// server.toml's default_client tracks renames/removes (design.md
+/// §4.1): rename rewrites it, rm drops the key, comments and other
+/// content survive, and non-matching/broken files are left alone.
+#[test]
+fn retarget_default_client_tracks_identity() {
+    let _g = HOME_LOCK.lock().unwrap();
+    let tmp = std::env::temp_dir().join(format!("shunt-test-defcli-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let path = tmp.join("server.toml");
+
+    // Rename: key retargets, comments and other keys preserved.
+    std::fs::write(&path, "# my config\npoll_interval_s = 30\ndefault_client = \"gpu-a\" # main box\n[extra]\nx = 1\n").unwrap();
+    assert!(retarget_default_client("gpu-a", Some("gpu-b")).unwrap());
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(text, "# my config\npoll_interval_s = 30\ndefault_client = \"gpu-b\"\n[extra]\nx = 1\n");
+    assert_eq!(load_server_config().unwrap().default_client.as_deref(), Some("gpu-b"));
+
+    // Non-matching default is untouched.
+    assert!(!retarget_default_client("other", Some("gpu-c")).unwrap());
+    assert_eq!(load_server_config().unwrap().default_client.as_deref(), Some("gpu-b"));
+
+    // Rm: key line drops, required_client's "no default" path applies.
+    assert!(retarget_default_client("gpu-b", None).unwrap());
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(text, "# my config\npoll_interval_s = 30\n[extra]\nx = 1\n");
+    assert_eq!(load_server_config().unwrap().default_client, None);
+
+    // Missing file and broken TOML: false / Err, never a panic.
+    std::fs::remove_file(&path).unwrap();
+    assert!(!retarget_default_client("gpu-b", None).unwrap());
+    std::fs::write(&path, "this is = = not toml\n").unwrap();
+    assert!(retarget_default_client("gpu-b", None).is_err());
+
+    std::env::remove_var("SHUNT_HOME");
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
 /// Registry names become filenames under $SHUNT_HOME — the charset
 /// gate is what keeps `client add ../x` or `project add -rf` from
 /// escaping their dirs or parsing as a flag downstream.
