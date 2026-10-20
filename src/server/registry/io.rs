@@ -114,10 +114,21 @@ pub fn load_client(name: &str) -> Result<ClientEntry> {
     usable(load("clients", name)?)
 }
 
-/// Disabled rows are visible on disk but unusable as clients.
+/// Disabled rows are visible on disk but unusable as clients — and
+/// so is an empty qroot: `shunt_bin` would render as `/bin/shunt`
+/// (stage-then-mv into SYSTEM /bin), every wire op would pass
+/// `--root ""`, and a loopback row would land queue dirs in the
+/// local cwd (design.md §4.7 — the registry is authoritative for
+/// where the queue lives; "" is not a location). Reject here so the
+/// bad row degrades to an error row in `status --all` instead of
+/// silently misrouting ops; `bootstrap` keeps its own earlier guard
+/// for the nicer message context.
 fn usable(entry: ClientEntry) -> Result<ClientEntry> {
     if entry.disabled {
         anyhow::bail!("client {} is disabled", entry.name);
+    }
+    if entry.qroot.is_empty() {
+        anyhow::bail!("{}: qroot is empty — set it in the row (usually <deploy_root>/queue)", entry.name);
     }
     Ok(entry)
 }

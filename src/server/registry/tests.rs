@@ -176,3 +176,34 @@ fn row_name_must_match_filename() {
     assert!(load_client("ok").is_ok());
     std::fs::remove_dir_all(&tmp).ok();
 }
+
+/// An empty qroot is an unusable row: `shunt_bin` would render as
+/// `/bin/shunt` (stage-then-mv into SYSTEM /bin), wire ops would
+/// pass `--root ""`, and a loopback row would drop queue dirs in
+/// the local cwd. load_client rejects it; the row still parses, so
+/// list_clients keeps it and `status --all` degrades to an error
+/// row instead of dropping or killing the aggregate.
+#[test]
+fn empty_qroot_row_is_unusable() {
+    let _g = HOME_LOCK.lock().unwrap();
+    let tmp = std::env::temp_dir().join(format!("shunt-test-qroot-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &tmp);
+    let entry = ClientEntry { name: "noq".into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint::default(), qroot: String::new(), deploy_root: String::new(), facts: BTreeMap::new(), billing: None };
+    save_client(&entry).unwrap();
+
+    let err = load_client("noq").unwrap_err().to_string();
+    assert!(err.contains("qroot is empty"), "{err}");
+
+    // Aggregate path: the row loads fine below usable(), so it
+    // lists and status --all renders the load error, not a skip.
+    // (localhost always lists — materialized or synthesized.)
+    assert_eq!(list_clients().unwrap(), vec!["localhost", "noq"]);
+
+    // localhost held to the same rule: a hand-emptied qroot on the
+    // on-disk row rejects instead of loopbacking into cwd.
+    let lo = load_client("localhost").unwrap();
+    save_client(&ClientEntry { qroot: String::new(), ..lo }).unwrap();
+    assert!(load_client("localhost").is_err());
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
