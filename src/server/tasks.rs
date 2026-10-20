@@ -101,6 +101,10 @@ fn append_event(fields: serde_json::Value) -> Result<()> {
 }
 
 fn save(rec: &TaskRecord) -> Result<()> {
+    // The id is joined into the record path and the tmp name
+    // below — refuse a bad id at the sink so NO caller (record_push,
+    // observe write-back, retarget_client) can escape tasks/.
+    crate::server::spool::valid_task_id(&rec.id)?;
     let dir = tasks_dir()?;
     crate::server::fsutil::private_dir(&dir)?;
     let path = dir.join(format!("{}.json", rec.id));
@@ -135,7 +139,12 @@ pub fn load(id: &str) -> Result<TaskRecord> {
     crate::server::spool::valid_task_id(id)?;
     let path = tasks_dir()?.join(format!("{id}.json"));
     let text = fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-    serde_json::from_str(&text).with_context(|| format!("bad JSON in {}", path.display()))
+    let rec: TaskRecord = serde_json::from_str(&text).with_context(|| format!("bad JSON in {}", path.display()))?;
+    // A planted record whose inner id differs from its filename
+    // would re-save (observe write-back, retarget_client) under the
+    // inner id — same rule spool::read_entry enforces.
+    anyhow::ensure!(rec.id == id, "{}: id {:?} does not match its filename", path.display(), rec.id);
+    Ok(rec)
 }
 
 /// All ledger records, pushed_at order (id breaks ties). Unparseable
@@ -152,7 +161,21 @@ pub fn list() -> Result<Vec<TaskRecord>> {
                     continue;
                 }
                 match fs::read_to_string(ent.path()).ok().and_then(|t| serde_json::from_str::<TaskRecord>(&t).ok()) {
-                    Some(r) => out.push(r),
+                    // Same safety rule as spool::read_entry: the
+                    // parsed id must be a safe filename equal to the
+                    // entry's own stem, or a planted
+                    // `"id":"../../y"` would be re-joined by
+                    // save()/retarget_client and write outside
+                    // tasks/. Offenders skip with a warning like
+                    // unparseable files.
+                    Some(r) => {
+                        let stem = name.strip_suffix(".json").unwrap_or(&name);
+                        if crate::server::spool::valid_task_id(&r.id).is_ok() && r.id == stem {
+                            out.push(r);
+                        } else {
+                            eprintln!("tasks: {} has unsafe or mismatched id {:?}; skipping", ent.path().display(), r.id);
+                        }
+                    }
                     None => eprintln!("tasks: cannot parse {}; skipping", ent.path().display()),
                 }
             }

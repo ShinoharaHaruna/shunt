@@ -262,6 +262,39 @@ fn task_ledger_lazy_outcome() -> Result<()> {
     Ok(())
 }
 
+/// Ledger traversal guard (same rule as spool::read_entry): a
+/// planted tasks/*.json whose inner id is unsafe or mismatched is
+/// skipped by list() and refused by load(), and save() refuses a
+/// bad id outright — no path may re-join it outside tasks/.
+#[test]
+fn task_ledger_rejects_traversal_id() -> Result<()> {
+    use shunt::server::tasks;
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, _c) = fixture("ledgertrav")?;
+    let dir = home.join("tasks");
+    std::fs::create_dir_all(&dir)?;
+
+    let planted = serde_json::json!({
+        "id": "../escape", "project": "p", "client": "fake-a",
+        "slug": "s", "queue_name": "q",
+        "submitted_at": "t", "pushed_at": "t",
+    });
+    std::fs::write(dir.join("x.json"), planted.to_string())?;
+
+    // list() skips it — it must never reach retarget_client/save.
+    assert!(tasks::list()?.is_empty());
+    // load() reads x.json but refuses the mismatched inner id.
+    assert!(tasks::load("x").is_err());
+    // save() refuses a bad id from any caller (record_push path).
+    assert!(tasks::record_push(&entry("../evil", "s"), "q").is_err());
+    // retarget_client over the planted file writes nothing outside.
+    tasks::retarget_client("fake-a", "renamed");
+    assert!(!home.join("escape.json").exists());
+
+    std::fs::remove_dir_all(&home).ok();
+    Ok(())
+}
+
 /// Auto-heal (§4.4): ssh answers but the daemon is dead — the
 /// sweep issues a remote `start` before pushing the entry.
 #[test]
