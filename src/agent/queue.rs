@@ -258,40 +258,49 @@ pub fn remove_pending(root: &Path, name: &str) -> Result<()> {
 pub fn claim(root: &Path, name: &str) -> Result<bool> {
     let pending = root.join("pending");
     let dst = root.join("running").join(name);
-    if pending.join(name).is_dir() {
-        if dst.exists() {
-            anyhow::bail!("cannot claim {name}: running/{name} already exists");
+    if !pending.join(name).is_dir() {
+        // Legacy flat file: normalize into the dir layout INSIDE
+        // pending/ first, so `running/<name>` only ever appears via
+        // one atomic rename of a COMPLETE entry. The old path
+        // mkdir'd running/<name> before the rename — a kill -9 in
+        // that window stranded an empty pid-less ghost dir that
+        // counts in running_list and keeps busy_peers busy forever
+        // (blocking a sibling's idle-shutdown). The staging dir is
+        // dot-prefixed, so listings never see it; a stage stranded
+        // by kill -9 is recovered to a full pending/<name> dir by
+        // the startup sweep in requeue_orphans.
+        let src = pending.join(format!("{name}.sh"));
+        if !src.exists() {
+            return Ok(false);
         }
-        return match std::fs::rename(pending.join(name), &dst) {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e).with_context(|| format!("cannot claim {name}")),
-        };
-    }
-    // Legacy flat file: normalize into the dir layout on claim.
-    let src = pending.join(format!("{name}.sh"));
-    if !src.exists() {
-        return Ok(false);
+        if pending.join(name).exists() {
+            // A stray non-.sh file holds the namespace; unclaimable.
+            anyhow::bail!("cannot claim {name}: pending/{name} already exists");
+        }
+        let stage = pending.join(format!(".tmp.claim.{}.{name}", std::process::id()));
+        std::fs::create_dir_all(&stage).with_context(|| format!("cannot claim {name}"))?;
+        if let Err(e) = std::fs::rename(&src, stage.join("task.sh")) {
+            // A failed .sh move must not strand the staging dir; the
+            // entry is still flat-listed, so lost-race is Ok(false).
+            let _ = std::fs::remove_dir_all(&stage);
+            return if e.kind() == std::io::ErrorKind::NotFound { Ok(false) } else { Err(e).with_context(|| format!("cannot claim {name}")) };
+        }
+        if let Err(e) = std::fs::rename(&stage, pending.join(name)) {
+            // Restore the flat file so the entry stays listed and
+            // claimable rather than hiding in an invisible stage.
+            let _ = std::fs::rename(stage.join("task.sh"), &src);
+            let _ = std::fs::remove_dir_all(&stage);
+            return Err(e).with_context(|| format!("cannot claim {name}"));
+        }
+        // Fall through to the atomic dir claim.
     }
     if dst.exists() {
         anyhow::bail!("cannot claim {name}: running/{name} already exists");
     }
-    std::fs::create_dir_all(&dst).with_context(|| format!("cannot claim {name}"))?;
-    match std::fs::rename(&src, dst.join("task.sh")) {
+    match std::fs::rename(pending.join(name), &dst) {
         Ok(()) => Ok(true),
-        Err(e) => {
-            // The dst dir we just created must not outlive the lost
-            // race: an empty pid-less `running/<name>/` ghost counts
-            // in running_list and keeps busy_peers busy forever.
-            // remove_dir fails harmlessly if it is somehow non-empty
-            // — that would mean someone else owns it.
-            let _ = std::fs::remove_dir(&dst);
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Ok(false)
-            } else {
-                Err(e).with_context(|| format!("cannot claim {name}"))
-            }
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("cannot claim {name}")),
     }
 }
 
@@ -418,6 +427,36 @@ mod tests {
         assert!(!claim(&root, "0100_x").unwrap());
         assert!(running_list(&root).unwrap().is_empty());
         assert!(!root.join("running/0100_x").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A legacy flat claim normalizes inside pending/ and lands in
+    /// running/ as a complete dir entry — the only state visible to
+    /// running_list. At no point may running/<name> appear empty.
+    #[test]
+    fn claim_flat_normalizes_then_atomic_rename() {
+        let root = tmp_root("flatclaim");
+        std::fs::write(root.join("pending/0100_x.sh"), "echo hi\n").unwrap();
+        assert!(claim(&root, "0100_x").unwrap());
+        assert!(root.join("running/0100_x/task.sh").is_file());
+        assert!(pending_list(&root).unwrap().is_empty());
+        assert_eq!(running_list(&root).unwrap(), vec!["0100_x".to_string()]);
+        // No staging litter may survive in pending/.
+        let leftovers: Vec<_> = std::fs::read_dir(root.join("pending")).unwrap().flatten().collect();
+        assert!(leftovers.is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A flat entry whose dir-namespace is already held by a stray
+    /// file is unclaimable (Err -> quarantine), never Ok(false).
+    #[test]
+    fn claim_flat_name_collision_is_err() {
+        let root = tmp_root("flatcollide");
+        std::fs::write(root.join("pending/0100_x.sh"), "echo hi\n").unwrap();
+        std::fs::write(root.join("pending/0100_x"), "stray\n").unwrap();
+        assert!(claim(&root, "0100_x").is_err());
+        assert!(root.join("pending/0100_x.sh").exists());
+        assert!(running_list(&root).unwrap().is_empty());
         std::fs::remove_dir_all(&root).ok();
     }
 
