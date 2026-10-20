@@ -50,6 +50,32 @@ fn remove_cleans_row_keys_state_spool_and_bindings() -> Result<()> {
     Ok(())
 }
 
+/// A `local = true` row is a real execution target: `rm --purge`
+/// must run the decommission over LocalTransport — `stop` against
+/// local_bin (no-op here) and `rm -rf <qroot>` for real. Before the
+/// fix the block was gated on `!e.local`, silently leaving the
+/// queue dir on disk.
+#[test]
+fn remove_purge_wipes_local_row_qroot() -> Result<()> {
+    let _g = HOME_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("shunt-remove-local-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &home);
+
+    let qroot = home.join("deep/queue");
+    std::fs::create_dir_all(qroot.join("pending"))?;
+    std::fs::write(qroot.join("marker"), "x")?;
+    let e = ClientEntry { name: "loop2".into(), local: true, disabled: false, local_bin: Some("/bin/true".into()), timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint::default(), qroot: qroot.display().to_string(), deploy_root: String::new(), facts: BTreeMap::new(), billing: None };
+    registry::save_client(&e)?;
+
+    client_ops::remove("loop2", true)?;
+
+    assert!(registry::load_client("loop2").is_err());
+    assert!(!qroot.exists(), "--purge must rm -rf a local row's qroot");
+
+    std::fs::remove_dir_all(&home).ok();
+    Ok(())
+}
+
 #[test]
 fn remove_survives_rekey_failure() -> Result<()> {
     let _g = HOME_LOCK.lock().unwrap();

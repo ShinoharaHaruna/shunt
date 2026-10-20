@@ -102,7 +102,8 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
 
 /// `shunt client rm <name> [--purge]` — deregister a box.
 ///
-/// Remote side (best-effort, skipped for local/unreachable boxes):
+/// Remote side (best-effort — `localhost` itself is refused above,
+/// but other `local = true` rows are real execution targets):
 /// stop the daemon, pull our pubkey from authorized_keys — matched
 /// by the key blob, not the comment, so a renamed client still
 /// revokes correctly — and with --purge, `rm -rf <qroot>` wipes the
@@ -129,7 +130,9 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
     }
 
     // --- remote decommission (best-effort) ---
-    if !e.local && !e.ssh.host.is_empty() {
+    // Local rows run the same steps over LocalTransport: the
+    // loopback daemon is a real daemon and --purge a real rm -rf.
+    if e.local || !e.ssh.host.is_empty() {
         let t = transport::transport_for(&e);
         let _ = crate::server::tunnel::down(t.as_ref(), &e); // kill the -R forward if it is up
         if !e.qroot.is_empty() {
@@ -144,11 +147,14 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
         // legitimately contain `/`, which turns a `sed '/blob/d'`
         // address into garbage — sed then exits 0 having done
         // nothing, leaving our key in place.
+        // Local rows carry no ssh.key — nothing to revoke.
         let pub_path = std::path::PathBuf::from(&e.ssh.key).with_extension("pub");
-        if let Ok(pubkey) = std::fs::read_to_string(&pub_path) {
-            if let Some(blob) = pubkey.split_whitespace().nth(1) {
-                if let Err(err) = revoke_key_blob(t.as_ref(), &e, blob) {
-                    eprintln!("warn: could not revoke authorized_keys ({err})");
+        if !e.ssh.key.is_empty() {
+            if let Ok(pubkey) = std::fs::read_to_string(&pub_path) {
+                if let Some(blob) = pubkey.split_whitespace().nth(1) {
+                    if let Err(err) = revoke_key_blob(t.as_ref(), &e, blob) {
+                        eprintln!("warn: could not revoke authorized_keys ({err})");
+                    }
                 }
             }
         }
