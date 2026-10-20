@@ -10,11 +10,37 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-fn load<T: for<'de> Deserialize<'de>>(dir: &str, name: &str) -> Result<T> {
+/// Row types whose `name` must match their filename — see `load`.
+trait RowName {
+    fn row_name(&self) -> &str;
+}
+
+impl RowName for ClientEntry {
+    fn row_name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl RowName for ProjectEntry {
+    fn row_name(&self) -> &str {
+        &self.name
+    }
+}
+
+fn load<T: for<'de> Deserialize<'de> + RowName>(dir: &str, name: &str) -> Result<T> {
     super::paths::valid_name(name)?;
     let path = shunt_home()?.join(dir).join(format!("{name}.toml"));
     let text = fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("bad TOML in {}", path.display()))
+    let row: T = toml::from_str(&text).with_context(|| format!("bad TOML in {}", path.display()))?;
+    // The row's inner `name` — not the filename — is what joins into
+    // cm/<name>.sock, state/<name>.fail, known_hosts/<name>, tunnels/
+    // paths, and selects the localhost loopback transport. A forged
+    // or mistyped name escapes $SHUNT_HOME ("../../x") or silently
+    // re-routes the row ("localhost"). Registry files are
+    // hand-editable, so a mismatch is surfaced, not auto-fixed.
+    super::paths::valid_name(row.row_name()).with_context(|| format!("{}: inner name is not a valid registry name", path.display()))?;
+    anyhow::ensure!(row.row_name() == name, "{}: inner name {:?} does not match filename {:?}", path.display(), row.row_name(), name);
+    Ok(row)
 }
 
 /// Header written at the top of every client row file: documents the

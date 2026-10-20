@@ -98,3 +98,43 @@ fn registry_name_charset() {
     assert!(remove("clients", "../../victim").is_err());
     std::fs::remove_dir_all(&tmp).ok();
 }
+
+/// A row's inner `name` — not the filename — is what joins into
+/// cm/, state/, known_hosts/, tunnels/ paths and selects the
+/// localhost loopback transport in transport_for. A file whose
+/// `name` disagrees with its stem (or isn't a valid name at all)
+/// fails to load rather than write outside $SHUNT_HOME.
+#[test]
+fn row_name_must_match_filename() {
+    let _g = HOME_LOCK.lock().unwrap();
+    let tmp = std::env::temp_dir().join(format!("shunt-test-inner-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &tmp);
+    let clients = tmp.join("clients");
+    std::fs::create_dir_all(&clients).unwrap();
+    let row = |name: &str| format!("name = {name:?}\nqroot = \"/q\"\ndeploy_root = \"/d\"\n");
+
+    // Forged inner name: filename is safe, name is a traversal.
+    std::fs::write(clients.join("a.toml"), row("../../x")).unwrap();
+    assert!(load_client("a").is_err());
+
+    // Loopback spoof: any file claiming name="localhost" that is
+    // not localhost.toml would silently flip to local transport.
+    std::fs::write(clients.join("b.toml"), row("localhost")).unwrap();
+    assert!(load_client("b").is_err());
+
+    // Plain mismatch (a rename done on disk but not in the field).
+    std::fs::write(clients.join("c.toml"), row("other")).unwrap();
+    let err = load_client("c").unwrap_err().to_string();
+    assert!(err.contains("other"), "error names the discrepancy: {err}");
+
+    // Projects are held to the same rule.
+    let projects = tmp.join("projects");
+    std::fs::create_dir_all(&projects).unwrap();
+    std::fs::write(projects.join("p.toml"), "name = \"q\"\n").unwrap();
+    assert!(load_project("p").is_err());
+
+    // Matching rows still load.
+    std::fs::write(clients.join("ok.toml"), row("ok")).unwrap();
+    assert!(load_client("ok").is_ok());
+    std::fs::remove_dir_all(&tmp).ok();
+}
