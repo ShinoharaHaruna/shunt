@@ -76,6 +76,13 @@ pub fn validate_meta(meta: &TaskMeta) -> anyhow::Result<()> {
     for (what, s) in fields {
         anyhow::ensure!(!s.contains(['\n', '\r']), "task meta {what} contains a newline — would inject lines into the task body");
     }
+    // An env key containing `=` cannot round-trip: rendered as
+    // `# shunt-env:K=X=v`, the runner's split_once('=') reads the
+    // key as `K` and `X=v` as the value — a silent rename. Reject
+    // it here rather than let the directive lie (design.md §3.12).
+    for k in meta.env.keys() {
+        anyhow::ensure!(!k.contains('='), "task meta env key {k:?} contains '=' — cannot round-trip through # shunt-env:KEY=value");
+    }
     Ok(())
 }
 
@@ -135,8 +142,14 @@ mod tests {
         m.env.insert("K\nBAD".into(), "v".into());
         assert!(validate_meta(&m).is_err());
 
-        let mut m = base;
+        let mut m = base.clone();
         m.env.insert("K".into(), "v\nevil".into());
+        assert!(validate_meta(&m).is_err());
+
+        // `=` in a key can't survive the `# shunt-env:K=V` round-
+        // trip — the runner would read it as a different key.
+        let mut m = base;
+        m.env.insert("K=X".into(), "v".into());
         assert!(validate_meta(&m).is_err());
     }
 }

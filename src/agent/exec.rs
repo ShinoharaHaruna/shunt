@@ -23,19 +23,23 @@ const PROXY_VARS: [&str; 6] = ["ALL_PROXY", "all_proxy", "http_proxy", "https_pr
 /// `Command::env`, so no quote stripping, no `$VAR` expansion, no
 /// escape processing. `K="a b"` yields a value that *contains* the
 /// quote characters; write `K=a b` instead — embedded spaces are
-/// preserved verbatim. The first `=` splits key/value; surrounding
-/// whitespace is trimmed.
+/// preserved verbatim. The first `=` splits key/value; the KEY is
+/// whitespace-trimmed (keys can't contain spaces anyway) but the
+/// value is kept strictly literal — `K= padded ` passes the spaces
+/// through to `Command::env` untouched.
 pub fn read_env_file(root: &Path) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     if let Ok(text) = std::fs::read_to_string(root.join("env")) {
         for line in text.lines() {
-            let line = line.trim();
+            // trim_start only: leading whitespace may indent a `#`
+            // comment or blank line, but a trim_end would eat
+            // meaningful trailing spaces in the value (§3.12 literal).
+            let line = line.trim_start();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             if let Some((k, v)) = line.split_once('=') {
                 let k = k.trim();
-                let v = v.trim();
                 // `Command::env` panics on an empty key or on NUL in
                 // key/value — a `=foo` or NUL-bearing line must be
                 // dropped here, not crash the daemon mid-dispatch
@@ -144,24 +148,25 @@ fn task_directives(task: &Path) -> (Option<String>, Vec<(String, String)>, Optio
     let mut timeout_s = None;
     for line in text.lines() {
         if let Some(w) = line.strip_prefix("# shunt:workdir=") {
+            // Value is literal like the env file (§3.12) — no trim.
             // NUL would panic `Command::arg` at spawn — drop the
             // directive so the env-file/default workdir applies.
-            let w = w.trim();
             if !w.contains('\0') {
                 workdir = Some(w.to_string());
             }
         } else if let Some(t) = line.strip_prefix("# shunt:timeout_s=") {
+            // Number parse stays whitespace-tolerant: `3600 ` means
+            // 3600 either way, unlike env values where spaces are data.
             timeout_s = t.trim().parse::<u64>().ok().filter(|&n| n > 0);
         } else if let Some(kv) = line.strip_prefix("# shunt-env:") {
             if let Some((k, v)) = kv.split_once('=') {
+                // Key trimmed, value literal — the same semantics as
+                // the env file for the two KEY=value surfaces.
                 let k = k.trim();
-                let v = v.trim();
                 // Same panic guard as the env file: `# shunt-env:=x`
                 // yields an empty key and a NUL in either half is a
                 // `Command::env` panic — both must be dropped.
                 if !k.is_empty() && !k.contains('\0') && !v.contains('\0') {
-                    // Trim like the env file: same literal semantics
-                    // for the two KEY=value surfaces.
                     envs.push((k.to_string(), v.to_string()));
                 }
             }
@@ -512,8 +517,9 @@ mod tests {
     }
 
     /// The env file is literal KEY=value (design.md §3.12): spaces
-    /// survive verbatim but quotes are never stripped — `K="a b"`
-    /// keeps the quote characters as part of the value.
+    /// survive verbatim — including leading/trailing ones in the
+    /// value — but quotes are never stripped: `K="a b"` keeps the
+    /// quote characters as part of the value.
     #[test]
     fn env_values_are_literal_no_quote_semantics() {
         let root = std::env::temp_dir().join(format!("shunt-envtest-{}", std::process::id()));
@@ -523,7 +529,8 @@ mod tests {
         assert_eq!(m["FOO"], "a b c");
         assert_eq!(m["QUOTED"], "\"a b\"");
         assert_eq!(m["SQUOTED"], "'x'");
-        assert_eq!(m["SPACED"], "padded");
+        // Value-side whitespace is data: only the key is trimmed.
+        assert_eq!(m["SPACED"], "  padded  ");
         assert!(!m.contains_key("NOEQ"));
         std::fs::remove_dir_all(&root).ok();
     }
@@ -542,9 +549,10 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
 
         let task = std::env::temp_dir().join(format!("shunt-emptydir-{}", std::process::id()));
-        std::fs::write(&task, "#!/usr/bin/env bash\n# shunt-env:=bad\n# shunt-env:OK=yes\necho hi\n").unwrap();
+        std::fs::write(&task, "#!/usr/bin/env bash\n# shunt-env:=bad\n# shunt-env:OK=yes\n# shunt-env:PAD= x \necho hi\n").unwrap();
         let (_, envs, _) = super::task_directives(&task);
-        assert_eq!(envs, vec![("OK".to_string(), "yes".to_string())]);
+        // Literal values here too: PAD's spaces ride through verbatim.
+        assert_eq!(envs, vec![("OK".to_string(), "yes".to_string()), ("PAD".to_string(), " x ".to_string())]);
         std::fs::remove_file(&task).ok();
     }
 
