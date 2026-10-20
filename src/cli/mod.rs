@@ -280,28 +280,37 @@ pub fn run(cli: Cli) -> Result<()> {
             if rootless(&a.root) {
                 return print_subhelp("init");
             }
-            let root = agent_root(&a.root)?;
-            crate::agent::queue::init(&root)?;
-            if a.json {
-                jprint(jobj(jfields(serde_json::json!({}))));
-            } else {
-                println!("initialized queue at {}", root.display());
+            let r = (|| -> Result<std::path::PathBuf> {
+                let root = agent_root(&a.root)?;
+                crate::agent::queue::init(&root)?;
+                Ok(root)
+            })();
+            match r {
+                Ok(root) => {
+                    if a.json {
+                        jprint(jobj(jfields(serde_json::json!({}))));
+                    } else {
+                        println!("initialized queue at {}", root.display());
+                    }
+                    Ok(())
+                }
+                Err(e) => jfail(a.json, &format!("{e:#}")),
             }
-            Ok(())
         }
         Command::Daemon(a) => {
             if rootless(&a.root) {
                 return print_subhelp("daemon");
             }
-            let root = agent_root(&a.root)?;
-            crate::agent::daemon::run(&root)
+            match agent_root(&a.root).and_then(|root| crate::agent::daemon::run(&root)) {
+                Ok(()) => Ok(()),
+                Err(e) => jfail(a.json, &format!("{e:#}")),
+            }
         }
         Command::Start(a) => {
             if rootless(&a.root) {
                 return print_subhelp("start");
             }
-            let root = agent_root(&a.root)?;
-            match crate::agent::daemon::start(&root) {
+            match agent_root(&a.root).and_then(|root| crate::agent::daemon::start(&root)) {
                 Ok(pid) => {
                     if a.json {
                         jprint(jobj(jfields(serde_json::json!({"pid": pid}))));
@@ -310,21 +319,24 @@ pub fn run(cli: Cli) -> Result<()> {
                     }
                     Ok(())
                 }
-                Err(e) => jfail(a.json, &e.to_string()),
+                Err(e) => jfail(a.json, &format!("{e:#}")),
             }
         }
         Command::Stop(a) => {
             if rootless(&a.root) {
                 return print_subhelp("stop");
             }
-            let root = agent_root(&a.root)?;
-            crate::agent::daemon::stop(&root)?;
-            if a.json {
-                jprint(jobj(jfields(serde_json::json!({}))));
-            } else {
-                println!("STOP placed; daemon exits after the current task, or at the next poll if idle");
+            match agent_root(&a.root).and_then(|root| crate::agent::daemon::stop(&root)) {
+                Ok(()) => {
+                    if a.json {
+                        jprint(jobj(jfields(serde_json::json!({}))));
+                    } else {
+                        println!("STOP placed; daemon exits after the current task, or at the next poll if idle");
+                    }
+                    Ok(())
+                }
+                Err(e) => jfail(a.json, &format!("{e:#}")),
             }
-            Ok(())
         }
         Command::Enqueue(a) => {
             if rootless(&a.root) {
@@ -416,7 +428,10 @@ pub fn run(cli: Cli) -> Result<()> {
             if a.json {
                 jprint(&report);
             } else {
-                println!("{}", serde_json::to_string_pretty(&report)?);
+                match serde_json::to_string_pretty(&report) {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => return jfail(a.json, &format!("{e:#}")),
+                }
             }
             Ok(())
         }

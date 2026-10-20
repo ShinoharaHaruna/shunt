@@ -39,7 +39,22 @@ pub(crate) fn jfail(json: bool, msg: &str) -> Result<()> {
     anyhow::bail!("{msg}")
 }
 
+/// Wrap a `--json`-capable handler body: expected failures already
+/// `jfail`, but a stray `?` propagation still owes wire callers the
+/// error object (design.md §5) — stderr-only failures surface on the
+/// server as "no wire JSON object" instead of the real error.
+fn wire(json: bool, r: Result<()>) -> Result<()> {
+    match r {
+        Ok(()) => Ok(()),
+        Err(e) => jfail(json, &format!("{e:#}")),
+    }
+}
+
 pub(crate) fn agent_enqueue(a: &EnqueueArgs) -> Result<()> {
+    wire(a.json, enqueue_impl(a))
+}
+
+fn enqueue_impl(a: &EnqueueArgs) -> Result<()> {
     use std::io::Read;
     let root = agent_root(&a.root)?;
     let inner = || -> Result<String> {
@@ -78,6 +93,10 @@ pub(crate) fn agent_enqueue(a: &EnqueueArgs) -> Result<()> {
 }
 
 pub(crate) fn agent_new(a: &NewArgs) -> Result<()> {
+    wire(a.json, new_impl(a))
+}
+
+fn new_impl(a: &NewArgs) -> Result<()> {
     let json = a.json;
     let inner = || -> Result<String> {
         if a.cmd.is_empty() {
@@ -110,6 +129,10 @@ pub(crate) fn agent_new(a: &NewArgs) -> Result<()> {
 }
 
 pub(crate) fn agent_cancel(a: &PatternArgs) -> Result<()> {
+    wire(a.json, cancel_impl(a))
+}
+
+fn cancel_impl(a: &PatternArgs) -> Result<()> {
     let root = agent_root(&a.root)?;
     let m = crate::agent::queue::match_pending(&root, &a.pattern)?;
     match m.len() {
@@ -128,6 +151,10 @@ pub(crate) fn agent_cancel(a: &PatternArgs) -> Result<()> {
 }
 
 pub(crate) fn agent_prio(a: &PrioArgs) -> Result<()> {
+    wire(a.json, prio_impl(a))
+}
+
+fn prio_impl(a: &PrioArgs) -> Result<()> {
     let root = agent_root(&a.root)?;
     if a.n > crate::agent::queue::PRIORITY_BAND_MAX {
         return jfail(a.json, &format!("prio number must be inside the 0000-{:04} priority band, got {:04}", crate::agent::queue::PRIORITY_BAND_MAX, a.n));
@@ -177,6 +204,10 @@ pub(crate) fn agent_prio(a: &PrioArgs) -> Result<()> {
 }
 
 pub(crate) fn agent_kill(a: &PatternArgs) -> Result<()> {
+    wire(a.json, kill_impl(a))
+}
+
+fn kill_impl(a: &PatternArgs) -> Result<()> {
     let root = agent_root(&a.root)?;
     let m = crate::agent::queue::match_running(&root, &a.pattern)?;
     match m.len() {
@@ -213,6 +244,10 @@ pub(crate) fn agent_kill(a: &PatternArgs) -> Result<()> {
 }
 
 pub(crate) fn agent_workers(a: &WorkersArgs) -> Result<()> {
+    wire(a.json, workers_impl(a))
+}
+
+fn workers_impl(a: &WorkersArgs) -> Result<()> {
     let root = agent_root(&a.root)?;
     let set_to = match (&a.n, &a.action) {
         (Some(n), _) => Some(*n),
@@ -238,6 +273,10 @@ pub(crate) fn agent_workers(a: &WorkersArgs) -> Result<()> {
 }
 
 pub(crate) fn agent_shutdown(a: &ShutdownArgs) -> Result<()> {
+    wire(a.json, shutdown_impl(a))
+}
+
+fn shutdown_impl(a: &ShutdownArgs) -> Result<()> {
     let root = agent_root(&a.root)?;
     let counts = || -> serde_json::Value {
         serde_json::json!({
@@ -291,6 +330,10 @@ pub(crate) fn agent_shutdown(a: &ShutdownArgs) -> Result<()> {
 }
 
 pub(crate) fn agent_status(a: &StatusArgs) -> Result<()> {
+    wire(a.json, status_impl(a))
+}
+
+fn status_impl(a: &StatusArgs) -> Result<()> {
     use crate::proto::wire::{DaemonState, ExitRecord};
     let root = agent_root(&a.root)?;
     let alive = crate::agent::daemon::alive(&root)?;
@@ -531,6 +574,10 @@ fn follow_dlog(path: &std::path::Path) -> Result<()> {
 }
 
 pub(crate) fn agent_dlog(a: &RootArgs, tail: Option<usize>) -> Result<()> {
+    wire(a.json, dlog_impl(a, tail))
+}
+
+fn dlog_impl(a: &RootArgs, tail: Option<usize>) -> Result<()> {
     let root = agent_root(&a.root)?;
     let path = root.join("daemon.log");
     // Render JSONL human-readable: `[ts] event k=v`. `--json` skips
