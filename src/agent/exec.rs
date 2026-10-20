@@ -361,21 +361,40 @@ pub fn finalize(root: &Path, base: &str, rc: i32, timeout_s: Option<u64>) -> Res
         let _ = writeln!(f, "=== exit {rc} {}", queue::iso8601_now());
     }
     if queue::is_dir_entry(root, "running", base) {
-        let _ = std::fs::remove_file(running.join(base).join("pid"));
-        std::fs::rename(running.join(base), &dest).with_context(|| format!("cannot move {base} to {}", dest.display()))?;
+        // Write `exit`/`timeout` INSIDE the entry dir before the
+        // rename — not into `dest` after it, as the spec's literal
+        // order suggests (design.md §3.9). The sidecars travel with
+        // the dir so success is identical, but a write failure now
+        // leaves the entry in running/ where the caller's quarantine
+        // fallback can still move it to failed/ with a `shunt_error`
+        // note. Writing post-rename would let a failed `exit` write
+        // strand an exit-less terminal entry: `recent_exits` filters
+        // on `exit` existing, so the completed task reports
+        // `unknown` forever (status + lazy `task show`).
+        let entry = running.join(base);
+        std::fs::write(entry.join("exit"), format!("{rc}\n"))?;
+        if let Some(limit) = timeout_s {
+            let _ = std::fs::write(entry.join("timeout"), format!("{limit}\n"));
+        }
+        let _ = std::fs::remove_file(entry.join("pid"));
+        std::fs::rename(&entry, &dest).with_context(|| format!("cannot move {base} to {}", dest.display()))?;
     } else {
-        // Legacy flat entry: mkdir the entry dir and drop the pieces in.
+        // Legacy flat entry: no source dir exists to pre-write into,
+        // so `exit` lands in `dest` before the pieces move — a failed
+        // task.sh rename then leaves dest holding `exit` (+ the
+        // caller's quarantine still applies to the flat remainder),
+        // never a terminal entry without an exit marker.
         std::fs::create_dir_all(&dest)?;
+        std::fs::write(dest.join("exit"), format!("{rc}\n"))?;
+        if let Some(limit) = timeout_s {
+            let _ = std::fs::write(dest.join("timeout"), format!("{limit}\n"));
+        }
         std::fs::rename(running.join(format!("{base}.sh")), dest.join("task.sh")).with_context(|| format!("cannot move {base} to {}", dest.display()))?;
         let log = running.join(format!("{base}.sh.log"));
         if log.exists() {
             std::fs::rename(&log, dest.join("log"))?;
         }
         let _ = std::fs::remove_file(running.join(format!("{base}.sh.pid")));
-    }
-    std::fs::write(dest.join("exit"), format!("{rc}\n"))?;
-    if let Some(limit) = timeout_s {
-        let _ = std::fs::write(dest.join("timeout"), format!("{limit}\n"));
     }
     // Terminal tracks are unbounded without a sweep: past the keep
     // cap the oldest entries move to `<track>/.archive/` so `status`
@@ -563,6 +582,46 @@ mod tests {
         super::quarantine(&root, "running", "0001_t", "exit write failed").unwrap();
         assert!(!root.join("failed").join("0001_t").exists(), "ghost failed/ entry was created");
         assert!(root.join("done").join("0001_t").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `exit`/`timeout` are written inside the running entry BEFORE
+    /// the rename (design.md §3.9 deviates: write-then-mv): on
+    /// success the sidecars simply travel with the dir to done/.
+    #[test]
+    fn finalize_writes_exit_inside_dir_entry() {
+        let root = std::env::temp_dir().join(format!("shunt-fin-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let entry = root.join("running").join("0001_t");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(entry.join("task.sh"), "exit 0\n").unwrap();
+        std::fs::write(entry.join("log"), "=== task 0001_t\n").unwrap();
+        std::fs::write(entry.join("pid"), "12345\n").unwrap();
+        super::finalize(&root, "0001_t", 0, None).unwrap();
+        let done = root.join("done").join("0001_t");
+        assert_eq!(std::fs::read_to_string(done.join("exit")).unwrap(), "0\n");
+        assert!(!done.join("pid").exists());
+        assert!(!entry.exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A failed `exit` write must leave the entry still in running/
+    /// so the caller's quarantine lands it in failed/ with a
+    /// `shunt_error` — never an exit-less terminal entry that
+    /// `recent_exits` filters into `unknown`.
+    #[test]
+    fn finalize_exit_write_failure_leaves_entry_in_running() {
+        let root = std::env::temp_dir().join(format!("shunt-finfail-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let entry = root.join("running").join("0001_t");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(entry.join("task.sh"), "exit 0\n").unwrap();
+        // `exit` as a directory makes fs::write fail.
+        std::fs::create_dir(entry.join("exit")).unwrap();
+        assert!(super::finalize(&root, "0001_t", 0, None).is_err());
+        assert!(entry.exists(), "entry left running/ despite failed exit write");
+        assert!(!root.join("done").join("0001_t").exists());
+        // The caller's fallback still sees a real entry to quarantine.
+        super::quarantine(&root, "running", "0001_t", "finalize failed (rc 0)").unwrap();
+        assert!(root.join("failed").join("0001_t").join("shunt_error").exists());
         std::fs::remove_dir_all(&root).ok();
     }
 }
