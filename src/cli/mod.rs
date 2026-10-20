@@ -353,16 +353,24 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Mktask(a) => {
             // mktask can render for real: it is pure output. An empty
             // cmd would render `exec ` — a no-op task that exits 0.
-            if a.cmd.is_empty() {
-                anyhow::bail!("missing command after --");
+            let r = (|| -> Result<String> {
+                if a.cmd.is_empty() {
+                    anyhow::bail!("missing command after --");
+                }
+                let meta = crate::proto::task::TaskMeta { slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard, workdir: None, env: Default::default(), cmd: a.cmd, timeout_s: a.timeout };
+                if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
+                    anyhow::bail!("bad slug '{}': {p}", a.slug);
+                }
+                crate::proto::task::validate_meta(&meta)?;
+                Ok(crate::agent::exec::render_task(&meta))
+            })();
+            match r {
+                Ok(s) => {
+                    print!("{s}");
+                    Ok(())
+                }
+                Err(e) => jfail(a.json, &format!("{e:#}")),
             }
-            let meta = crate::proto::task::TaskMeta { slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard, workdir: None, env: Default::default(), cmd: a.cmd, timeout_s: a.timeout };
-            if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
-                anyhow::bail!("bad slug '{}': {p}", a.slug);
-            }
-            crate::proto::task::validate_meta(&meta)?;
-            print!("{}", crate::agent::exec::render_task(&meta));
-            Ok(())
         }
         Command::Cancel(a) => dual_mode(&a.client, &a.root, "cancel", |name| remote(name, &["cancel", "--json", "--", &a.pattern], None, true), || agent_cancel(&a)),
         Command::Prio(a) => dual_mode(
