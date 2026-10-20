@@ -449,7 +449,13 @@ pub(crate) fn follow_file(path: &std::path::Path) -> Result<()> {
 pub(crate) fn agent_logs(a: &LogsArgs) -> Result<()> {
     let root = agent_root(&a.root)?;
     match &a.pattern {
-        None => agent_dlog(&RootArgs { root: a.root.clone(), json: false }, a.tail),
+        None => {
+            agent_dlog(&RootArgs { root: a.root.clone(), json: false }, a.tail)?;
+            if a.follow {
+                follow_dlog(&root.join("daemon.log"))?;
+            }
+            Ok(())
+        }
         Some(pat) => {
             let m = find_logs(&root, pat);
             match m.len() {
@@ -480,6 +486,45 @@ pub(crate) fn agent_logs(a: &LogsArgs) -> Result<()> {
     }
 }
 
+/// Render one daemon.log JSONL line as `[ts] event k=v`.
+/// Non-JSON lines pass through verbatim — the dlog contract for
+/// lines written before the format settled.
+fn render_dlog_line(line: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(v) if v.is_object() => {
+            let ts = v.get("ts").and_then(|t| t.as_str()).unwrap_or("");
+            let ev = v.get("event").and_then(|t| t.as_str()).unwrap_or("");
+            let rest: Vec<String> = v.as_object().map(|o| o.iter().filter(|(k, _)| k.as_str() != "ts" && k.as_str() != "event").map(|(k, v)| format!("{k}={v}")).collect()).unwrap_or_default();
+            format!("[{ts}] {ev} {}", rest.join(" "))
+        }
+        _ => line.to_string(),
+    }
+}
+
+/// `tail -f` on daemon.log, rendering each appended line through
+/// `render_dlog_line` so `logs -f` looks like `dlog`, not raw JSON.
+/// An unterminated tail-of-file fragment is held until its newline
+/// arrives so a half-written record never renders mid-line.
+fn follow_dlog(path: &std::path::Path) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut f = std::fs::File::open(path)?;
+    f.seek(SeekFrom::End(0))?;
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let mut chunk = Vec::new();
+        if f.read_to_end(&mut chunk)? > 0 {
+            buf.extend_from_slice(&chunk);
+            while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+                let line = String::from_utf8_lossy(&buf[..nl]).into_owned();
+                buf.drain(..=nl);
+                println!("{}", render_dlog_line(&line));
+            }
+            let _ = std::io::stdout().flush();
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
 pub(crate) fn agent_dlog(a: &RootArgs, tail: Option<usize>) -> Result<()> {
     let root = agent_root(&a.root)?;
     let path = root.join("daemon.log");
@@ -488,16 +533,7 @@ pub(crate) fn agent_dlog(a: &RootArgs, tail: Option<usize>) -> Result<()> {
         let lines: Vec<&str> = text.lines().collect();
         let skip = tail.map_or(0, |n| lines.len().saturating_sub(n));
         for line in &lines[skip..] {
-            let line = *line;
-            match serde_json::from_str::<serde_json::Value>(line) {
-                Ok(v) if v.is_object() => {
-                    let ts = v.get("ts").and_then(|t| t.as_str()).unwrap_or("");
-                    let ev = v.get("event").and_then(|t| t.as_str()).unwrap_or("");
-                    let rest: Vec<String> = v.as_object().map(|o| o.iter().filter(|(k, _)| k.as_str() != "ts" && k.as_str() != "event").map(|(k, v)| format!("{k}={v}")).collect()).unwrap_or_default();
-                    println!("[{ts}] {ev} {}", rest.join(" "));
-                }
-                _ => println!("{line}"),
-            }
+            println!("{}", render_dlog_line(line));
         }
     }
     Ok(())
@@ -506,6 +542,17 @@ pub(crate) fn agent_dlog(a: &RootArgs, tail: Option<usize>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both the one-shot `dlog` render and `logs -f`'s appended-
+    /// line render must go through the same JSONL→text transform
+    /// so a followed daemon log reads `[ts] event k=v`, not raw JSON.
+    #[test]
+    fn render_dlog_line_formats_jsonl() {
+        let out = render_dlog_line(r#"{"ts":"12:00","event":"claim","task":"0001_a","pid":7}"#);
+        // serde_json::Map is BTreeMap: k=v pairs sort by key.
+        assert_eq!(out, "[12:00] claim pid=7 task=\"0001_a\"");
+        assert_eq!(render_dlog_line("not json"), "not json");
+    }
 
     #[test]
     fn tail_bytes_keeps_last_n_lines() {
