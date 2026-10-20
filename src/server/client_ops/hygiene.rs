@@ -17,6 +17,9 @@ pub(crate) fn drop_hostkey(client: &str, host: &str, port: u16) -> Result<()> {
     if !st.success() {
         anyhow::bail!("ssh-keygen -R {spec} failed");
     }
+    // ssh-keygen -R renames the pre-edit file to <kh>.old; left in
+    // place it accumulates stale key material under umask perms.
+    let _ = std::fs::remove_file(kh.with_extension("old"));
     Ok(())
 }
 
