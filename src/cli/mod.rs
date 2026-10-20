@@ -376,18 +376,25 @@ pub fn run(cli: Cli) -> Result<()> {
             || agent_prio(&a),
         ),
         Command::Kill(a) => dual_mode(&a.client, &a.root, "kill", |name| remote(name, &["kill", "--json", "--", &a.pattern], None, true), || agent_kill(&a)),
-        Command::Workers(a) => dual_mode(
-            &a.client,
-            &a.root,
-            "workers",
-            |name| {
-                let tail = workers_wire_tail(&a);
-                let mut refs: Vec<&str> = tail.iter().map(String::as_str).collect();
-                refs.push("--json");
-                remote(name, &refs, None, true)
-            },
-            || agent_workers(&a),
-        ),
+        Command::Workers(a) => {
+            // `workers 3 set 5` parses but is ambiguous — reject
+            // rather than silently apply one spelling.
+            if a.n.is_some() && a.action.is_some() {
+                anyhow::bail!("pass either positional N or `get`/`set N`, not both");
+            }
+            dual_mode(
+                &a.client,
+                &a.root,
+                "workers",
+                |name| {
+                    let tail = workers_wire_tail(&a);
+                    let mut refs: Vec<&str> = tail.iter().map(String::as_str).collect();
+                    refs.push("--json");
+                    remote(name, &refs, None, true)
+                },
+                || agent_workers(&a),
+            )
+        }
         Command::Shutdown(a) => {
             dual_mode(
                 &a.client,

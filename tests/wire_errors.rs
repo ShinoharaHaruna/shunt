@@ -52,3 +52,18 @@ fn non_json_failure_stays_human_facing() {
     assert!(String::from_utf8_lossy(&o.stderr).contains("shunt:"));
     std::fs::remove_file(&file).ok();
 }
+
+/// `workers 3 set 5` / `workers 3 get` are ambiguous — the dispatch
+/// rejects positional N + subcommand together, on both the local
+/// path and the `-c box` wire-forward path (before any ssh or
+/// registry lookup, so no fixture is needed here).
+#[test]
+fn workers_rejects_positional_plus_subcommand() {
+    let cases: [&[&str]; 3] = [&["workers", "3", "set", "5"], &["workers", "3", "get"], &["workers", "3", "set", "5", "-c", "box"]];
+    for args in cases {
+        let o = run(args);
+        assert!(!o.status.success(), "shunt {args:?} unexpectedly ok");
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        assert!(stderr.contains("not both"), "shunt {args:?}: {stderr}");
+    }
+}
