@@ -236,16 +236,31 @@ pub fn heal(t: &dyn Transport, client: &ClientEntry) -> Result<Heal> {
     // brought up with `--port 2080` must self-heal onto 2080 — the
     // port file and the box's ALL_PROXY both name it.
     let port = std::fs::read_to_string(port_path(&dir, &client.name)).ok().and_then(|s| s.trim().parse::<u16>().ok());
-    heal_in(&dir, t, client, |t, c| up(t, c, port))
+    let alive = status_in(&dir, &client.name, client_target(client).as_deref()).alive;
+    heal_in(&dir, t, client, alive, |t, c| up(t, c, port))
 }
 
-/// The decision logic, with the state dir and the reconnect action
-/// injected — tests exercise it without `$SHUNT_HOME` or real ssh.
-fn heal_in(dir: &Path, t: &dyn Transport, client: &ClientEntry, reconnect: impl FnOnce(&dyn Transport, &ClientEntry) -> Result<u32>) -> Result<Heal> {
+/// The decision logic, with the state dir, liveness verdict and the
+/// reconnect action injected — tests exercise it without
+/// `$SHUNT_HOME`, real ssh, or a fake `/proc` cmdline.
+fn heal_in(dir: &Path, t: &dyn Transport, client: &ClientEntry, alive: bool, reconnect: impl FnOnce(&dyn Transport, &ClientEntry) -> Result<u32>) -> Result<Heal> {
     if !recorded_in(dir, &client.name) {
         return Ok(Heal::NotRecorded);
     }
-    if status_in(dir, &client.name, client_target(client).as_deref()).alive {
+    if alive {
+        // Liveness alone is not health (design.md §4.3): `up` warns
+        // and continues when its env write fails, leaving a live
+        // tunnel whose box env lacks ALL_PROXY — tasks then bypass
+        // the proxy while status claims they route through it.
+        // env_write is an idempotent grep-upsert, so re-assert the
+        // line for the recorded port every sweep; with no recorded
+        // port the right proxy line is unknowable — strip it so
+        // tasks fail over to direct egress instead of a phantom
+        // proxy (same rationale as the dead path).
+        match recorded_port(dir, &client.name) {
+            Some(p) => env_write(t, client, "ALL_PROXY", Some(&format!("socks5h://127.0.0.1:{p}")))?,
+            None => env_write(t, client, "ALL_PROXY", None)?,
+        }
         return Ok(Heal::Healthy);
     }
     match reconnect(t, client) {
@@ -331,7 +346,7 @@ mod tests {
         let client = entry(&root);
         let t = LocalTransport { bin: PathBuf::from("/bin/sh"), timeout_s: Some(10) };
         let called = std::cell::Cell::new(false);
-        let res = heal_in(&state, &t, &client, |_, _| {
+        let res = heal_in(&state, &t, &client, false, |_, _| {
             called.set(true);
             Ok(1)
         })
@@ -350,8 +365,53 @@ mod tests {
         let t = LocalTransport { bin: PathBuf::from("/bin/sh"), timeout_s: Some(10) };
         // Recorded + dead: port file only, no live pid.
         crate::server::fsutil::write_private(&port_path(&state, "tun-test"), "1080\n").unwrap();
-        let res = heal_in(&state, &t, &client, |_, _| Ok(4242)).unwrap();
+        let res = heal_in(&state, &t, &client, false, |_, _| Ok(4242)).unwrap();
         assert!(matches!(res, Heal::Reconnected(4242)));
+        std::fs::remove_dir_all(&state).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Live ssh but env missing ALL_PROXY (up's env_write failed):
+    /// heal must re-assert the line for the recorded port, not
+    /// report Healthy over a silent proxy bypass.
+    #[test]
+    fn heal_live_tunnel_repairs_env() {
+        let state = tmp("heal-env");
+        let root = tmp("heal-env-q");
+        let client = entry(&root);
+        let t = LocalTransport { bin: PathBuf::from("/bin/sh"), timeout_s: Some(10) };
+        // Live tunnel recorded on 2080; env carries only a foreign
+        // key — ALL_PROXY was never written (or was lost to an env
+        // file rewrite on the box).
+        crate::server::fsutil::write_private(&pid_path(&state, "tun-test"), "1234\n").unwrap();
+        crate::server::fsutil::write_private(&port_path(&state, "tun-test"), "2080\n").unwrap();
+        env_write(&t, &client, "WORKDIR", Some("/work")).unwrap();
+        let res = heal_in(&state, &t, &client, true, |_, _| anyhow::bail!("must not reconnect a live tunnel")).unwrap();
+        assert!(matches!(res, Heal::Healthy));
+        let text = std::fs::read_to_string(root.join("env")).unwrap();
+        assert!(text.contains("ALL_PROXY=socks5h://127.0.0.1:2080"), "{text}");
+        assert!(text.contains("WORKDIR=/work"), "{text}");
+        std::fs::remove_dir_all(&state).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Live tunnel but the port file is gone: the correct ALL_PROXY
+    /// line is unknowable, so heal strips rather than leave a line
+    /// that may point at a dead port.
+    #[test]
+    fn heal_live_tunnel_no_port_strips_env() {
+        let state = tmp("heal-nop");
+        let root = tmp("heal-nop-q");
+        let client = entry(&root);
+        let t = LocalTransport { bin: PathBuf::from("/bin/sh"), timeout_s: Some(10) };
+        crate::server::fsutil::write_private(&pid_path(&state, "tun-test"), "1234\n").unwrap();
+        env_write(&t, &client, "ALL_PROXY", Some("socks5h://127.0.0.1:1080")).unwrap();
+        env_write(&t, &client, "WORKDIR", Some("/work")).unwrap();
+        let res = heal_in(&state, &t, &client, true, |_, _| anyhow::bail!("must not reconnect a live tunnel")).unwrap();
+        assert!(matches!(res, Heal::Healthy));
+        let text = std::fs::read_to_string(root.join("env")).unwrap();
+        assert!(!text.contains("ALL_PROXY"), "{text}");
+        assert!(text.contains("WORKDIR=/work"), "{text}");
         std::fs::remove_dir_all(&state).ok();
         std::fs::remove_dir_all(&root).ok();
     }
@@ -367,7 +427,7 @@ mod tests {
         env_write(&t, &client, "WORKDIR", Some("/work")).unwrap();
         crate::server::fsutil::write_private(&pid_path(&state, "tun-test"), "99999999\n").unwrap();
         crate::server::fsutil::write_private(&port_path(&state, "tun-test"), "1080\n").unwrap();
-        let res = heal_in(&state, &t, &client, |_, _| anyhow::bail!("ssh refused")).unwrap();
+        let res = heal_in(&state, &t, &client, false, |_, _| anyhow::bail!("ssh refused")).unwrap();
         assert!(matches!(res, Heal::Stripped));
         let text = std::fs::read_to_string(root.join("env")).unwrap();
         assert!(!text.contains("ALL_PROXY"), "{text}");
