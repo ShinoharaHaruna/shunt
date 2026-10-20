@@ -82,7 +82,12 @@ fn save_with_header<T: Serialize>(dir: &str, name: &str, value: &T, header: &str
     let text = format!("{header}{}", toml::to_string_pretty(value)?);
     // Temp-write + rename: a concurrent `dispatch --once` sweep
     // reading the row mid-update must never see a truncated TOML.
-    let tmp = path.with_extension("toml.tmp");
+    // The tmp name carries the pid (`<name>.toml.<pid>.tmp`, same
+    // convention as queue.rs enqueue's `.tmp.<pid>.<n>`): two shunt
+    // processes writing the same row — `client update` racing a
+    // probe facts merge — would otherwise interleave into ONE tmp
+    // file and rename a torn TOML over the good row, losing it.
+    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
     write_private(&tmp, text)?;
     fs::rename(&tmp, &path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(path)

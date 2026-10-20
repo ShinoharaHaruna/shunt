@@ -195,7 +195,10 @@ pub fn stage(entry: &SpoolEntry, body: &str) -> Result<()> {
     crate::server::fsutil::private_dir(&dir)?;
     let json = serde_json::to_string_pretty(entry)?;
     for (name, contents) in [(format!("{}.json", entry.id), json), (format!("{}.sh", entry.id), body.to_string())] {
-        let tmp = dir.join(format!(".{name}.tmp"));
+        // Same pid-tagged tmp convention as queue.rs enqueue: ids are
+        // unique per entry so collisions are unlikely, but a shared
+        // tmp name is still the wrong primitive under concurrency.
+        let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
         crate::server::fsutil::write_private(&tmp, contents)?;
         fs::rename(&tmp, dir.join(&name))?;
     }
