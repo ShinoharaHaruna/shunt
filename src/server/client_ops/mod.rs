@@ -30,7 +30,7 @@ pub use hygiene::rekey;
 pub use keys::{deploy_key, ensure_key};
 pub use lifecycle::{remove, rename};
 pub use probe::{probe, probe_facts};
-pub use update::{update, EndpointUpdate};
+pub use update::{same_queue_peers, update, EndpointUpdate};
 
 /// Shared `ClientEntry` fixture for the submodules' unit tests —
 /// every field spelled out so a new field forces one edit, not N.

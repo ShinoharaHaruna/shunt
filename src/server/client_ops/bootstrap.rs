@@ -40,17 +40,17 @@ pub fn bootstrap(t: &dyn Transport, name: &str, bin_path: Option<&str>) -> Resul
     // .shunt-owner claim (§4.1): two independent shunt installs
     // pointed at the same qroot silently merge into one queue —
     // seq races between two dispatchers, one daemon serving both.
-    // Before any write, refuse when the queue carries another
-    // install's pubkey; claim it for ourselves otherwise.
-    let owner = owner_path(&entry);
-    let mut claim = false;
+    // One atomic remote script, BEFORE any write: `set -C` gives
+    // create-exclusive so a simultaneous claim cannot interleave —
+    // a later bootstrap can never preempt an earlier owner's qroot.
     if let Some(pubkey) = owner_pubkey(&entry) {
-        let existing = t.exec(&entry, &["sh".into(), "-c".into(), format!("cat {} 2>/dev/null", shell_quote(&owner))], None).context("read .shunt-owner")?;
-        let existing = existing.trim();
-        if !existing.is_empty() && existing != pubkey {
-            anyhow::bail!("qroot {} is claimed by a different shunt install (.shunt-owner mismatch) — pick a different qroot in the row; if the other install is gone, remove {}", entry.qroot, owner);
+        let owner = owner_path(&entry);
+        let verdict = t.exec(&entry, &["sh".into(), "-c".into(), CLAIM_SCRIPT.into(), owner, pubkey], None).context("claim .shunt-owner")?;
+        let verdict = verdict.trim();
+        if verdict == "FOREIGN" {
+            anyhow::bail!("qroot {} is claimed by a different shunt install (.shunt-owner mismatch) — pick a different qroot in the row; if the other install is gone, remove {}", entry.qroot, owner_path(&entry));
         }
-        claim = true; // write (or rewrite) after init below
+        anyhow::ensure!(matches!(verdict, "OWNED" | "CLAIMED"), "unexpected .shunt-owner claim reply: {verdict:?}");
     }
     let bin = shunt_bin(&entry);
     let bindir = bin.rsplit_once('/').map(|(d, _)| d).unwrap_or("").to_string();
@@ -112,10 +112,6 @@ pub fn bootstrap(t: &dyn Transport, name: &str, bin_path: Option<&str>) -> Resul
     }
 
     t.exec(&entry, &[bin.clone(), "init".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt init")?;
-    if claim {
-        let pub_ = owner_pubkey(&entry).unwrap_or_default();
-        t.exec(&entry, &["sh".into(), "-c".into(), "cat > \"$0\"".into(), owner], Some(&format!("{pub_}\n"))).context("write .shunt-owner")?;
-    }
     t.exec(&entry, &[bin.clone(), "start".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt start")?;
 
     // Probe AFTER the binary lands: the wire `shunt probe` is the
@@ -136,6 +132,13 @@ pub fn bootstrap(t: &dyn Transport, name: &str, bin_path: Option<&str>) -> Resul
     println!("wrote {}", p.display());
     Ok(())
 }
+
+/// `<qroot>/.shunt-owner` claim as one remote script (§4.1).
+/// `$0` is the owner-file path, `$1` our pubkey line. Answers a
+/// marker word: OWNED (file already holds our key), CLAIMED (we
+/// wrote it), FOREIGN (another install's key — refuse). `set -C`
+/// (O_EXCL) makes the create atomic against a racing claimer.
+const CLAIM_SCRIPT: &str = r#"o="$0"; if [ -f "$o" ]; then grep -qxF "$1" "$o" && echo OWNED || echo FOREIGN; exit 0; fi; mkdir -p "${o%/*}"; if ( set -C; printf '%s\n' "$1" > "$o" ) 2>/dev/null; then echo CLAIMED; else grep -qxF "$1" "$o" 2>/dev/null && echo OWNED || echo FOREIGN; fi"#;
 
 /// `<qroot>/.shunt-owner` — holds the claiming client's ssh public
 /// key line; bootstrap refuses a foreign claim (§4.1).
@@ -213,7 +216,8 @@ mod tests {
     /// on refusal.
     struct Stub {
         ldd: &'static str,
-        owner: String,
+        /// Marker the .shunt-owner claim script answers.
+        claim: &'static str,
         copied: Mutex<Vec<(PathBuf, String)>>,
     }
     impl Transport for Stub {
@@ -222,8 +226,8 @@ mod tests {
             if j.contains("ldd --version") {
                 return Ok(self.ldd.into());
             }
-            if j.contains(".shunt-owner") && j.contains("cat") {
-                return Ok(self.owner.clone());
+            if j.contains(".shunt-owner") {
+                return Ok(format!("{}\n", self.claim));
             }
             if j.contains("--version") {
                 return Ok("shunt 0.2.0 (deadbee 2026-01-01)\n".into());
@@ -251,24 +255,37 @@ mod tests {
         (tmp, e)
     }
 
-    fn own_pub(e: &ClientEntry) -> String {
-        std::fs::read_to_string(format!("{}.pub", e.ssh.key)).unwrap().trim().to_string()
-    }
-
     /// §4.1 owner claim: a qroot already carrying a foreign
     /// .shunt-owner refuses before the first write — two installs
     /// must never merge into one queue.
     #[test]
     fn bootstrap_refuses_foreign_owned_qroot() {
         let _g = HOME_LOCK.lock().unwrap();
-        let (tmp, e) = fixture("foreign");
-        let t = Stub { ldd: "ldd (GNU libc) 99.0", owner: "ssh-ed25519 AAAAFOREIGN other\n".into(), copied: Mutex::new(Vec::new()) };
+        let (tmp, _e) = fixture("foreign");
+        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "FOREIGN", copied: Mutex::new(Vec::new()) };
         let err = bootstrap(&t, "foreign", None).unwrap_err();
         std::env::remove_var("SHUNT_HOME");
         std::fs::remove_dir_all(&tmp).ok();
         assert!(err.to_string().contains("claimed by a different shunt install"), "{err}");
         assert!(t.copied.lock().unwrap().is_empty(), "refused before any copy");
-        drop(e);
+    }
+
+    /// §4.1: the claim SCRIPT itself, run against real `sh` —
+    /// create-exclusive (`set -C`) atomicity and the OWNED/FOREIGN
+    /// verdicts are the whole contract.
+    #[test]
+    fn claim_script_claims_then_refuses_foreign() {
+        let dir = std::env::temp_dir().join(format!("shunt-claim-{}", std::process::id()));
+        let owner = dir.join("deep/q/.shunt-owner");
+        let run = |pubkey: &str| -> String {
+            let out = std::process::Command::new("sh").args(["-c", super::CLAIM_SCRIPT, owner.to_str().unwrap(), pubkey]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(run("ssh-ed25519 AAAAA a"), "CLAIMED", "fresh qroot claims");
+        assert_eq!(run("ssh-ed25519 AAAAA a"), "OWNED", "same owner re-bootstrap");
+        assert_eq!(run("ssh-ed25519 BBBBB b"), "FOREIGN", "foreign install refused");
+        assert_eq!(run("ssh-ed25519 AAAAA a"), "OWNED", "owner survives the refusal");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// §4.1: the queue carrying OUR OWN pub (a re-bootstrap of the
@@ -276,8 +293,8 @@ mod tests {
     #[test]
     fn bootstrap_reowns_same_pub() {
         let _g = HOME_LOCK.lock().unwrap();
-        let (tmp, e) = fixture("reown");
-        let t = Stub { ldd: "ldd (GNU libc) 99.0", owner: format!("{}\n", own_pub(&e)), copied: Mutex::new(Vec::new()) };
+        let (tmp, _e) = fixture("reown");
+        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "OWNED", copied: Mutex::new(Vec::new()) };
         bootstrap(&t, "reown", None).unwrap();
         std::env::remove_var("SHUNT_HOME");
         assert_eq!(t.copied.lock().unwrap().len(), 1);
@@ -299,7 +316,7 @@ mod tests {
         let probe = PathBuf::from("/bin/sh");
         let needs = crate::server::client_ops::compat::required_glibc(&probe).unwrap();
         assert!(needs.is_some(), "/bin/sh must be glibc-linked for this test");
-        let t = Stub { ldd: "ldd (GNU libc) 2.0", owner: String::new(), copied: Mutex::new(Vec::new()) };
+        let t = Stub { ldd: "ldd (GNU libc) 2.0", claim: "CLAIMED", copied: Mutex::new(Vec::new()) };
         let err = bootstrap(&t, "stub-old", Some("/bin/sh")).unwrap_err();
         std::env::remove_var("SHUNT_HOME");
         std::fs::remove_dir_all(&tmp).ok();
@@ -315,7 +332,7 @@ mod tests {
     fn bootstrap_compatible_box_ships() {
         let _g = HOME_LOCK.lock().unwrap();
         let (tmp, _e) = fixture("stub-ok");
-        let t = Stub { ldd: "ldd (GNU libc) 99.0", owner: String::new(), copied: Mutex::new(Vec::new()) };
+        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "CLAIMED", copied: Mutex::new(Vec::new()) };
         bootstrap(&t, "stub-ok", None).unwrap();
         std::env::remove_var("SHUNT_HOME");
         let copied = t.copied.lock().unwrap();

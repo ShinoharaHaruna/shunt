@@ -269,6 +269,12 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
     if entry.shared && !qroot_explicit {
         eprintln!("note: shared row defaults qroot to '{}' — confirm with the user it does not collide with other tenants' queues (--qroot)", entry.qroot);
     }
+    // Same endpoint+user+qroot = the same remote queue: a second
+    // install on it merges silently (§4.1 owner claim). Warn at
+    // registration, not at bootstrap.
+    for p in crate::server::client_ops::same_queue_peers(name, &entry) {
+        eprintln!("note: client '{p}' already targets {}@{}:{} + qroot '{}' — two installs on one queue merge silently; pick a different --qroot", entry.ssh.user, entry.ssh.host, entry.ssh.port, entry.qroot);
+    }
     // An empty qroot survives add only when deploy_root was empty
     // too; load_client now rejects such rows, so warn for any
     // transport (local AND ssh-shaped rows with no deploy_root).

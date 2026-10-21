@@ -109,7 +109,7 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
 /// Names of OTHER client rows registered at the same host:port.
 /// Duplicate endpoints are legal (NAT) but suspicious, so `update`
 /// warns rather than rejects.
-fn endpoint_peers(name: &str, host: &str, port: u16) -> Vec<String> {
+pub(crate) fn endpoint_peers(name: &str, host: &str, port: u16) -> Vec<String> {
     if host.is_empty() {
         return Vec::new();
     }
@@ -123,6 +123,32 @@ fn endpoint_peers(name: &str, host: &str, port: u16) -> Vec<String> {
         if let Ok(text) = std::fs::read_to_string(registry::shunt_home().map(|h| h.join("clients").join(format!("{n}.toml"))).unwrap_or_default()) {
             if let Ok(c) = toml::from_str::<ClientEntry>(&text) {
                 if !c.local && c.ssh.host == host && c.ssh.port == port {
+                    out.push(n);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Names of OTHER client rows pointing at the exact same remote
+/// queue — same endpoint AND user AND qroot. Unlike endpoint peers
+/// (legal behind NAT) this is never legitimate: two installs on one
+/// qroot merge silently (§4.1 owner-claim also catches it at
+/// bootstrap). `client add` warns so the collision is loud at
+/// registration, not first detected at bootstrap.
+pub fn same_queue_peers(name: &str, e: &ClientEntry) -> Vec<String> {
+    if e.local || e.ssh.host.is_empty() || e.qroot.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for n in registry::list_names("clients").unwrap_or_default() {
+        if n == name {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(registry::shunt_home().map(|h| h.join("clients").join(format!("{n}.toml"))).unwrap_or_default()) {
+            if let Ok(c) = toml::from_str::<ClientEntry>(&text) {
+                if !c.local && c.ssh.host == e.ssh.host && c.ssh.port == e.ssh.port && c.ssh.user == e.ssh.user && c.qroot == e.qroot {
                     out.push(n);
                 }
             }
