@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "shunt",
-    version,
+    version = env!("SHUNT_VERSION"),
     about = "Experiment queue for hourly-billed GPU boxes: FIFO + at-least-once, per-task process groups, idle auto-shutdown",
     // Single-line long_about: clap wraps help text to $COLUMNS at
     // render time; baked \n would render the same breaks at every

@@ -26,8 +26,10 @@ pub fn body(report: &str, client: Option<&str>) -> Result<String> {
         report.to_string()
     };
     let report = report.as_str();
+    // SHUNT_VERSION carries the build sha: `0.2.0 (abc1234 …)` —
+    // the exact code that ran, which is the point of the context.
     let mut ctx = serde_json::json!({
-        "shunt": env!("CARGO_PKG_VERSION"),
+        "shunt": env!("SHUNT_VERSION"),
         "protocol": crate::proto::wire::PROTOCOL_VERSION,
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
