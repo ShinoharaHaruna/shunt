@@ -19,14 +19,24 @@ defaults:
 
 env:
   CARGO_TERM_COLOR: always
-  TARGET: x86_64-unknown-linux-musl
 
 jobs:
   build:
-    name: Check and build
+    name: Check and build (${{ matrix.target }})
     if: ${{ !github.event.deleted }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      TARGET: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      # musl = the static build `bootstrap` fetches as the rescue
+      # binary for old-glibc boxes (design.md §15); gnu for users
+      # who want the dynamic-linked build.
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - x86_64-unknown-linux-gnu
     outputs:
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
@@ -103,13 +113,16 @@ jobs:
           cp LICENSE README.md README.cn.md "dist/$archive/"
           tar -C dist -czf "dist/$archive.tar.gz" "$archive"
           cd dist
-          sha256sum "$archive.tar.gz" > SHA256SUMS
+          # per-target sums: the matrix would otherwise race on a
+          # single SHA256SUMS filename (bootstrap §15 fetches
+          # SHA256SUMS-<target> next to the tarball).
+          sha256sum "$archive.tar.gz" > "SHA256SUMS-$TARGET"
           rm -r "$archive"
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: release
+          name: release-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
           retention-days: 7
@@ -125,12 +138,13 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: release
+          pattern: release-*
           path: dist
+          merge-multiple: true
 
       - name: Verify release artifacts
         working-directory: dist
-        run: sha256sum --check SHA256SUMS
+        run: for f in SHA256SUMS-*; do sha256sum --check "$f"; done
 
       - name: Create release with generated notes
         env:
