@@ -434,6 +434,7 @@ Facts are advisory registry data for agent-side matching, not enforced constrain
 | `shunt shutdown on\|off\|status`                                                                  | client | idle poweroff               |
 | `shunt logs [-n N] [-f] [pat]` / `shunt dlog`                                                     | client | task/daemon logs            |
 | `shunt probe`                                                                                     | client | machine facts JSON          |
+| `shunt completions <shell>`                                                                       | local  | shell completion script     |
 
 ## 11. Testing strategy
 

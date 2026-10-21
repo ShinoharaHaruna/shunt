@@ -82,6 +82,14 @@ pub enum Command {
     Shutdown(ShutdownArgs),
     /// Print machine facts as JSON (client)
     Probe(ProbeArgs),
+    /// Print a shell completion script to stdout
+    Completions(CompletionsArgs),
+}
+
+#[derive(Args)]
+pub struct CompletionsArgs {
+    /// Shell to generate completions for
+    pub shell: clap_complete::Shell,
 }
 
 #[derive(Args)]

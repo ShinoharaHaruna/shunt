@@ -9,6 +9,7 @@ mod args;
 mod server;
 
 use anyhow::Result;
+use clap::CommandFactory;
 
 pub use args::{Cli, Command};
 
@@ -448,6 +449,11 @@ pub fn run(cli: Cli) -> Result<()> {
                     Err(e) => return jfail(a.json, &format!("{e:#}")),
                 }
             }
+            Ok(())
+        }
+        Command::Completions(a) => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(a.shell, &mut cmd, "shunt", &mut std::io::stdout());
             Ok(())
         }
     }

@@ -8,6 +8,7 @@ description = "Zero-dependency experiment queue for hourly-billed GPU boxes"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4.6.11"
 fs2 = "0.4"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
