@@ -66,6 +66,8 @@ Under `$QROOT` (client-local; resolved as `--root` flag > `$SHUNT_ROOT` env. Eve
 
 Every queue entry is a directory named `NNNN_<slug>` containing `task.sh` plus the sidecars it accumulates (`log`, `pid`, `exit`). Readers also understand the legacy flat layout (`NNNN_<slug>.sh` with `.sh.log`/`.sh.pid`/`.sh.exit` sidecars) so pre-existing queues need no migration; writers always create dirs, and `finalize` normalizes any legacy entry it touches. A suffixless flat file is NOT an entry — it is ignored entirely.
 
+Upgrading in place over a legacy-format qroot is a supported path (observed end to end against the bash-era layout): orphan requeue, `pending/*.sh` normalization on claim, `.seq` high-water, and legacy `done/`/`failed/` listing all behave.
+
 The daemon only manages tasks it dequeued itself, tracked via `running/*/pid`. Other jobs on the box are never touched. This boundary is a hard safety rule: every signal the daemon or `shunt kill` sends goes to a pgid recorded in a `pid` file, never to a name match.
 
 ### 3.2 Sequence numbers and the priority band
@@ -265,6 +267,7 @@ Registry files are human-editable TOML and safe to keep in git (minus key paths)
 | `name`                                                        | registry key                                                                                                                                                                                                                                                       |
 | `local`                                                       | loopback transport instead of ssh (localhost and any `client add --local` row)                                                                                                                                                                                     |
 | `local_bin`                                                   | local transport: binary to exec (default: the running `shunt`)                                                                                                                                                                                                     |
+| `bin_path`                                                    | explicit local path for the binary `bootstrap` ships (e.g. a musl cross-build for an old-glibc box); the auto source is `current_exe()` (§15). Settable at `client add --bin-path` or by hand                                                                      |
 | `timeout_s`                                                   | local transport: exec timeout; on expiry the child is killed                                                                                                                                                                                                       |
 | `ssh_timeout_s`                                               | ssh transport: ConnectTimeout override (default 15)                                                                                                                                                                                                                |
 | `shutdown_cmd`                                                | poweroff command pushed to `<qroot>/shutdown_cmd` at `shutdown on` arm time — point at `true` or a marker script in test envs                                                                                                                                      |
@@ -402,6 +405,7 @@ Every ssh exec is bounded twice, because `ConnectTimeout` covers only the handsh
 - `mem_gb`: `memory.max` / `memory.limit_in_bytes`; `free` only as fallback, same caveat. Never size off host-reported values.
 - `disk_free_gb`: `df` on `deploy_root`.
 - `python`: `python3 --version`.
+- `libc`: `ldd --version` parsed to `glibc 2.35` / `musl 1.2.4`; absent when undeterminable. The most deploy-relevant fact — it decides whether a shipped binary can even start (§15).
 - `shutdown_cmd`: best-guess poweroff command — `systemctl poweroff` when `/run/systemd/system` exists and `systemctl` is found, else `shutdown`, else `poweroff`, else absent. Advisory: a container may carry the binary yet lack CAP_SYS_BOOT; the row's `shutdown_cmd` field and `--cmd` flag still override it at arm time.
 
 Facts are advisory registry data for agent-side matching, not enforced constraints.
@@ -453,6 +457,7 @@ Integration tests spawn a real daemon against a tmp `SHUNT_ROOT`; the poll inter
 - workers resize: raise dispatches immediately; lower drains only; invalid value falls back to last-known
 - env file overlay, workdir, proxy unset, thread caps
 - dispatcher: spool → push → ack → delete; unreachable client retains; auto-heal restarts a dead daemon
+- bootstrap compat (§15): GLIBC byte-scan (no refs → ship unconditionally); ldd parse over `2>&1`; refuse on older-glibc/musl/undeterminable box with musl-build remediation; release rescue verifies checksum + embedded sha; smoke `--version 2>&1` surfaces loader stderr
 - feedback: sanitize redacts registry secrets (host/port/user/password/key/$HOME) and skips the common-name allowlist; persist-before-deliver leaves a pending artifact when delivery is disabled (`SHUNT_FEEDBACK_REPO=` empty); dedup returns the existing URL within 24 h; the hourly cap refuses but still persists; `retry` delivers pending entries; delivery itself runs against a stub `gh` on PATH (never the real API)
 
 ## 12. Skill deliverable
@@ -473,7 +478,7 @@ shunt/
                      # tasks (ledger), tunnel, transport/ (ssh + local),
                      # status,
                      # client_ops/ (keys, lifecycle, update, hygiene, env,
-                     # probe, bootstrap)
+                     # probe, bootstrap, compat + release fetch — §15)
     agent/           # FS queue ops, exec, shutdown flags, probe;
                      # daemon/ = poll loop (core), lifecycle, workers,
                      # orphan requeue (reap), idle-shutdown countdown (idle)
@@ -525,3 +530,18 @@ The reporter may be an agent sitting in a retry loop aimed at a public repo:
 
 - **Dedup:** an artifact with identical `(kind, title, body)` delivered within the last 24 h short-circuits to the existing issue URL (`deduped: true`) — checked before the rate cap so a repeat report is never blocked.
 - **Rate cap:** `SHUNT_FEEDBACK_MAX_PER_HOUR` (default 5) delivered artifacts in the last hour refuses delivery — the artifact still persists, and the error says to re-run `shunt feedback retry` later. `retry` runs the same resolve path (dedup, then cap): it is the cap's remediation, not a bypass — a looped caller cannot drain the ledger into a public repo. Only real deliveries count toward the cap (a dedup-hit copy consumed no API call).
+
+## 15. Binary compatibility at bootstrap
+
+`bootstrap` ships a binary to a box whose libc may predate the dev machine's toolchain. The shipped binary must run, not merely scp — a glibc-linked dev build on an old-glibc box previously ran only by weak-version luck, the loader warning buried in remote stderr that `exec` discards on success.
+
+**Source order:** `--bin-path` > row `bin_path` > `current_exe()`. The row field exists because bootstrap doubles as the upgrade path — a musl build for an old-glibc box must survive re-bootstraps; when it is set, bootstrap prints both the local and the shipped version strings so drift is loud. An explicit path (flag or row) is the operator's choice: incompatibility fails with remediation rather than silently substituting a different binary.
+
+**Check** — runs only when the chosen binary is glibc-linked. Glibc need is detected by an in-process byte-scan of the binary for `GLIBC_x.y` version refs (no `strings`/`readelf` dependency): no refs = libc-independent (musl static) and ships unconditionally.
+
+1. `ldd --version` on the box over raw exec with `2>&1` (the transport surfaces stdout only). Parses to `glibc x.y` / `musl x.y.z` / undeterminable. This is deliberately not the wire `probe` — the binary the check would validate is not installed yet.
+2. Box glibc ≥ the binary's maximum required GLIBC → compatible. Box glibc older, box musl, or box libc undeterminable → incompatible. Older is refused, not warned: missing weak-version refs run "by luck" until a touched code path crashes mid-task.
+3. On incompatibility — along the auto source only — **rescue**: the local `--version` string `x.y.z (<sha> <date>)` names a commit. Download `shunt-v<x.y.z>-x86_64-unknown-linux-musl.tar.gz` + `SHA256SUMS-<target>` from the releases of `SHUNT_RELEASE_REPO` > `server.toml release_repo` > upstream default (`gh release download` first, `curl -L` fallback — public assets need no auth), verify the checksum, then run the extracted binary's `--version`: the embedded sha must equal the local sha — the artifact self-certifies it is the same code. A local build with no embedded sha accepts on `x.y.z` alone; `-dirty` warns that the shipped build lacks the uncommitted changes. Any rescue failure falls through to the hard error, whose remediation names the musl build recipe (`rustup target add x86_64-unknown-linux-musl && cargo build --release --target x86_64-unknown-linux-musl`) and `--bin-path`.
+4. **Post-install smoke:** after the stage-then-mv install and before remote `init`, exec `<bin> --version 2>&1` — nonzero fails bootstrap with the output; the merged loader warnings print on stderr locally. Success echoes the remote's own version string (`remote shunt 0.2.0 (faae5d9 …)`).
+
+The `libc` probe fact shares the ldd parser and lands in the row's `facts` for agent-side matching (§8). The release workflow packs both musl and gnu artifacts per tag; bootstrap only ever fetches the musl one — it runs on every libc the gnu one can and beyond.

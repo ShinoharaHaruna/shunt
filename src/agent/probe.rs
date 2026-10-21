@@ -128,6 +128,14 @@ fn shutdown_cmd() -> Option<String> {
     }
 }
 
+/// The box's libc (`glibc 2.35` / `musl 1.2.4`) — decides whether a
+/// shipped binary can start here (design.md §15). `2>&1` merges
+/// stderr: musl's ldd writes Version there.
+fn libc_version() -> Option<String> {
+    let out = Command::new("sh").args(["-c", "ldd --version 2>&1"]).output().ok()?;
+    crate::proto::libc::parse_ldd_version(&String::from_utf8_lossy(&out.stdout)).map(|l| l.to_string())
+}
+
 fn python_version() -> Option<String> {
     // `python3 --version` prints to stdout on 3.x, but some builds
     // answer on stderr — and either way a success-with-empty-output
@@ -150,7 +158,7 @@ pub fn collect(deploy_root: &str) -> ProbeReport {
     let (gpu, driver, cuda) = nvidia_smi().unwrap_or((None, None, None));
     let (cores, cores_suspect) = cores_and_source();
     let (mem_gb, mem_gb_suspect) = mem_gb_and_source();
-    ProbeReport { protocol: crate::proto::wire::PROTOCOL_VERSION, gpu, driver, cuda, cores, cores_suspect, mem_gb: mem_gb.map(|g| (g * 100.0).round() / 100.0), mem_gb_suspect, disk_free_gb: disk_free_gb(deploy_root).map(|g| (g * 100.0).round() / 100.0), python: python_version(), can_root: can_root(), shutdown_cmd: shutdown_cmd() }
+    ProbeReport { protocol: crate::proto::wire::PROTOCOL_VERSION, gpu, driver, cuda, cores, cores_suspect, mem_gb: mem_gb.map(|g| (g * 100.0).round() / 100.0), mem_gb_suspect, disk_free_gb: disk_free_gb(deploy_root).map(|g| (g * 100.0).round() / 100.0), python: python_version(), can_root: can_root(), shutdown_cmd: shutdown_cmd(), libc: libc_version() }
 }
 
 #[cfg(test)]

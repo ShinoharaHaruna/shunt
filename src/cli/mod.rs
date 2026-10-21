@@ -176,7 +176,7 @@ pub fn run(cli: Cli) -> Result<()> {
         },
 
         Command::Client(c) => match c.action {
-            ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { host: a.host, port: a.port, user: a.user, key: a.key, password: a.password, qroot: a.qroot, deploy_root: a.deploy_root, local: a.local, expire: a.expire, env_setup: a.env_setup, shell: a.shell, endpoint_rotates: a.endpoint_rotates }),
+            ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { host: a.host, port: a.port, user: a.user, key: a.key, password: a.password, qroot: a.qroot, deploy_root: a.deploy_root, local: a.local, expire: a.expire, env_setup: a.env_setup, shell: a.shell, endpoint_rotates: a.endpoint_rotates, bin_path: a.bin_path }),
             ClientAction::Rename { old, new } => crate::server::client_ops::rename(&old, &new),
             // Fold the --endpoint-rotates / --no-endpoint-rotates pair
             // into tri-state: Some(true) sets, Some(false) clears,
@@ -258,10 +258,10 @@ pub fn run(cli: Cli) -> Result<()> {
                 println!("env pushed: {}", name);
                 Ok(())
             }
-            ClientAction::Bootstrap { name } => {
+            ClientAction::Bootstrap { name, bin_path } => {
                 let c = registry::load_client(&name)?;
                 let t = crate::server::transport::transport_for(&c);
-                crate::server::client_ops::bootstrap(t.as_ref(), &name)
+                crate::server::client_ops::bootstrap(t.as_ref(), &name, bin_path.as_deref())
             }
         },
 

@@ -10,3 +10,8 @@ pub mod cli;
 pub mod feedback;
 pub mod proto;
 pub mod server;
+
+/// The canonical upstream GitHub repo (`owner/name`) — the default
+/// target for `feedback` issues and `bootstrap` release-asset fetches.
+/// Forks override via `server.toml` fields / `SHUNT_*_REPO` env.
+pub const UPSTREAM_REPO: &str = "ShinoharaHaruna/shunt";

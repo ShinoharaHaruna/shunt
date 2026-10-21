@@ -166,6 +166,11 @@ pub struct ProbeReport {
     /// row's `shutdown_cmd` field is unset.
     #[serde(default)]
     pub shutdown_cmd: Option<String>,
+    /// The box's libc (`glibc 2.35` / `musl 1.2.4`) — the most
+    /// deploy-relevant fact: it decides whether a shipped binary can
+    /// start (design.md §15). Absent on older remote binaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub libc: Option<String>,
 }
 
 #[cfg(test)]

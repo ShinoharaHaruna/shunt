@@ -480,6 +480,10 @@ pub struct ClientAddArgs {
     /// Vendor reassigns IP/port across restarts (AutoDL does not)
     #[arg(long)]
     pub endpoint_rotates: bool,
+    /// Explicit local path for the binary bootstrap ships
+    /// (§15); stored on the row so re-bootstraps reuse it
+    #[arg(long)]
+    pub bin_path: Option<String>,
 }
 
 // Add is parsed once per invocation — a fat variant is fine and
@@ -541,8 +545,16 @@ pub enum ClientAction {
     },
     /// Re-collect machine facts over SSH and merge into the row
     Probe { name: String },
-    /// Probe raw SSH, scp the binary, remote init + start
-    Bootstrap { name: String },
+    /// Probe raw SSH, scp the binary, remote init + start. Binary
+    /// source: --bin-path > row bin_path > current_exe; a glibc/musl
+    /// mismatch is checked before the copy (design.md §15).
+    Bootstrap {
+        name: String,
+        /// Ship this local binary instead of the running one
+        /// (e.g. a musl cross-build for an old-glibc box)
+        #[arg(long)]
+        bin_path: Option<String>,
+    },
     /// Push the row's env_setup/shell to <qroot>/env_setup + shell
     Env { name: String },
     /// List vendor templates visible to `client add --template`

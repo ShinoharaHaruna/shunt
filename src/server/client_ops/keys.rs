@@ -86,7 +86,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn pw_client(key: &std::path::Path) -> ClientEntry {
-        ClientEntry { name: "t".into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 22, user: "u".into(), key: key.display().to_string(), password: "pw".into() }, qroot: "/tmp/qt".into(), deploy_root: "/tmp".into(), facts: BTreeMap::new(), billing: None }
+        ClientEntry { name: "t".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 22, user: "u".into(), key: key.display().to_string(), password: "pw".into() }, qroot: "/tmp/qt".into(), deploy_root: "/tmp".into(), facts: BTreeMap::new(), billing: None }
     }
 
     /// Install a fake `sshpass` ahead on PATH (fake-ssh pattern).

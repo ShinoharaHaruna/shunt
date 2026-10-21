@@ -8,16 +8,20 @@
 //! - `env`       — `env` push of env_setup/shell into <qroot>
 //! - `probe`     — `probe` + wire `probe_facts`
 //! - `bootstrap` — `bootstrap`: key, binary ship, init/start, facts
+//! - `compat`    — §15 glibc/musl check before the binary ships
+//! - `release`   — §15 release-asset rescue (musl download + verify)
 //!
 //! Everything a caller outside `client_ops` needs is re-exported
 //! here so `crate::server::client_ops::*` paths stay stable.
 
 mod bootstrap;
+mod compat;
 mod env;
 mod hygiene;
 mod keys;
 mod lifecycle;
 mod probe;
+mod release;
 mod update;
 
 pub use bootstrap::bootstrap;
@@ -32,5 +36,5 @@ pub use update::{update, EndpointUpdate};
 /// every field spelled out so a new field forces one edit, not N.
 #[cfg(test)]
 pub(crate) fn test_entry() -> crate::server::registry::ClientEntry {
-    crate::server::registry::ClientEntry { name: "b".into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: Default::default(), qroot: "/q".into(), deploy_root: "/data".into(), facts: Default::default(), billing: None }
+    crate::server::registry::ClientEntry { name: "b".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: Default::default(), qroot: "/q".into(), deploy_root: "/data".into(), facts: Default::default(), billing: None }
 }

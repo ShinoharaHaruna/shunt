@@ -22,6 +22,13 @@ pub struct ClientEntry {
     /// running `shunt` binary).
     #[serde(default)]
     pub local_bin: Option<String>,
+    /// Explicit local path for the binary `bootstrap` ships (design.md
+    /// §15) — e.g. a musl cross-build for an old-glibc box. Absent =
+    /// ship the running `current_exe` (with the §15 compat check +
+    /// release rescue). Durable across re-bootstraps, which is the
+    /// point: bootstrap doubles as the upgrade path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin_path: Option<String>,
     /// Local transport: exec timeout in seconds.
     #[serde(default)]
     pub timeout_s: Option<u64>,
@@ -144,4 +151,7 @@ pub struct ServerConfig {
     /// §14). Empty/absent = compile-time default; the
     /// `$SHUNT_FEEDBACK_REPO` env overrides either way.
     pub feedback_repo: Option<String>,
+    /// `owner/name` for release-asset fetches (`bootstrap` rescue,
+    /// design.md §15). `$SHUNT_RELEASE_REPO` env overrides.
+    pub release_repo: Option<String>,
 }

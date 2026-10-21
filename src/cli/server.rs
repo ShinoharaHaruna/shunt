@@ -172,6 +172,7 @@ pub(crate) struct ClientAddOpts {
     pub(crate) shell: Option<String>,
     pub(crate) endpoint_rotates: bool,
     pub(crate) password: Option<String>,
+    pub(crate) bin_path: Option<String>,
 }
 
 pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result<()> {
@@ -185,7 +186,7 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
 
     let mut entry = match template {
         Some(t) => load_vendor_template(t)?,
-        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: String::new(), deploy_root: String::new(), facts: Default::default(), billing: None },
+        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: String::new(), deploy_root: String::new(), facts: Default::default(), billing: None },
     };
     entry.name = name.into();
     // Adding a row for the built-in name materializes the loopback
@@ -231,6 +232,9 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
     }
     if let Some(v) = opts.password {
         entry.ssh.password = v;
+    }
+    if let Some(v) = opts.bin_path {
+        entry.bin_path = Some(v);
     }
     if opts.endpoint_rotates {
         entry.endpoint_rotates = true;
