@@ -5,7 +5,7 @@ use super::env::push_env;
 use super::keys::{deploy_key, ensure_key};
 use super::probe::probe_facts;
 use super::{compat, release};
-use crate::server::registry;
+use crate::server::registry::{self, ClientEntry};
 use crate::server::transport::{shell_quote, shunt_bin, Transport};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -32,8 +32,25 @@ pub fn bootstrap(t: &dyn Transport, name: &str, bin_path: Option<&str>) -> Resul
     ensure_key(&mut entry)?;
     if deploy_key(&entry)? {
         eprintln!("key deployed: {}", entry.ssh.key);
-    } else if !entry.local && entry.ssh.password.is_empty() {
-        eprintln!("note: no ssh.password in the row — install {}.pub on the box once\n      (vendor console or: ssh-copy-id -i {}.pub -p {} {}@{})", entry.ssh.key, entry.ssh.key, entry.ssh.port, entry.ssh.user, entry.ssh.host);
+    } else if !entry.local && entry.ssh.password.is_empty() || entry.shared {
+        let why = if entry.shared { "shared row — authorized_keys is never modified automatically" } else { "no ssh.password in the row" };
+        eprintln!("note: {why} — install {}.pub on the box once\n      (vendor console or: ssh-copy-id -i {}.pub -p {} {}@{})", entry.ssh.key, entry.ssh.key, entry.ssh.port, entry.ssh.user, entry.ssh.host);
+    }
+
+    // .shunt-owner claim (§4.1): two independent shunt installs
+    // pointed at the same qroot silently merge into one queue —
+    // seq races between two dispatchers, one daemon serving both.
+    // Before any write, refuse when the queue carries another
+    // install's pubkey; claim it for ourselves otherwise.
+    let owner = owner_path(&entry);
+    let mut claim = false;
+    if let Some(pubkey) = owner_pubkey(&entry) {
+        let existing = t.exec(&entry, &["sh".into(), "-c".into(), format!("cat {} 2>/dev/null", shell_quote(&owner))], None).context("read .shunt-owner")?;
+        let existing = existing.trim();
+        if !existing.is_empty() && existing != pubkey {
+            anyhow::bail!("qroot {} is claimed by a different shunt install (.shunt-owner mismatch) — pick a different qroot in the row; if the other install is gone, remove {}", entry.qroot, owner);
+        }
+        claim = true; // write (or rewrite) after init below
     }
     let bin = shunt_bin(&entry);
     let bindir = bin.rsplit_once('/').map(|(d, _)| d).unwrap_or("").to_string();
@@ -95,6 +112,10 @@ pub fn bootstrap(t: &dyn Transport, name: &str, bin_path: Option<&str>) -> Resul
     }
 
     t.exec(&entry, &[bin.clone(), "init".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt init")?;
+    if claim {
+        let pub_ = owner_pubkey(&entry).unwrap_or_default();
+        t.exec(&entry, &["sh".into(), "-c".into(), "cat > \"$0\"".into(), owner], Some(&format!("{pub_}\n"))).context("write .shunt-owner")?;
+    }
     t.exec(&entry, &[bin.clone(), "start".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt start")?;
 
     // Probe AFTER the binary lands: the wire `shunt probe` is the
@@ -102,10 +123,10 @@ pub fn bootstrap(t: &dyn Transport, name: &str, bin_path: Option<&str>) -> Resul
     let facts = probe_facts(t, &entry)?;
     entry.facts.extend(facts);
 
-    // env_setup/shell only push when the row actually carries them;
-    // an empty push would clobber a box-side edit, which is not the
-    // contract bootstrap has with the registry.
-    if !entry.env_setup.is_empty() || !entry.shell.is_empty() {
+    // env_setup/shell/exit_on_idle only push when the row actually
+    // carries them; an empty push would clobber a box-side edit,
+    // which is not the contract bootstrap has with the registry.
+    if !entry.env_setup.is_empty() || !entry.shell.is_empty() || entry.exit_on_idle {
         if let Err(e) = push_env(t, name) {
             eprintln!("note: env_setup push failed: {e:#}");
         }
@@ -114,6 +135,35 @@ pub fn bootstrap(t: &dyn Transport, name: &str, bin_path: Option<&str>) -> Resul
     println!("bootstrapped {} ({})", entry.name, bin);
     println!("wrote {}", p.display());
     Ok(())
+}
+
+/// `<qroot>/.shunt-owner` — holds the claiming client's ssh public
+/// key line; bootstrap refuses a foreign claim (§4.1).
+fn owner_path(e: &ClientEntry) -> String {
+    format!("{}/.shunt-owner", e.qroot)
+}
+
+/// The pubkey identifying this install: `{ssh.key}.pub` when it
+/// exists, else `ssh-keygen -y` derivation. `None` means no identity
+/// to claim with (e.g. `--key` given without a derivable pub) — the
+/// caller then skips the claim check.
+fn owner_pubkey(e: &ClientEntry) -> Option<String> {
+    if e.ssh.key.is_empty() {
+        return None;
+    }
+    let pub_path = format!("{}.pub", e.ssh.key);
+    if let Ok(s) = std::fs::read_to_string(&pub_path) {
+        let s = s.trim();
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    let out = std::process::Command::new("ssh-keygen").args(["-y", "-f", &e.ssh.key]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then(|| format!("{s} shunt-{}", e.name))
 }
 
 #[cfg(test)]
@@ -158,10 +208,12 @@ mod tests {
     }
 
     /// Canned answers per argv: `ldd --version` decides the compat
-    /// verdict; copy_to is recorded so tests can assert nothing was
-    /// shipped on refusal.
+    /// verdict; `cat .../.shunt-owner` reports the fixture claim;
+    /// copy_to is recorded so tests can assert nothing was shipped
+    /// on refusal.
     struct Stub {
         ldd: &'static str,
+        owner: String,
         copied: Mutex<Vec<(PathBuf, String)>>,
     }
     impl Transport for Stub {
@@ -169,6 +221,9 @@ mod tests {
             let j = argv.join(" ");
             if j.contains("ldd --version") {
                 return Ok(self.ldd.into());
+            }
+            if j.contains(".shunt-owner") && j.contains("cat") {
+                return Ok(self.owner.clone());
             }
             if j.contains("--version") {
                 return Ok("shunt 0.2.0 (deadbee 2026-01-01)\n".into());
@@ -184,13 +239,49 @@ mod tests {
         }
     }
 
+    /// Row fixture with a REAL keypair — the .shunt-owner claim reads
+    /// `{key}.pub` off disk.
     fn fixture(name: &str) -> (std::path::PathBuf, ClientEntry) {
         let tmp = std::env::temp_dir().join(format!("shunt-test-boot-{name}-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &tmp);
         let mut e = base_entry();
         e.name = name.into();
+        crate::server::client_ops::ensure_key(&mut e).unwrap();
         registry::save_client(&e).unwrap();
         (tmp, e)
+    }
+
+    fn own_pub(e: &ClientEntry) -> String {
+        std::fs::read_to_string(format!("{}.pub", e.ssh.key)).unwrap().trim().to_string()
+    }
+
+    /// §4.1 owner claim: a qroot already carrying a foreign
+    /// .shunt-owner refuses before the first write — two installs
+    /// must never merge into one queue.
+    #[test]
+    fn bootstrap_refuses_foreign_owned_qroot() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let (tmp, e) = fixture("foreign");
+        let t = Stub { ldd: "ldd (GNU libc) 99.0", owner: "ssh-ed25519 AAAAFOREIGN other\n".into(), copied: Mutex::new(Vec::new()) };
+        let err = bootstrap(&t, "foreign", None).unwrap_err();
+        std::env::remove_var("SHUNT_HOME");
+        std::fs::remove_dir_all(&tmp).ok();
+        assert!(err.to_string().contains("claimed by a different shunt install"), "{err}");
+        assert!(t.copied.lock().unwrap().is_empty(), "refused before any copy");
+        drop(e);
+    }
+
+    /// §4.1: the queue carrying OUR OWN pub (a re-bootstrap of the
+    /// same install — the binary upgrade path) proceeds normally.
+    #[test]
+    fn bootstrap_reowns_same_pub() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let (tmp, e) = fixture("reown");
+        let t = Stub { ldd: "ldd (GNU libc) 99.0", owner: format!("{}\n", own_pub(&e)), copied: Mutex::new(Vec::new()) };
+        bootstrap(&t, "reown", None).unwrap();
+        std::env::remove_var("SHUNT_HOME");
+        assert_eq!(t.copied.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     /// §15 refuse path: an explicit --bin-path needing a newer glibc
@@ -208,7 +299,7 @@ mod tests {
         let probe = PathBuf::from("/bin/sh");
         let needs = crate::server::client_ops::compat::required_glibc(&probe).unwrap();
         assert!(needs.is_some(), "/bin/sh must be glibc-linked for this test");
-        let t = Stub { ldd: "ldd (GNU libc) 2.0", copied: Mutex::new(Vec::new()) };
+        let t = Stub { ldd: "ldd (GNU libc) 2.0", owner: String::new(), copied: Mutex::new(Vec::new()) };
         let err = bootstrap(&t, "stub-old", Some("/bin/sh")).unwrap_err();
         std::env::remove_var("SHUNT_HOME");
         std::fs::remove_dir_all(&tmp).ok();
@@ -224,7 +315,7 @@ mod tests {
     fn bootstrap_compatible_box_ships() {
         let _g = HOME_LOCK.lock().unwrap();
         let (tmp, _e) = fixture("stub-ok");
-        let t = Stub { ldd: "ldd (GNU libc) 99.0", copied: Mutex::new(Vec::new()) };
+        let t = Stub { ldd: "ldd (GNU libc) 99.0", owner: String::new(), copied: Mutex::new(Vec::new()) };
         bootstrap(&t, "stub-ok", None).unwrap();
         std::env::remove_var("SHUNT_HOME");
         let copied = t.copied.lock().unwrap();

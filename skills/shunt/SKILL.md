@@ -18,6 +18,20 @@ Mental model:
 
 ## Setup
 
+### Consent before `client add` — ask the user, never assume
+
+shunt touches a machine the user may share with other people. Before registering a box, ask the user these questions — the agent's job is to record the answers, not to choose them:
+
+1. **Is the box shared with other people or workloads?** If yes, register with `--shared`: server-side `shutdown on` then refuses to arm idle poweroff — powering off would kill other users' jobs — and `bootstrap` never auto-deploys the ssh key. On a shared box also prefer `--exit-on-idle` (below) and never suggest `shutdown on` at all.
+2. **SSH identity — three options, let the user pick:**
+   - dedicated shunt keypair + auto-deploy: needs `ssh.password` once; appends one line to `~/.ssh/authorized_keys` on the box (the only write shunt makes outside `<qroot>`). Dedicated boxes only — a `shared` row skips this automatically;
+   - reuse an already-authorized key: `--key ~/.ssh/id_ed25519`, no password, zero `authorized_keys` writes — the recommended choice on a shared box;
+   - manual: leave `ssh.password` empty; bootstrap prints the generated `.pub` for the user to install via the vendor console.
+3. **qroot — REQUIRED: ask for the exact path, never silently take a default.** The whole footprint — queue, binary, daemon state — lives inside `<qroot>`. Vendor templates seed `<deploy_root>/queue`, which is fine on a dedicated box but can collide with another tenant's queue on a shared one; get the user to name an explicit `--qroot` they own (e.g. under their work dir). Outside qroot, shunt writes only the optional authorized_keys line and a small self-cleaned daemon-registry entry under `$XDG_STATE_HOME`/`/tmp`. shunt also guards collisions itself: bootstrap claims the qroot via `<qroot>/.shunt-owner` (the client's ssh pubkey) and refuses a queue already claimed by a different install.
+4. **Daemon residency.** By default `shuntd` stays resident after the queue drains. `--exit-on-idle` makes it exit cleanly on drain (the next submit revives it automatically) — the polite choice on shared or heavily-monitored boxes.
+
+**Two shunt users, one box.** If user A and user B each run their own shunt against box X: under the _same_ unix account (the shared-root-container norm) give each its own qroot — the per-user daemon registry (§3.11) already coordinates idle-shutdown between their daemons, and `.shunt-owner` stops them pointing at one queue by accident. Under _different_ unix accounts their registries can't see each other at all — mark the row `shared` and keep idle poweroff off the table.
+
 All commands below run on the dev machine unless marked client.
 
 ```bash
@@ -172,7 +186,7 @@ Interpretation cheats: `daemon.alive=false` with nonempty `pending/` means nothi
 
 ## Cost-aware playbook
 
-1. Arm idle-shutdown right after enqueueing the last task of a batch: `shunt shutdown -c rw-a on`. The countdown only fires when both `pending/` and `running/` are empty, re-checks every second, and cancels if new work arrives, so arming early is safe.
+1. Arm idle-shutdown right after enqueueing the last task of a batch: `shunt shutdown -c rw-a on`. The countdown only fires when both `pending/` and `running/` are empty, re-checks every second, and cancels if new work arrives, so arming early is safe. Never arm on a `shared` box — the arm is refused server-side anyway; kill the resident daemon instead with `shunt stop -c`.
 2. Submitting while the box is off costs nothing. The spool holds the task until a human powers the box on and the dispatcher delivers it. Batch overnight submissions; let one power-on drain them.
 3. Read `billing.hourly`/`billing.currency` from `status --all --json` before queueing. On hourly billing, unused paid time is already spent: if the instance has 40 min of paid time left and the next task needs 3 h, hold the long task, run short ones, or warn the user. That decision is yours; shunt only exposes the rate.
 4. Split multi-hour experiments into checkpointable tasks (`--guard runs/epoch10.pt` style) so an at-least-once rerun after a mid-flight death costs minutes, not the whole run. One giant unguarded 12 h task is the expensive failure mode.
@@ -225,7 +239,7 @@ shunt status -c rw-a --json    # pending → running
 shunt logs -c rw-a exp1        # watch the task log
 
 # drain and walk away
-shunt shutdown -c rw-a on      # fires ~60 s after running+pending empty
+shunt shutdown -c rw-a on      # fires ~60 s after running+pending empty (dedicated boxes only — refused on `shared` rows)
 # box powers off; billing stops at the end of the paid window
 ```
 

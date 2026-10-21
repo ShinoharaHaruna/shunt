@@ -25,7 +25,7 @@ fn remove_cleans_row_keys_state_spool_and_bindings() -> Result<()> {
     std::fs::create_dir_all(key.parent().unwrap())?;
     std::fs::write(&key, "KEY")?;
     std::fs::write(key.with_extension("pub"), "ssh-ed25519 BLOB gone")?;
-    let e = ClientEntry { name: "gone".into(), local: true, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint { host: String::new(), port: 0, user: String::new(), key: key.display().to_string(), password: String::new() }, qroot: String::new(), deploy_root: String::new(), facts: BTreeMap::new(), billing: None };
+    let e = ClientEntry { name: "gone".into(), local: true, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: String::new(), port: 0, user: String::new(), key: key.display().to_string(), password: String::new() }, qroot: String::new(), deploy_root: String::new(), facts: BTreeMap::new(), billing: None };
     registry::save_client(&e)?;
 
     spool::stage(&SpoolEntry { id: "t1".into(), project: "p".into(), client: "gone".into(), meta: TaskMeta { slug: "s".into(), guard: None, workdir: None, env: Default::default(), cmd: vec!["echo".into()], timeout_s: None }, submitted_at: "2026-01-01T00:00:00Z".into() }, "echo s\n")?;
@@ -70,7 +70,7 @@ fn remove_purge_wipes_local_row_qroot() -> Result<()> {
     let qroot = home.join("deep/queue");
     std::fs::create_dir_all(qroot.join("pending"))?;
     std::fs::write(qroot.join("marker"), "x")?;
-    let e = ClientEntry { name: "loop2".into(), local: true, disabled: false, local_bin: Some("/bin/true".into()), bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint::default(), qroot: qroot.display().to_string(), deploy_root: String::new(), facts: BTreeMap::new(), billing: None };
+    let e = ClientEntry { name: "loop2".into(), local: true, disabled: false, local_bin: Some("/bin/true".into()), bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: qroot.display().to_string(), deploy_root: String::new(), facts: BTreeMap::new(), billing: None };
     registry::save_client(&e)?;
 
     client_ops::remove("loop2", true)?;
@@ -95,7 +95,7 @@ fn remove_survives_rekey_failure() -> Result<()> {
     let kh = registry::known_hosts_path("sshbox")?;
     std::fs::create_dir_all(kh.parent().unwrap())?;
     std::fs::write(&kh, "unrelated.example ssh-ed25519 AAAA\n")?;
-    let e = ClientEntry { name: "sshbox".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: Some(2), ssh_timeout_s: Some(2), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 1, user: "u".into(), key: "/nonexistent/key".into(), password: String::new() }, qroot: "/q".into(), deploy_root: String::new(), facts: BTreeMap::new(), billing: None };
+    let e = ClientEntry { name: "sshbox".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: Some(2), ssh_timeout_s: Some(2), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 1, user: "u".into(), key: "/nonexistent/key".into(), password: String::new() }, qroot: "/q".into(), deploy_root: String::new(), facts: BTreeMap::new(), billing: None };
     registry::save_client(&e)?;
 
     client_ops::remove("sshbox", false)?;

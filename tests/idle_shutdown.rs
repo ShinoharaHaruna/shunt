@@ -265,3 +265,45 @@ fn term_countdown_cancelled_by_pending_exits_loudly() {
     assert!(q.root.join("shutdown_on_idle").exists(), "flag stays armed for a restarted daemon");
     assert!(!fired.exists(), "must not power off with pending work");
 }
+
+/// §4.1 `shared`: server-side arm refuses before any wire op —
+/// idle poweroff on a shared box would kill other people's work.
+#[test]
+fn shutdown_on_refuses_shared_row() {
+    let home = std::env::temp_dir().join(format!("shunt-shared-{}", std::process::id()));
+    std::fs::create_dir_all(home.join("clients")).unwrap();
+    std::fs::write(home.join("clients/sharedbox.toml"), "name = \"sharedbox\"\nlocal = true\nshared = true\nqroot = \"/tmp/q-sharedbox\"\ndeploy_root = \"/tmp\"\n").unwrap();
+    let out = Command::new(common::bin()).args(["shutdown", "on", "-c", "sharedbox"]).env("SHUNT_HOME", &home).output().unwrap();
+    assert!(!out.status.success(), "armed a shared row: {:?}", out.status);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("shared"), "{stderr}");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn exit_on_idle_leaves_immediately_when_drained() {
+    // §3.11a: flag + already-empty queue → the daemon exits on its
+    // first drain check instead of staying resident.
+    let q = Q::new("exitidle");
+    std::fs::write(q.root.join("exit_on_idle"), b"1\n").unwrap();
+    let mut d = q.daemon();
+    wait_until(|| d.try_wait().unwrap().is_some(), 15, "daemon exits on drain");
+    assert!(d.wait().unwrap().success());
+    assert!(q.dlog().contains("daemon_exit_idle"), "{}", q.dlog());
+    assert!(q.daemon_pid().is_none(), "pidfile cleaned on exit");
+}
+
+#[test]
+fn exit_on_idle_waits_for_running_task() {
+    // §3.11a: the flag only drains the daemon — a dispatched task
+    // keeps it resident until done/.
+    let q = Q::new("exitidle-run");
+    std::fs::write(q.root.join("exit_on_idle"), b"1\n").unwrap();
+    q.enqueue_script("slow", "#!/usr/bin/env bash\nexec sleep 4\n");
+    let mut d = q.daemon();
+    wait_until(|| !q.tasks("running").is_empty(), 10, "task running");
+    assert!(d.try_wait().unwrap().is_none(), "running task keeps daemon resident");
+    wait_until(|| !q.tasks("done").is_empty(), 15, "task done");
+    wait_until(|| d.try_wait().unwrap().is_some(), 15, "daemon exits after drain");
+    assert!(q.dlog().contains("daemon_exit_idle"), "{}", q.dlog());
+}

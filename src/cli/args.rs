@@ -499,6 +499,15 @@ pub struct ClientAddArgs {
     /// (§15); stored on the row so re-bootstraps reuse it
     #[arg(long)]
     pub bin_path: Option<String>,
+    /// Box is shared with other people/workloads — server-side
+    /// `shutdown on` then refuses to arm idle poweroff
+    #[arg(long)]
+    pub shared: bool,
+    /// Write <qroot>/exit_on_idle at bootstrap: daemon exits once
+    /// the queue drains instead of staying resident (revived on
+    /// next dispatch)
+    #[arg(long)]
+    pub exit_on_idle: bool,
 }
 
 // Add is parsed once per invocation — a fat variant is fine and

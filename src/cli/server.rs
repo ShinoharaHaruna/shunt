@@ -173,6 +173,8 @@ pub(crate) struct ClientAddOpts {
     pub(crate) endpoint_rotates: bool,
     pub(crate) password: Option<String>,
     pub(crate) bin_path: Option<String>,
+    pub(crate) shared: bool,
+    pub(crate) exit_on_idle: bool,
 }
 
 pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result<()> {
@@ -184,9 +186,10 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
     let row = crate::server::registry::shunt_home()?.join("clients").join(format!("{name}.toml"));
     anyhow::ensure!(!row.exists(), "client '{name}' already exists (use `client update` or `client rm` first)");
 
+    let qroot_explicit = opts.qroot.is_some();
     let mut entry = match template {
         Some(t) => load_vendor_template(t)?,
-        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: String::new(), deploy_root: String::new(), facts: Default::default(), billing: None },
+        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: String::new(), deploy_root: String::new(), facts: Default::default(), billing: None },
     };
     entry.name = name.into();
     // Adding a row for the built-in name materializes the loopback
@@ -236,6 +239,12 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
     if let Some(v) = opts.bin_path {
         entry.bin_path = Some(v);
     }
+    if opts.shared {
+        entry.shared = true;
+    }
+    if opts.exit_on_idle {
+        entry.exit_on_idle = true;
+    }
     if opts.endpoint_rotates {
         entry.endpoint_rotates = true;
     }
@@ -253,6 +262,12 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
     println!("wrote {}", p.display());
     if !entry.local && (entry.ssh.host.is_empty() || entry.ssh.key.is_empty() || entry.ssh.port == 0) {
         eprintln!("note: ssh fields still incomplete; edit the row before bootstrap");
+    }
+    // §4.1 shared: the template default may collide with another
+    // tenant's queue — placement on a shared box is a user choice,
+    // not a default to accept silently.
+    if entry.shared && !qroot_explicit {
+        eprintln!("note: shared row defaults qroot to '{}' — confirm with the user it does not collide with other tenants' queues (--qroot)", entry.qroot);
     }
     // An empty qroot survives add only when deploy_root was empty
     // too; load_client now rejects such rows, so warn for any

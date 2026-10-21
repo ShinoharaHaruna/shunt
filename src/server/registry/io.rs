@@ -135,7 +135,7 @@ fn usable(entry: ClientEntry) -> Result<ClientEntry> {
 
 fn localhost_default() -> Result<ClientEntry> {
     let home = std::env::var("HOME").context("HOME not set")?;
-    Ok(ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: "unlimited".into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint::default(), qroot: shunt_home()?.join("queue").display().to_string(), deploy_root: home, facts: BTreeMap::new(), billing: None })
+    Ok(ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: "unlimited".into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: shunt_home()?.join("queue").display().to_string(), deploy_root: home, facts: BTreeMap::new(), billing: None })
 }
 
 /// Client names including the pre-registered `localhost`. Disabled

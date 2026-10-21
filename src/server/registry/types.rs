@@ -67,6 +67,17 @@ pub struct ClientEntry {
     /// failures streak — see `CONN_FAIL_ESCALATE`.
     #[serde(default)]
     pub endpoint_rotates: bool,
+    /// Box is shared with other people/workloads. Server-side
+    /// footgun guard: `shutdown on` refuses to arm idle poweroff —
+    /// it would kill other users' work. Clear the field to override.
+    #[serde(default)]
+    pub shared: bool,
+    /// Residency preference: `<qroot>/exit_on_idle` is pushed at
+    /// bootstrap/env-push so the daemon exits cleanly once its queue
+    /// drains instead of staying resident (§3.11a). Next dispatch
+    /// revives it via the auto-heal `start`.
+    #[serde(default)]
+    pub exit_on_idle: bool,
     #[serde(default)]
     pub ssh: SshEndpoint,
     /// Queue dir on the box.

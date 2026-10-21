@@ -39,9 +39,12 @@ pub fn ensure_key(entry: &mut ClientEntry) -> Result<()> {
 /// after too many), pubkey appended via stdin with a `grep -qxF`
 /// dedupe. Returns `true` when the key was deployed; `false` when no
 /// password is configured and the `.pub` must be installed once via
-/// the vendor console or a manual ssh-copy-id.
+/// the vendor console or a manual ssh-copy-id. A `shared` row never
+/// auto-deploys: appending to authorized_keys is the one write shunt
+/// makes outside `<qroot>`, and other tenants' consent is not ours
+/// to assume — the manual/console path is the shared-box answer.
 pub fn deploy_key(entry: &ClientEntry) -> Result<bool> {
-    if entry.ssh.password.is_empty() {
+    if entry.shared || entry.ssh.password.is_empty() {
         return Ok(false);
     }
     let have_sshpass = std::process::Command::new("sh").args(["-c", "command -v sshpass >/dev/null 2>&1"]).status().map(|s| s.success()).unwrap_or(false);
@@ -86,7 +89,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn pw_client(key: &std::path::Path) -> ClientEntry {
-        ClientEntry { name: "t".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 22, user: "u".into(), key: key.display().to_string(), password: "pw".into() }, qroot: "/tmp/qt".into(), deploy_root: "/tmp".into(), facts: BTreeMap::new(), billing: None }
+        ClientEntry { name: "t".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 22, user: "u".into(), key: key.display().to_string(), password: "pw".into() }, qroot: "/tmp/qt".into(), deploy_root: "/tmp".into(), facts: BTreeMap::new(), billing: None }
     }
 
     /// Install a fake `sshpass` ahead on PATH (fake-ssh pattern).
@@ -119,5 +122,15 @@ mod tests {
         assert!(err.to_string().contains("timed out"), "{err}");
         std::env::remove_var("SHUNT_SSH_EXEC_TIMEOUT_S");
         std::env::remove_var("SHUNT_HOME");
+    }
+
+    /// §4.1 `shared`: authorized_keys is never touched automatically
+    /// on a shared row — deploy_key reports "not deployed" even with
+    /// a password set, steering to the manual/console path.
+    #[test]
+    fn deploy_key_skips_shared_row() {
+        let mut e = pw_client(std::path::Path::new("/nope/id"));
+        e.shared = true;
+        assert!(!deploy_key(&e).unwrap(), "shared rows must never auto-deploy");
     }
 }

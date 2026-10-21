@@ -579,6 +579,17 @@ fn run_registered(root: &Path) -> Result<()> {
             // its gate stays fail-closed on the listing.
             if d.root.join("shutdown_on_idle").exists() && d.runpids.is_empty() && !shutdown::pending_nonempty(&d.root) {
                 maybe_shutdown(&d.root, true, false, Some(&d.got_signal));
+            } else if d.root.join("exit_on_idle").exists() && d.runpids.is_empty() && !shutdown::pending_nonempty(&d.root) {
+                // Residency preference (§3.11a): the queue is drained
+                // and the owner asked for no resident daemon — leave
+                // the box clean. Not multi-tenant-gated: this daemon
+                // only serves its own queue, so a busy sibling daemon
+                // is no reason to stay, and `status`/dispatch
+                // auto-heal revives it on the next submit.
+                dlog(&d.root, "daemon_exit_idle", Map::new());
+                let _ = std::fs::remove_file(d.root.join("daemon.pid"));
+                shutdown::deregister_qroot(&d.root);
+                return Ok(());
             }
         }
         std::thread::sleep(poll);
