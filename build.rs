@@ -20,6 +20,10 @@ fn main() {
     // the crate version ("0.2.0 (v0.1.0-4-…)").
     let sha = git(&["rev-parse", "--short", "HEAD"]).map(|s| if git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty()) { format!("{s}-dirty") } else { s });
     let date = git(&["log", "-1", "--format=%cd", "--date=short"]);
+    // Component vars let `version --json` report fields directly
+    // instead of parsing the composed display string.
+    println!("cargo:rustc-env=SHUNT_GIT_SHA={}", sha.clone().unwrap_or_default());
+    println!("cargo:rustc-env=SHUNT_GIT_DATE={}", date.clone().unwrap_or_default());
     let meta = match (sha, date) {
         (Some(d), Some(dt)) => format!(" ({d} {dt})"),
         (Some(d), None) => format!(" ({d})"),

@@ -84,10 +84,25 @@ pub enum Command {
     Probe(ProbeArgs),
     /// Print a shell completion script to stdout
     Completions(CompletionsArgs),
+    /// Print version + build info; -c queries the binary on a box
+    /// (forwards the --version flag, which every remote has)
+    Version(VersionArgs),
     /// File a report as a GitHub issue on the shunt repo
     /// (design.md §14); `ls`/`retry` manage the local ledger
     #[command(arg_required_else_help = true)]
     Feedback(FeedbackArgs),
+}
+
+#[derive(Args)]
+pub struct VersionArgs {
+    /// Query the binary on a client over SSH (server side)
+    // flag-only, deliberately no default_client fallback: a bare
+    // `shunt version` almost surely means THIS binary.
+    #[arg(short, long)]
+    pub client: Option<String>,
+    /// Emit JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args)]

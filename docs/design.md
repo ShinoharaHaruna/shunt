@@ -416,30 +416,31 @@ Facts are advisory registry data for agent-side matching, not enforced constrain
 
 ## 10. CLI surface
 
-| command                                                                                           | side   | purpose                     |
-| ------------------------------------------------------------------------------------------------- | ------ | --------------------------- |
-| `shunt submit -p proj -c client [--guard p] -- cmd...`                                            | server | spool a task                |
-| `shunt submit -c client file.sh`                                                                  | server | spool a script file         |
-| `shunt status [--all] [--json]`                                                                   | server | aggregate client states     |
-| `shunt spool ls\|rm`                                                                              | server | inspect staging             |
-| `shunt task ls\|show <id>\|events`                                                                | server | task ledger + outcomes      |
-| `shunt client add\|update\|ls\|show\|bootstrap\|probe\|env\|templates\|hostkey\|rename\|exec\|rm` | server | registry                    |
-| `shunt project add\|bind\|unbind\|ls\|show\|rm`                                                   | server | registry                    |
-| `shunt dispatch [--once]`                                                                         | server | run the dispatcher loop     |
-| `shunt tunnel up\|down\|status -c client`                                                         | server | box-side SOCKS5 tunnel      |
-| `shunt daemon`                                                                                    | client | run queue loop (foreground) |
-| `shunt init`                                                                                      | client | create queue dirs           |
-| `shunt start` / `shunt stop`                                                                      | client | daemon lifecycle            |
-| `shunt enqueue [file\|-] [slug]`                                                                  | client | install into pending        |
-| `shunt new` / `shunt mktask`                                                                      | client | wrap argv as task (guard)   |
-| `shunt status`                                                                                    | client | queue summary               |
-| `shunt cancel` / `prio` / `kill`                                                                  | client | pending/running ops         |
-| `shunt workers [N]` (wire: `workers get`\|`set N`)                                                | client | pool size get/set           |
-| `shunt shutdown on\|off\|status`                                                                  | client | idle poweroff               |
-| `shunt logs [-n N] [-f] [pat]` / `shunt dlog`                                                     | client | task/daemon logs            |
-| `shunt probe`                                                                                     | client | machine facts JSON          |
-| `shunt completions <shell>`                                                                       | local  | shell completion script     |
-| `shunt feedback <title> ...` / `feedback ls\|retry`                                               | local  | file a GitHub issue (§14)   |
+| command                                                                                           | side   | purpose                                                                                             |
+| ------------------------------------------------------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------- |
+| `shunt submit -p proj -c client [--guard p] -- cmd...`                                            | server | spool a task                                                                                        |
+| `shunt submit -c client file.sh`                                                                  | server | spool a script file                                                                                 |
+| `shunt status [--all] [--json]`                                                                   | server | aggregate client states                                                                             |
+| `shunt spool ls\|rm`                                                                              | server | inspect staging                                                                                     |
+| `shunt task ls\|show <id>\|events`                                                                | server | task ledger + outcomes                                                                              |
+| `shunt client add\|update\|ls\|show\|bootstrap\|probe\|env\|templates\|hostkey\|rename\|exec\|rm` | server | registry                                                                                            |
+| `shunt project add\|bind\|unbind\|ls\|show\|rm`                                                   | server | registry                                                                                            |
+| `shunt dispatch [--once]`                                                                         | server | run the dispatcher loop                                                                             |
+| `shunt tunnel up\|down\|status -c client`                                                         | server | box-side SOCKS5 tunnel                                                                              |
+| `shunt daemon`                                                                                    | client | run queue loop (foreground)                                                                         |
+| `shunt init`                                                                                      | client | create queue dirs                                                                                   |
+| `shunt start` / `shunt stop`                                                                      | client | daemon lifecycle                                                                                    |
+| `shunt enqueue [file\|-] [slug]`                                                                  | client | install into pending                                                                                |
+| `shunt new` / `shunt mktask`                                                                      | client | wrap argv as task (guard)                                                                           |
+| `shunt status`                                                                                    | client | queue summary                                                                                       |
+| `shunt cancel` / `prio` / `kill`                                                                  | client | pending/running ops                                                                                 |
+| `shunt workers [N]` (wire: `workers get`\|`set N`)                                                | client | pool size get/set                                                                                   |
+| `shunt shutdown on\|off\|status`                                                                  | client | idle poweroff                                                                                       |
+| `shunt logs [-n N] [-f] [pat]` / `shunt dlog`                                                     | client | task/daemon logs                                                                                    |
+| `shunt probe`                                                                                     | client | machine facts JSON                                                                                  |
+| `shunt completions <shell>`                                                                       | local  | shell completion script                                                                             |
+| `shunt version [-c client] [--json]`                                                              | local  | version+build info; `-c` forwards the `--version` flag (works on remotes that predate this command) |
+| `shunt feedback <title> ...` / `feedback ls\|retry`                                               | local  | file a GitHub issue (§14)                                                                           |
 
 ## 11. Testing strategy
 

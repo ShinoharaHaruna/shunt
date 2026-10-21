@@ -496,5 +496,22 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Feedback(a) => feedback::cmd_feedback(&a),
+        Command::Version(a) => {
+            if let Some(name) = &a.client {
+                // Forward the --version flag, not a `version`
+                // subcommand — remotes older than this feature
+                // don't have one.
+                let out = remote(name, &["--version"], None, false);
+                return out;
+            }
+            if a.json {
+                let sha = env!("SHUNT_GIT_SHA");
+                let date = env!("SHUNT_GIT_DATE");
+                println!("{}", serde_json::json!({"shunt": env!("SHUNT_VERSION"), "version": env!("CARGO_PKG_VERSION"), "sha": (!sha.is_empty()).then_some(sha), "date": (!date.is_empty()).then_some(date), "protocol": crate::proto::wire::PROTOCOL_VERSION, "os": std::env::consts::OS, "arch": std::env::consts::ARCH}));
+            } else {
+                println!("shunt {}", env!("SHUNT_VERSION"));
+            }
+            Ok(())
+        }
     }
 }
