@@ -1,5 +1,7 @@
 # shunt
 
+English | [简体中文](README.cn.md)
+
 A task queue for rented GPU boxes, built so an AI agent can babysit the box instead of you. Submit experiments, let the queue drain, and the instance powers itself off before the next billing hour lands.
 
 The problem it solves: vendors like AutoDL bill by wall-clock uptime, experiments run for hours or days, and nobody wants to sit there watching a progress bar at 2 a.m. Today the loop is manual — power on, run, remember to power off. shunt turns the loop into: human pays and powers the box on in the vendor console → the queue daemon claims work → the queue drains → the box shuts itself down. An agent on your dev machine can drive the whole cycle.
