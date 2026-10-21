@@ -15,13 +15,13 @@
 //! here so `crate::server::client_ops::*` paths stay stable.
 
 mod bootstrap;
-mod compat;
+pub(crate) mod compat;
 mod env;
 mod hygiene;
 mod keys;
 mod lifecycle;
 mod probe;
-mod release;
+pub(crate) mod release;
 mod update;
 
 pub use bootstrap::bootstrap;

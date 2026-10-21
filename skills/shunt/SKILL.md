@@ -243,4 +243,6 @@ shunt shutdown -c rw-a on      # fires ~60 s after running+pending empty (dedica
 # box powers off; billing stops at the end of the paid window
 ```
 
+Keeping shunt itself current: `shunt upgrade` self-upgrades the dev binary from the latest GitHub release (`--check`/`--json` read-only, `--force` to reinstall); `shunt upgrade -c rw-a` upgrades the box's binary to the latest musl build through the normal bootstrap path — that is also how wire-protocol drift gets fixed after a dev-side upgrade. `shunt version [-c rw-a]` reports either side's build.
+
 If `shunt logs -c rw-a exp1` shows nothing, check `shunt spool ls`: the task may still be staged because the box is off or SSH failed.

@@ -87,6 +87,9 @@ pub enum Command {
     /// Print version + build info; -c queries the binary on a box
     /// (forwards the --version flag, which every remote has)
     Version(VersionArgs),
+    /// Self-upgrade to the latest GitHub release; -c upgrades the
+    /// box's binary to the latest musl release instead (§16)
+    Upgrade(UpgradeArgs),
     /// File a report as a GitHub issue on the shunt repo
     /// (design.md §14); `ls`/`retry` manage the local ledger
     #[command(arg_required_else_help = true)]
@@ -100,6 +103,23 @@ pub struct VersionArgs {
     // `shunt version` almost surely means THIS binary.
     #[arg(short, long)]
     pub client: Option<String>,
+    /// Emit JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct UpgradeArgs {
+    /// Upgrade the binary ON A CLIENT over SSH instead of the local
+    /// one (always the musl static asset — runs on any libc)
+    #[arg(short, long)]
+    pub client: Option<String>,
+    /// Report latest vs current without installing anything
+    #[arg(long)]
+    pub check: bool,
+    /// Reinstall even when already at the latest release
+    #[arg(long)]
+    pub force: bool,
     /// Emit JSON
     #[arg(long)]
     pub json: bool,

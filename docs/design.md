@@ -450,6 +450,7 @@ Facts are advisory registry data for agent-side matching, not enforced constrain
 | `shunt probe`                                                                                     | client | machine facts JSON                                                                                  |
 | `shunt completions <shell>`                                                                       | local  | shell completion script                                                                             |
 | `shunt version [-c client] [--json]`                                                              | local  | version+build info; `-c` forwards the `--version` flag (works on remotes that predate this command) |
+| `shunt upgrade [--check] [--force] [-c client] [--json]`                                          | local  | self-upgrade from latest release; `-c` ships the latest musl build to the box via bootstrap (§16)   |
 | `shunt feedback <title> ...` / `feedback ls\|retry`                                               | local  | file a GitHub issue (§14)                                                                           |
 
 ## 11. Testing strategy
@@ -483,7 +484,7 @@ shunt/
   src/
     main.rs          # clap entry; calls cli::run
     cli/             # clap command tree (args.rs), dispatch (mod.rs,
-                     # server.rs, agent.rs)
+                     # server.rs, agent.rs, feedback.rs, upgrade.rs — §16)
     server/          # registry/ (types, paths, state, io),
                      # fsutil (0700/0600 privacy), spool, dispatcher,
                      # tasks (ledger), tunnel, transport/ (ssh + local),
@@ -556,3 +557,12 @@ The reporter may be an agent sitting in a retry loop aimed at a public repo:
 4. **Post-install smoke:** after the stage-then-mv install and before remote `init`, exec `<bin> --version 2>&1` — nonzero fails bootstrap with the output; the merged loader warnings print on stderr locally. Success echoes the remote's own version string (`remote shunt 0.2.0 (faae5d9 …)`).
 
 The `libc` probe fact shares the ldd parser and lands in the row's `facts` for agent-side matching (§8). The release workflow packs both musl and gnu artifacts per tag; bootstrap only ever fetches the musl one — it runs on every libc the gnu one can and beyond.
+
+## 16. Self-upgrade (`shunt upgrade`)
+
+`shunt upgrade` fetches the newest non-prerelease GitHub release (gh → curl against the public releases API; repo from `$SHUNT_RELEASE_REPO` > `server.toml release_repo` > the built-in upstream) and installs it over `current_exe`:
+
+- **Local** (default): `--check`/`--json` report `{current, latest, newer}` without touching anything. When the release is newer (semver triple compare; a release outranks its prereleases), the asset matching the _running binary's_ linkage is fetched — the §15 byte-scan decides: glibc-linked → `x86_64-unknown-linux-gnu`, static → musl. Integrity is `SHA256SUMS-<target>`; identity is the extracted binary's own `--version` reporting the tag's version (upgrade deliberately does NOT reuse rescue's same-sha check — a new version carries a new sha). Install is stage-then-rename (`<exe>.new` → `mv`), so replacing a running binary is ETXTBSY-safe and atomic. `--force` reinstalls the latest tag even when versions match (e.g. a dirty dev build reverting to the release). A non-writable install location fails with the package-manager remediation.
+- **Remote** (`-c <client>`): upgrades the BOX's binary to the latest release. The box always gets the musl asset (static — runs on any libc, so §15 compat can't fail) delivered through `client bootstrap --bin-path` — owner claim, stage-then-mv, `--version 2>&1` smoke, init/start/probe all apply for free. A remote already reporting the target version is skipped (`--force` overrides); non-x86_64 boxes (checked via `uname -m`) are refused with the build-and-`--bin-path` recipe.
+
+`rescue_musl` (§15) and `upgrade` share one `fetch_asset(ver, target)` path — download, checksum gate, extract — with caller-specific identity verification on top.

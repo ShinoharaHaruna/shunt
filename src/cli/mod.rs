@@ -8,6 +8,7 @@ mod agent;
 mod args;
 mod feedback;
 mod server;
+mod upgrade;
 
 use anyhow::Result;
 use clap::CommandFactory;
@@ -517,5 +518,6 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Command::Upgrade(a) => upgrade::cmd_upgrade(&a),
     }
 }
