@@ -183,6 +183,8 @@ shunt task show <id> --json
 
 shunt exposes the facts and executes explicit commands. Choosing a machine, deciding whether a run fits the budget, and powering a box on remain with the human or the surrounding agent workflow.
 
+When an agent hits a shunt defect or a rough edge, `shunt feedback "title" --body "…"` files it as a GitHub issue ([design.md §14](docs/design.md)): registry secrets are auto-redacted, reports persist before delivery (at-least-once), and dedup plus an hourly cap keep a looped caller from spamming the tracker.
+
 ## Operating boundaries
 
 - **Independent tasks.** There is no dependency graph, automatic machine selection, or multi-machine load balancing; each submission targets a client.

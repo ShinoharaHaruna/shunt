@@ -84,6 +84,10 @@ pub enum Command {
     Probe(ProbeArgs),
     /// Print a shell completion script to stdout
     Completions(CompletionsArgs),
+    /// File a report as a GitHub issue on the shunt repo
+    /// (design.md §14); `ls`/`retry` manage the local ledger
+    #[command(arg_required_else_help = true)]
+    Feedback(FeedbackArgs),
 }
 
 #[derive(Args)]
@@ -296,6 +300,44 @@ pub enum ShutdownAction {
     Off,
     /// Report armed state
     Status,
+}
+
+#[derive(Args)]
+pub struct FeedbackArgs {
+    /// Ledger ops; omitted = send a report
+    #[command(subcommand)]
+    pub action: Option<FeedbackAction>,
+    /// One-line report title
+    pub title: Option<String>,
+    /// Report kind, rendered as the `[feedback/<kind>]` title prefix
+    #[arg(long, default_value = "bug", value_parser = ["bug", "ux", "feature", "docs"])]
+    pub kind: String,
+    /// Report body inline (else --body-file, else stdin)
+    #[arg(long, conflicts_with = "body_file")]
+    pub body: Option<String>,
+    /// Read the report body from a file
+    #[arg(long)]
+    pub body_file: Option<String>,
+    /// Attach a client row's probe facts (never ssh.*, no network)
+    #[arg(short, long)]
+    pub client: Option<String>,
+    /// Print the composed issue body and file nothing
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Emit JSON (also the ls/retry forms)
+    // global: `feedback ls --json` must parse — the flag lives on
+    // the parent struct while `ls`/`retry` are subcommands.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+#[derive(Subcommand)]
+pub enum FeedbackAction {
+    /// List local feedback artifacts
+    Ls,
+    /// Re-deliver pending artifacts (unique filename-stem prefix;
+    /// omitted = all pending)
+    Retry { id: Option<String> },
 }
 
 #[derive(Args)]
@@ -660,5 +702,32 @@ mod tests {
         let Command::Workers(w) = cli.command else { panic!() };
         assert_eq!(w.client.as_deref(), Some("box1"));
         assert!(matches!(w.action, Some(WorkerAction::Get)));
+    }
+
+    /// The send form and the ledger subcommands share one Args
+    /// struct; `--json` is global so `feedback ls --json` parses.
+    #[test]
+    fn feedback_forms() {
+        let cli = parse(&["shunt", "feedback", "daemon ate my task", "--kind", "ux"]);
+        let Command::Feedback(f) = cli.command else { panic!() };
+        assert_eq!(f.title.as_deref(), Some("daemon ate my task"));
+        assert_eq!(f.kind, "ux");
+        assert!(f.action.is_none());
+
+        let cli = parse(&["shunt", "feedback", "ls", "--json"]);
+        let Command::Feedback(f) = cli.command else { panic!() };
+        assert!(matches!(f.action, Some(FeedbackAction::Ls)));
+        assert!(f.json);
+
+        let cli = parse(&["shunt", "feedback", "retry", "1735736"]);
+        let Command::Feedback(f) = cli.command else { panic!() };
+        assert!(matches!(f.action, Some(FeedbackAction::Retry { id: Some(ref s) }) if s == "1735736"));
+
+        let cli = parse(&["shunt", "feedback", "retry"]);
+        let Command::Feedback(f) = cli.command else { panic!() };
+        assert!(matches!(f.action, Some(FeedbackAction::Retry { id: None })));
+
+        assert!(Cli::try_parse_from(["shunt", "feedback"]).is_err());
+        assert!(Cli::try_parse_from(["shunt", "feedback", "t", "--body", "a", "--body-file", "f"]).is_err());
     }
 }

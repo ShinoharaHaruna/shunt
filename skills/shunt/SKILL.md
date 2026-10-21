@@ -192,7 +192,18 @@ Interpretation cheats: `daemon.alive=false` with nonempty `pending/` means nothi
 - Every daemon liveness check is pidfile + `/proc/<pid>/cmdline` match.
 - Use placeholders (`root@<host>:<port>`) in docs, examples, and task scripts. Never write real hostnames, ports, or key paths into tracked files.
 
-## Worked example
+## Reporting problems with shunt
+
+Hit a shunt defect, a confusing error, or a UX wart? File it upstream — that is how the tool improves:
+
+```bash
+shunt feedback "one-line title" --kind bug --body "what you ran, what happened, what you expected"
+# kinds: bug | ux | feature | docs; --client rw-a attaches the row's probe facts
+```
+
+- The report lands as a GitHub issue (`[feedback/<kind>] …`) on the upstream repo (or `server.toml` `feedback_repo` / `$SHUNT_FEEDBACK_REPO`). Deduped within 24 h; capped at 5/h — if delivery fails the report is persisted and `shunt feedback ls` / `shunt feedback retry` manage it.
+- Registry secrets (`ssh.host/port/user/password/key`, `$HOME`) are auto-redacted — still, never paste tokens, passwords, or private data into the body; the issues are public.
+- Include the command you ran and the JSON/log lines that matter; do not attach credentials or hostnames the scrubber cannot know about.
 
 ```bash
 # once: register + bootstrap

@@ -183,6 +183,8 @@ shunt task show <id> --json
 
 shunt 负责暴露事实并执行明确的命令。选哪台机器、这次运行是否超预算、以及开机，仍然由人或外围的 agent 工作流决定。
 
+当 agent 遇到 shunt 的缺陷或不顺手之处，`shunt feedback "标题" --body "…"` 会把它作为 GitHub issue 投递（见 [design.md §14](docs/design.md)）：registry 中的敏感字段会被自动擦除，报告先落盘再投递（at-least-once），去重加上每小时上限能防止循环调用的 agent 刷爆 issue 列表。
+
 ## 边界
 
 - **任务相互独立。** 没有依赖图、没有自动选机、没有多机负载均衡；每次提交都指定一个 client。

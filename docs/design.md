@@ -435,6 +435,7 @@ Facts are advisory registry data for agent-side matching, not enforced constrain
 | `shunt logs [-n N] [-f] [pat]` / `shunt dlog`                                                     | client | task/daemon logs            |
 | `shunt probe`                                                                                     | client | machine facts JSON          |
 | `shunt completions <shell>`                                                                       | local  | shell completion script     |
+| `shunt feedback <title> ...` / `feedback ls\|retry`                                               | local  | file a GitHub issue (§14)   |
 
 ## 11. Testing strategy
 
@@ -452,10 +453,11 @@ Integration tests spawn a real daemon against a tmp `SHUNT_ROOT`; the poll inter
 - workers resize: raise dispatches immediately; lower drains only; invalid value falls back to last-known
 - env file overlay, workdir, proxy unset, thread caps
 - dispatcher: spool → push → ack → delete; unreachable client retains; auto-heal restarts a dead daemon
+- feedback: sanitize redacts registry secrets (host/port/user/password/key/$HOME) and skips the common-name allowlist; persist-before-deliver leaves a pending artifact when delivery is disabled (`SHUNT_FEEDBACK_REPO=` empty); dedup returns the existing URL within 24 h; the hourly cap refuses but still persists; `retry` delivers pending entries; delivery itself runs against a stub `gh` on PATH (never the real API)
 
 ## 12. Skill deliverable
 
-`skills/shunt/SKILL.md` ships in the repo (no `shunt skill` subcommand). Contents: register/bootstrap a client, add/bind a project, submit and guard conventions, query and interpret queue state and JSONL events, cost-aware practices (arm idle-shutdown, watch billing metadata), and splitting long experiments into checkpointable tasks so at-least-once reruns are cheap.
+`skills/shunt/SKILL.md` ships in the repo (no `shunt skill` subcommand). Contents: register/bootstrap a client, add/bind a project, submit and guard conventions, query and interpret queue state and JSONL events, cost-aware practices (arm idle-shutdown, watch billing metadata), splitting long experiments into checkpointable tasks so at-least-once reruns are cheap, and the feedback channel (§14) — an agent that hits a shunt defect or UX wart should file it via `shunt feedback`, with a reminder never to paste credentials into the body.
 
 ## 13. Repo layout
 
@@ -475,6 +477,8 @@ shunt/
     agent/           # FS queue ops, exec, shutdown flags, probe;
                      # daemon/ = poll loop (core), lifecycle, workers,
                      # orphan requeue (reap), idle-shutdown countdown (idle)
+    feedback/        # GitHub-issue feedback channel: compose + sanitize,
+                     # persist-first ledger, gh/curl delivery (§14)
     proto/           # task format, wire JSON types (shared)
   etc/vendors/autodl.toml
   docs/design.md
@@ -484,3 +488,40 @@ shunt/
   task_template.sh
   README.md  LICENSE(MIT)
 ```
+
+## 14. Feedback channel
+
+`shunt feedback` files a report as a GitHub issue. The usual reporter is an agent in another project that hit a shunt defect or UX wart — the command exists so that report is one non-interactive call, and so it cannot leak box credentials into a public repository.
+
+It is a local command, not a wire op: whatever machine runs it files directly, and no registry is required — a bare box resolves the artifact dir under the XDG default, delivery simply fails there (no gh, no token), and the error names where the report landed. There is deliberately no box-side collection path (no qroot artifacts, no `status` field, no `feedback --collect`): agents live on the dev machine, so that machinery would serve a case that does not occur. If it ever does, collection is a follow-up over the existing wire/exec machinery.
+
+### 14.1 Command surface
+
+```text
+shunt feedback <title> [--kind bug|ux|feature|docs]
+                       [--body TEXT | --body-file F | <stdin>]
+                       [--client NAME] [--dry-run] [--json]
+shunt feedback ls                    # local ledger
+shunt feedback retry [<id>]          # re-deliver pending artifacts
+```
+
+- The kind renders as a `[feedback/<kind>]` title prefix — labels would need repo-side setup, a prefix needs none.
+- Body source precedence: `--body` > `--body-file` > stdin (when stdin is not a TTY). One of the three is required; a bare interactive call errors naming the options.
+- `--client NAME` appends the row's `facts` (probe data), `billing`, and `expire` as a fenced JSON block — `ssh.*` is never included, and it costs no network. A row that fails to load fails the send.
+- `--dry-run` prints the composed issue body and files nothing — the human review path.
+- `retry`'s id is a unique filename-stem prefix, like `task show`; omitted = all pending.
+
+### 14.2 Pipeline
+
+1. **Compose**: `[feedback/<kind>] <title>` plus a body of the report text, a context block (shunt version, wire protocol version, os/arch, optional client facts — emitted as fenced JSON so an agent can parse it), and a `filed by shunt feedback` footer. The report text is truncated at 60,000 bytes with an explicit `… [truncated]` marker — GitHub rejects issue bodies past 64 KiB, and an oversized report would otherwise persist pending forever.
+2. **Sanitize — mandatory, the default repo is public.** The sensitive-value set is read straight off disk: every `clients/*.toml` parsed as raw TOML (typed row loading is bypassed — a disabled or unparseable row still holds secrets), plucking `ssh.host`, `ssh.port`, `ssh.user`, `ssh.password`, `ssh.key`, plus the `$HOME` prefix. Every occurrence of a value ≥ 4 chars in title+body becomes `<redacted>` — except an allowlist of collision-prone common names (`root`, `ubuntu`, `debian`, `admin`, `user`, `git`, `shunt`), because redacting "root" would mangle "root cause". Redaction count is reported on stderr. This guards the realistic leak — an agent pasting `ssh root@1.2.3.4 -p 12345` errors verbatim; a body can still embed arbitrary secrets, and that residual is stated here rather than claimed solved.
+3. **Persist first (at-least-once):** `$SHUNT_HOME/feedback/<unixts>_<slug>.json` — `{kind, title, body, created_at, delivered_at, issue_url, issue_number, attempts}`, 0600 via `write_private`, slug = sanitized title. The artifact stores the post-sanitize text, so a `retry` can never deliver a pre-scrub draft — and `retry` re-scrubs anyway, because a client row registered between send and retry can have added secrets the persisted body still carries. Persist failure warns but does not stop delivery; if persist AND delivery both fail the composed body is dumped to stderr so the report survives in the caller's scrollback. Metadata scans (`ls`, the rate cap) read a header-only projection — bodies can be tens of KB and are retained only where needed (`find_dup`, `retry`).
+4. **Deliver:** repo resolves `$SHUNT_FEEDBACK_REPO` > `server.toml` `feedback_repo` > compile-time `ShinoharaHaruna/shunt` — the env wins so a fork can redirect without editing files, and an **empty env value disables delivery deliberately** (test hook and user opt-out: the artifact persists, the error says so). Mechanism order: `gh` on PATH (`gh issue create --repo R --title T --body-file -`, body on stdin, URL parsed from stdout) → `GH_TOKEN`/`GITHUB_TOKEN` + `curl` POST to `api.github.com/repos/R/issues` (the token rides a 0600 `curl -K` config file, never argv — argv is world-readable via /proc) → fail with a remediation message (`install gh or export GH_TOKEN, then shunt feedback retry`). Each mechanism is tried in turn and the errors are reported together. No HTTP client is added — `std::process` shell-out keeps the dep list untouched.
+5. **Report:** `feedback filed: <url>` on stdout; `--json` emits `{ok, url, number, deduped}`. Failures with `--json` emit `{ok:false, error, artifact}` before the nonzero exit — agents consume this command too.
+
+### 14.3 Anti-spam
+
+The reporter may be an agent sitting in a retry loop aimed at a public repo:
+
+- **Dedup:** an artifact with identical `(kind, title, body)` delivered within the last 24 h short-circuits to the existing issue URL (`deduped: true`) — checked before the rate cap so a repeat report is never blocked.
+- **Rate cap:** `SHUNT_FEEDBACK_MAX_PER_HOUR` (default 5) delivered artifacts in the last hour refuses delivery — the artifact still persists, and the error says to re-run `shunt feedback retry` later. `retry` runs the same resolve path (dedup, then cap): it is the cap's remediation, not a bypass — a looped caller cannot drain the ledger into a public repo. Only real deliveries count toward the cap (a dedup-hit copy consumed no API call).

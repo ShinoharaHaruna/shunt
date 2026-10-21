@@ -7,5 +7,6 @@
 
 pub mod agent;
 pub mod cli;
+pub mod feedback;
 pub mod proto;
 pub mod server;

@@ -6,6 +6,7 @@
 
 mod agent;
 mod args;
+mod feedback;
 mod server;
 
 use anyhow::Result;
@@ -494,5 +495,6 @@ pub fn run(cli: Cli) -> Result<()> {
             clap_complete::generate(a.shell, &mut cmd, "shunt", &mut std::io::stdout());
             Ok(())
         }
+        Command::Feedback(a) => feedback::cmd_feedback(&a),
     }
 }

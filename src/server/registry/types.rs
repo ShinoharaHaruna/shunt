@@ -140,4 +140,8 @@ pub struct Binding {
 pub struct ServerConfig {
     pub poll_interval_s: Option<u64>,
     pub default_client: Option<String>,
+    /// GitHub `owner/name` target for `shunt feedback` (design.md
+    /// §14). Empty/absent = compile-time default; the
+    /// `$SHUNT_FEEDBACK_REPO` env overrides either way.
+    pub feedback_repo: Option<String>,
 }
