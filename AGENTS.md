@@ -37,7 +37,7 @@ Raw cargo equivalents work too (`cargo build/test/clippy`).
 
 ## CI
 
-Not configured — repo is unpublished. Git hooks + `just check` are the only gates for now; hooks and future CI only check, they never modify files.
+`.github/workflows/release.yml` runs on pushed SemVer tags (`v0.1.0` or `0.1.0`), validates the tag against `Cargo.toml`, checks formatting and Clippy, tests the musl target, and publishes a Linux x86_64 binary archive with checksums and generated notes. Prerelease tags create GitHub prereleases. Ordinary branch/PR CI is not configured. Git hooks and workflow checks never modify source files.
 
 ## Conventions
 

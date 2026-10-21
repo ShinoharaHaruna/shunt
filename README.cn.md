@@ -204,6 +204,17 @@ just check       # 格式检查 + clippy (-D warnings) + 测试
 
 这些 recipe 需要安装 `just` 和 `dprint`；Rust 格式化和 Clippy 来自配置好的工具链。Hooks 在提交前检查格式、推送前跑 Clippy。它们从不改写文件；完整测试套件通过 `just check` 或 `just test` 运行。
 
+### 发布版本
+
+在要发布的 commit 上打一个 SemVer tag，例如 `v0.1.0`（也支持 `0.1.0`），然后推送。去掉可选的 `v` 前缀后，版本必须与 `Cargo.toml` 中的 `package.version` 一致；修改版本时也要同步更新 `Cargo.lock`。该 commit 必须包含 [release workflow](.github/workflows/release.yml)。
+
+```bash
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+Workflow 会检查格式、运行 Clippy 和测试，通过后创建 GitHub Release，附带自动生成的更新说明、Linux x86_64 静态 musl 二进制压缩包和 `SHA256SUMS`。带预发布后缀的 tag（例如 `v0.2.0-rc.1`）会创建 prerelease。使用内置的 `GITHUB_TOKEN`，无需额外配置 secret。重跑不会覆盖已发布的 release。
+
 | 从这里开始                           | 用途                                 |
 | ------------------------------------ | ------------------------------------ |
 | [设计规范](docs/design.md)           | 队列语义、通信协议、计费和测试策略   |

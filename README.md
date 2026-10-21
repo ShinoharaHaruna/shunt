@@ -204,6 +204,17 @@ just check       # format check + clippy (-D warnings) + tests
 
 Install `just` and `dprint` for these recipes; Rust formatting and Clippy come from the configured toolchain. Hooks check formatting before commit and run Clippy before push. They never rewrite files; the full test suite runs through `just check` or `just test`.
 
+### Releases
+
+Push a SemVer tag such as `v0.1.0` (or `0.1.0`) on the commit to release. The version, excluding the optional `v` prefix, must match `package.version` in `Cargo.toml`; update `Cargo.lock` with the version change too. The tagged commit must include [the release workflow](.github/workflows/release.yml).
+
+```bash
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+The workflow checks formatting, runs Clippy and tests, then publishes a GitHub Release with generated notes, a Linux x86_64 static musl binary archive, and `SHA256SUMS`. Tags with a prerelease suffix, such as `v0.2.0-rc.1`, create prereleases. It uses the built-in `GITHUB_TOKEN`; no additional secret is required. Published releases are not overwritten on reruns.
+
 | Start here                           | For…                                                       |
 | ------------------------------------ | ---------------------------------------------------------- |
 | [Design spec](docs/design.md)        | Queue semantics, wire protocol, billing, and test strategy |

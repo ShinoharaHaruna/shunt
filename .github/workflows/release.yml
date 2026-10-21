@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+      - '[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  build:
+    name: Check and build
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate release version
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+
+          tag = os.environ["TAG"]
+          version = tag.removeprefix("v")
+          number = r"(?:0|[1-9][0-9]*)"
+          identifier = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+          pattern = (
+              rf"{number}\.{number}\.{number}"
+              rf"(?:-(?P<prerelease>{identifier}(?:\.{identifier})*))?"
+              r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+          )
+          match = re.fullmatch(pattern, version)
+          if match is None:
+              raise SystemExit(f"Invalid SemVer tag: {tag}")
+          with open("Cargo.toml", "rb") as manifest:
+              expected = tomllib.load(manifest)["package"]["version"]
+          if version != expected:
+              raise SystemExit(f"Tag version {version} differs from Cargo.toml version {expected}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              prerelease = str(match.group("prerelease") is not None).lower()
+              output.write(f"prerelease={prerelease}\n")
+          PY
+
+      - name: Check Markdown, TOML, and JSON formatting
+        uses: dprint/check@7dc032d8874778fc024f6f9b4a7e6d896782c330 # v2
+        with:
+          dprint-version: 0.63.0
+
+      - name: Set up Rust and musl
+        run: |
+          rustup show active-toolchain
+          rustup target add "$TARGET"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test release target
+        run: cargo test --locked --workspace --all-features --target "$TARGET"
+
+      - name: Build release binary
+        run: |
+          cargo build --locked --release --target "$TARGET"
+          "target/$TARGET/release/shunt" --version
+          "target/$TARGET/release/shunt" --help
+
+      - name: Package release
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          archive="shunt-$TAG-$TARGET"
+          mkdir -p "dist/$archive"
+          install -m 755 "target/$TARGET/release/shunt" "dist/$archive/shunt"
+          cp LICENSE README.md README.cn.md "dist/$archive/"
+          tar -C dist -czf "dist/$archive.tar.gz" "$archive"
+          cd dist
+          sha256sum "$archive.tar.gz" > SHA256SUMS
+          rm -r "$archive"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release
+          path: dist
+
+      - name: Verify release artifacts
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+
+      - name: Create release with generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          flags=(--verify-tag --generate-notes --title "$TAG")
+          if [[ "$PRERELEASE" == true ]]; then
+            flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$TAG" dist/* "${flags[@]}"
