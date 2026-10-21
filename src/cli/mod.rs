@@ -37,6 +37,33 @@ where
     local()
 }
 
+/// Print rows as aligned columns: every column but the last is
+/// padded to its widest cell and followed by a two-space gutter.
+/// A row shorter than the widest row just ends early.
+fn print_cols(rows: &[Vec<String>]) {
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if cols == 0 {
+        return;
+    }
+    let mut w = vec![0usize; cols - 1];
+    for r in rows {
+        for (i, c) in r.iter().enumerate().take(cols - 1) {
+            w[i] = w[i].max(c.len());
+        }
+    }
+    for r in rows {
+        let mut line = String::new();
+        for (i, c) in r.iter().enumerate() {
+            if i + 1 == r.len() {
+                line.push_str(c);
+            } else {
+                line.push_str(&format!("{c:w$}  ", w = w[i]));
+            }
+        }
+        println!("{line}");
+    }
+}
+
 pub fn run(cli: Cli) -> Result<()> {
     use crate::server::registry;
     match cli.command {
@@ -115,9 +142,8 @@ pub fn run(cli: Cli) -> Result<()> {
 
         Command::Spool(c) => match c.action {
             SpoolAction::Ls => {
-                for e in crate::server::spool::list()? {
-                    println!("{}\t{}\t{}\t{}\t{}", e.id, e.submitted_at, e.client, e.project, e.meta.slug);
-                }
+                let rows: Vec<Vec<String>> = crate::server::spool::list()?.iter().map(|e| vec![e.id.clone(), e.submitted_at.clone(), e.client.clone(), e.project.clone(), e.meta.slug.clone()]).collect();
+                print_cols(&rows);
                 Ok(())
             }
             SpoolAction::Remove { task_id } => crate::server::spool::remove(&task_id),
@@ -125,13 +151,19 @@ pub fn run(cli: Cli) -> Result<()> {
 
         Command::Task(c) => match c.action {
             TaskAction::Ls { json } => {
-                for r in crate::server::tasks::list()? {
-                    if json {
+                if json {
+                    for r in crate::server::tasks::list()? {
                         println!("{}", serde_json::to_string(&r)?);
-                    } else {
-                        let state = r.outcome.as_ref().map(|o| format!("{} rc={}", o.state, o.rc)).unwrap_or_else(|| "-".into());
-                        println!("{}\t{}\t{}\t{}\t{}\t{}", r.id, r.client, r.queue_name, r.project, r.pushed_at, state);
                     }
+                } else {
+                    let rows: Vec<Vec<String>> = crate::server::tasks::list()?
+                        .iter()
+                        .map(|r| {
+                            let state = r.outcome.as_ref().map(|o| format!("{} rc={}", o.state, o.rc)).unwrap_or_else(|| "-".into());
+                            vec![r.id.clone(), r.client.clone(), r.queue_name.clone(), r.project.clone(), r.pushed_at.clone(), state]
+                        })
+                        .collect();
+                    print_cols(&rows);
                 }
                 Ok(())
             }
@@ -178,15 +210,17 @@ pub fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
             ClientAction::Templates => {
+                let mut rows = Vec::new();
                 for d in vendor_template_dirs() {
                     if let Ok(rd) = std::fs::read_dir(&d) {
                         for e in rd.flatten() {
                             if let Some(n) = e.file_name().to_str().and_then(|s| s.strip_suffix(".toml")) {
-                                println!("{n}\t{}", d.display());
+                                rows.push(vec![n.to_string(), d.display().to_string()]);
                             }
                         }
                     }
                 }
+                print_cols(&rows);
                 Ok(())
             }
             ClientAction::Ls => {
@@ -239,14 +273,18 @@ pub fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
             ProjectAction::Ls => {
-                for n in registry::list_names("projects")? {
-                    let d = registry::load_project(&n).map(|e| e.desc).unwrap_or_default();
-                    if d.is_empty() {
-                        println!("{n}");
-                    } else {
-                        println!("{n}\t{d}");
-                    }
-                }
+                let rows: Vec<Vec<String>> = registry::list_names("projects")?
+                    .into_iter()
+                    .map(|n| {
+                        let d = registry::load_project(&n).map(|e| e.desc).unwrap_or_default();
+                        if d.is_empty() {
+                            vec![n]
+                        } else {
+                            vec![n, d]
+                        }
+                    })
+                    .collect();
+                print_cols(&rows);
                 Ok(())
             }
             ProjectAction::Show { name } => {
