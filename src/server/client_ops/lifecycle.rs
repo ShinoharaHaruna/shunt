@@ -234,11 +234,14 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
 /// AutoDL default `/root/autodl-tmp/queue` passes — qroots under
 /// /root are normal, only the top-level dirs are dangerous.
 fn check_purge_qroot(qroot: &str) -> Result<()> {
-    let p = qroot.trim();
+    let p = qroot;
     anyhow::ensure!(!p.is_empty(), "--purge refused: qroot is empty");
+    // The shell receives the original string, not a trimmed path.
+    anyhow::ensure!(p == p.trim(), "--purge refused: qroot {p:?} has surrounding whitespace — edit the row to the exact absolute queue path");
     anyhow::ensure!(!p.starts_with('~'), "--purge refused: qroot {p:?} is ~-relative (expansion is shell-dependent)");
     anyhow::ensure!(p.starts_with('/'), "--purge refused: qroot {p:?} is not absolute");
-    let comps: Vec<&str> = p.split('/').filter(|c| !c.is_empty()).collect();
+    // `.` must not disguise a protected prefix or inflate the depth.
+    let comps: Vec<&str> = p.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
     anyhow::ensure!(!comps.contains(&".."), "--purge refused: qroot {p:?} contains ..");
     anyhow::ensure!(comps.len() >= 2, "--purge refused: qroot {p:?} is a top-level path — edit the row to a deeper queue dir");
     const SYSTEM_DIRS: [&str; 12] = ["bin", "sbin", "boot", "dev", "etc", "lib", "lib64", "proc", "sys", "usr", "run", "var"];
@@ -289,6 +292,31 @@ mod tests {
     fn purge_qroot_rejects_dangerous_paths() {
         for bad in ["", "/", "/root", "/q", "home", "~/queue", "~root/q", "../queue", "/a/../q", "/home/u", "/home", "/etc/foo", "/usr/local/q", "/var/lib/x", "/opt/x"] {
             assert!(check_purge_qroot(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn purge_qroot_rejects_dot_disguised_protected_paths() {
+        for bad in ["/./home/alice", "/home/./alice", "/home/alice/.", "/././", "/./root/./", "/./home/./", "/./etc/config", "/usr/./local/q", "/./opt/x"] {
+            assert!(check_purge_qroot(bad).is_err(), "{bad:?} must be refused");
+        }
+        for dir in ["bin", "sbin", "boot", "dev", "etc", "lib", "lib64", "proc", "sys", "usr", "run", "var"] {
+            let bad = format!("/./{dir}/queue");
+            assert!(check_purge_qroot(&bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn purge_qroot_rejects_surrounding_whitespace() {
+        for bad in [" /data/queue", "/data/queue ", "\t/data/queue", "/data/queue\n"] {
+            assert!(check_purge_qroot(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn purge_qroot_accepts_deep_paths_with_dots_and_spaces() {
+        for ok in ["/./root/autodl-tmp/queue", "/home/./alice/queue/.", "//data///./queue//", "/data/queue with spaces", "/data/.queue"] {
+            assert!(check_purge_qroot(ok).is_ok(), "{ok:?} should be allowed");
         }
     }
 
