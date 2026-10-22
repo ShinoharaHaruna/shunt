@@ -127,6 +127,8 @@ The name comes from railway shunting. Your dev machine is the marshalling yard; 
 | **Spool** — submissions stay staged until the box acknowledges delivery.         | **Daemon** — claims tasks, runs workers, records logs, and recovers orphaned entries. |
 | **Dispatcher** — pushes work over SSH and restarts a dead-but-reachable daemon.  | **Idle shutdown** — checks local and registered sibling queues before poweroff.       |
 
+One client is one managed instance and one SSH identity. Under it, named queues each own an independent qroot, sequence space, worker pool, and daemon — add a second queue with `shunt queue add eval -c gpu-a --qroot /root/autodl-tmp/queue-eval` and `shunt queue bootstrap eval -c gpu-a`, then target it with `--queue eval` on `submit`, `status`, `logs`, `cancel`, `prio`, `kill`, `workers`, and `shutdown`. Projects bind to `(client, queue)` pairs. Unqualified ops land on `queue default` when several queues exist; staged tasks keep their pinned queue even if the default changes later.
+
 The wire is `ssh <box> 'shunt <cmd> --json'`. No HTTP service or reverse connection to the dev machine is required. The same binary also supports a local transport for `localhost`.
 
 ### A queue you can inspect
@@ -141,21 +143,23 @@ Each task is a directory named `NNNN_<slug>`. It contains `task.sh` and accumula
 
 Run these commands on the dev machine. Client-specific examples use the registered client `gpu-a`.
 
-| Intent                                  | Command                          |
-| --------------------------------------- | -------------------------------- |
-| See every registered box                | `shunt status --all --json`      |
-| See submissions awaiting delivery       | `shunt spool ls`                 |
-| Inspect a submitted task by its ID      | `shunt task show <id> --json`    |
-| Read the server's task event stream     | `shunt task events`              |
-| Resize the worker pool                  | `shunt workers 4 -c gpu-a`       |
-| Move a pending task to the front        | `shunt prio exp1 0 -c gpu-a`     |
-| Cancel a pending task                   | `shunt cancel exp1 -c gpu-a`     |
-| Stop a running task's process group     | `shunt kill exp1 -c gpu-a`       |
-| Arm idle shutdown                       | `shunt shutdown -c gpu-a on`     |
-| Disarm idle shutdown                    | `shunt shutdown -c gpu-a off`    |
-| Check the resolved poweroff command     | `shunt shutdown -c gpu-a status` |
-| Refresh machine facts                   | `shunt client probe gpu-a`       |
-| Open the optional box-side SOCKS5 proxy | `shunt tunnel up -c gpu-a`       |
+| Intent                                  | Command                                           |
+| --------------------------------------- | ------------------------------------------------- |
+| See every registered box                | `shunt status --all --json`                       |
+| See submissions awaiting delivery       | `shunt spool ls`                                  |
+| Inspect a submitted task by its ID      | `shunt task show <id> --json`                     |
+| Read the server's task event stream     | `shunt task events`                               |
+| Resize the worker pool                  | `shunt workers 4 -c gpu-a`                        |
+| Move a pending task to the front        | `shunt prio exp1 0 -c gpu-a`                      |
+| Cancel a pending task                   | `shunt cancel exp1 -c gpu-a`                      |
+| Stop a running task's process group     | `shunt kill exp1 -c gpu-a`                        |
+| Arm idle shutdown                       | `shunt shutdown -c gpu-a on`                      |
+| Disarm idle shutdown                    | `shunt shutdown -c gpu-a off`                     |
+| Check the resolved poweroff command     | `shunt shutdown -c gpu-a status`                  |
+| Refresh machine facts                   | `shunt client probe gpu-a`                        |
+| List queues on a box                    | `shunt queue ls -c gpu-a`                         |
+| Submit into a named queue               | `shunt submit -c gpu-a --queue eval -- ./task.sh` |
+| Open the optional box-side SOCKS5 proxy | `shunt tunnel up -c gpu-a`                        |
 
 Task-control patterns such as `exp1` must identify one task; use the full queue name when a pattern is ambiguous. The task ledger maps a submission ID to that queue name. `task show` queries the box lazily to resolve an outcome; an entry outside the recent-status window can appear as `unknown`.
 

@@ -187,14 +187,30 @@ fn new_task_id(dir: &std::path::Path) -> String {
 /// `shunt submit`: resolve client (+ project binding), build the task
 /// body, stage it. Returns the task id.
 pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slug: Option<&str>, file: Option<&str>, flags: &TaskFlags, cmd: &[String]) -> Result<String> {
+    submit_to(client_name, None, project, guard, slug, file, flags, cmd)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn submit_to(client_name: &str, queue: Option<&str>, project: Option<&str>, guard: Option<&str>, slug: Option<&str>, file: Option<&str>, flags: &TaskFlags, cmd: &[String]) -> Result<String> {
     let client = registry::load_client(client_name)?;
+    let project_entry = project.map(registry::load_project).transpose()?;
+    // A sole binding is unambiguous even when the client's default differs.
+    let binding_queue = project_entry.as_ref().and_then(|p| {
+        let mut bindings = p.bind.iter().filter(|b| b.client == client_name);
+        let first = bindings.next()?;
+        if bindings.next().is_none() {
+            Some(first.queue.as_str())
+        } else {
+            None
+        }
+    });
+    let target = registry::resolve_queue(&client, queue.or(binding_queue))?;
 
     // Project binding supplies workdir + env for the record; the body
     // itself carries no `cd` (the runner places cwd, design.md §3.12).
     let mut meta = TaskMeta { id: None, slug: String::new(), guard: guard.map(str::to_string), workdir: None, env: Default::default(), cmd: Vec::new(), timeout_s: flags.timeout_s.filter(|&n| n > 0), retry: flags.retry.filter(|&n| n > 0), retry_delay_s: flags.retry_delay_s, gpu_mem_mb: flags.gpu_mem_mb, ram_mb: flags.ram_mb, cpu_cores: flags.cpu_cores };
-    if let Some(pname) = project {
-        let p = registry::load_project(pname)?;
-        let b = p.bind.iter().find(|b| b.client == client_name).with_context(|| format!("project {pname} is not bound to client {client_name}"))?;
+    if let Some(p) = &project_entry {
+        let b = p.bind.iter().find(|b| b.client == client_name && b.queue == target.name).with_context(|| format!("project {} is not bound to client {client_name} queue {}; run `shunt project bind {} {client_name} --queue {} --workdir <path>`", p.name, target.name, p.name, target.name))?;
         meta.workdir = Some(b.workdir.clone());
         // project [defaults].env lays the floor; the binding's env
         // wins per key.
@@ -248,7 +264,7 @@ pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slu
         eprintln!("submit: WARNING: '{}' carries no guard; at-least-once requeue will run it twice (lost ack, orphan requeue). Pass --guard <path> unless the task is naturally idempotent.", meta.slug);
     }
 
-    let entry = SpoolEntry { id: id.clone(), project: project.unwrap_or("").to_string(), client: client.name.clone(), meta, submitted_at: iso_utc(now_unix()) };
+    let entry = SpoolEntry { id: id.clone(), project: project.unwrap_or("").to_string(), client: client.name.clone(), queue: target.name, qroot: Some(target.client.qroot), meta, submitted_at: iso_utc(now_unix()) };
     stage(&entry, &body)?;
     Ok(id)
 }
@@ -271,6 +287,30 @@ pub fn stage(entry: &SpoolEntry, body: &str) -> Result<()> {
         let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
         crate::server::fsutil::write_private(&tmp, contents)?;
         fs::rename(&tmp, dir.join(&name))?;
+    }
+    Ok(())
+}
+
+/// Pin legacy targets before any delivery attempt, including one whose ack is lost.
+pub(crate) fn pin_target(entry: &mut SpoolEntry, qroot: &str) -> Result<()> {
+    validate_qroot(entry.qroot.as_deref(), qroot)?;
+    if entry.qroot.is_none() {
+        let mut pinned = entry.clone();
+        pinned.qroot = Some(qroot.into());
+        let dir = spool_dir()?;
+        let name = format!("{}.json", entry.id);
+        valid_task_id(&entry.id)?;
+        let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+        crate::server::fsutil::write_private(&tmp, serde_json::to_string_pretty(&pinned)?)?;
+        fs::rename(&tmp, dir.join(name))?;
+        *entry = pinned;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_qroot(recorded: Option<&str>, current: &str) -> Result<()> {
+    if let Some(recorded) = recorded {
+        anyhow::ensure!(recorded == current, "queue qroot changed from {recorded:?} to {current:?}; restore the recorded queue path before retrying; shunt does not relocate historical tasks");
     }
     Ok(())
 }

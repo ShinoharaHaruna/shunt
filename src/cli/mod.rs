@@ -7,6 +7,7 @@
 mod agent;
 mod args;
 mod feedback;
+mod queues;
 mod server;
 mod upgrade;
 
@@ -25,14 +26,18 @@ use server::*;
 /// scope runs the agent handler; neither prints subcommand help.
 /// `wire` builds the remote argv lazily so the local path never
 /// loads the client row (shutdown's arm path reads it).
-fn dual_mode<W, L>(client: &Option<String>, root: &Option<String>, sub: &str, wire: W, local: L) -> Result<()>
+fn dual_mode<W, L>(client: &Option<String>, root: &Option<String>, queue: &Option<String>, sub: &str, wire: W, local: L) -> Result<()>
 where
     W: FnOnce(&str) -> Result<()>,
     L: FnOnce() -> Result<()>,
 {
+    if queue.is_some() && root.is_some() {
+        anyhow::bail!("--queue cannot select a local --root; use -c CLIENT without --root");
+    }
     if let Some(name) = resolve_client(client, root)? {
         return wire(&name);
     }
+    anyhow::ensure!(queue.is_none(), "--queue requires a server client; use -c CLIENT (without --root/SHUNT_ROOT), or configure default_client");
     if rootless(root) {
         return print_subhelp(sub);
     }
@@ -75,7 +80,7 @@ pub fn run(cli: Cli) -> Result<()> {
             // same slot (clap already rejects file + trailing argv).
             let file = a.file.as_deref().or(a.file_pos.as_deref());
             let flags = crate::proto::task::TaskFlags { timeout_s: a.timeout, retry: a.retry, retry_delay_s: a.retry_delay_s, gpu_mem_mb: a.gpu_mem_mb, ram_mb: a.ram_mb, cpu_cores: a.cpu_cores, env: crate::proto::task::parse_env_pairs(&a.env)? };
-            let id = crate::server::spool::submit(&client, a.project.as_deref(), a.guard.as_deref(), a.slug.as_deref(), file, &flags, &a.cmd)?;
+            let id = crate::server::spool::submit_to(&client, a.queue.as_deref(), a.project.as_deref(), a.guard.as_deref(), a.slug.as_deref(), file, &flags, &a.cmd)?;
             println!("spooled {id} (queue number is assigned on delivery; track with `shunt task show {id}`)");
             Ok(())
         }
@@ -86,12 +91,26 @@ pub fn run(cli: Cli) -> Result<()> {
             if a.all || a.as_label.is_some() {
                 return crate::server::status::run_all(a.json, a.as_label.as_deref());
             }
-            dual_mode(&a.client, &a.root, "status", |name| remote(name, &["status", "--json"], None, true), || agent_status(&a))
+            dual_mode(
+                &a.client,
+                &a.root,
+                &a.queue,
+                "status",
+                |name| {
+                    if a.queue.is_none() {
+                        crate::server::status::run_client(name, a.json)
+                    } else {
+                        remote_queue(name, a.queue.as_deref(), &["status", "--json"], None, true)
+                    }
+                },
+                || agent_status(&a),
+            )
         }
         Command::Logs(a) => {
             dual_mode(
                 &a.client,
                 &a.root,
+                &a.queue,
                 "logs",
                 |name| {
                     // ssh exec is output-collected under a hard
@@ -102,7 +121,7 @@ pub fn run(cli: Cli) -> Result<()> {
                     }
                     let tail = logs_wire_tail(&a);
                     let refs: Vec<&str> = tail.iter().map(String::as_str).collect();
-                    remote(name, &refs, None, false)
+                    remote_queue(name, a.queue.as_deref(), &refs, None, false)
                 },
                 || agent_logs(&a),
             )
@@ -149,7 +168,7 @@ pub fn run(cli: Cli) -> Result<()> {
 
         Command::Spool(c) => match c.action {
             SpoolAction::Ls => {
-                let rows: Vec<Vec<String>> = crate::server::spool::list()?.iter().map(|e| vec![e.id.clone(), e.submitted_at.clone(), e.client.clone(), e.project.clone(), e.meta.slug.clone()]).collect();
+                let rows: Vec<Vec<String>> = crate::server::spool::list()?.iter().map(|e| vec![e.id.clone(), e.submitted_at.clone(), e.client.clone(), e.queue.clone(), e.project.clone(), e.meta.slug.clone()]).collect();
                 print_cols(&rows);
                 Ok(())
             }
@@ -167,7 +186,7 @@ pub fn run(cli: Cli) -> Result<()> {
                         .iter()
                         .map(|r| {
                             let state = r.outcome.as_ref().map(|o| format!("{} rc={}", o.state, o.rc)).unwrap_or_else(|| "-".into());
-                            vec![r.id.clone(), r.client.clone(), r.queue_name.clone(), r.project.clone(), r.pushed_at.clone(), state]
+                            vec![r.id.clone(), r.client.clone(), r.queue.clone(), r.queue_name.clone(), r.project.clone(), r.pushed_at.clone(), state]
                         })
                         .collect();
                     print_cols(&rows);
@@ -181,8 +200,10 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         },
 
+        Command::Queue(c) => queues::cmd_queue(&c),
+
         Command::Client(c) => match c.action {
-            ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { host: a.host, port: a.port, user: a.user, key: a.key, password: a.password, qroot: a.qroot, deploy_root: a.deploy_root, local: a.local, expire: a.expire, env_setup: a.env_setup, shell: a.shell, endpoint_rotates: a.endpoint_rotates, bin_path: a.bin_path, shared: a.shared, exit_on_idle: a.exit_on_idle }),
+            ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { queue: a.queue, host: a.host, port: a.port, user: a.user, key: a.key, password: a.password, qroot: a.qroot, deploy_root: a.deploy_root, local: a.local, expire: a.expire, env_setup: a.env_setup, shell: a.shell, endpoint_rotates: a.endpoint_rotates, bin_path: a.bin_path, shared: a.shared, exit_on_idle: a.exit_on_idle }),
             ClientAction::Rename { old, new } => crate::server::client_ops::rename(&old, &new),
             // Fold the --endpoint-rotates / --no-endpoint-rotates pair
             // into tri-state: Some(true) sets, Some(false) clears,
@@ -247,7 +268,10 @@ pub fn run(cli: Cli) -> Result<()> {
                     // materialize the row, then delete it — the
                     // defaults regenerate on next use (this is also
                     // how a disabled localhost row comes back).
-                    let _ = registry::load_client(&name);
+                    if let Ok(client) = registry::load_client(&name) {
+                        let queues = registry::queue_names(&client);
+                        anyhow::ensure!(queues.len() == 1 && queues[0] == registry::DEFAULT_QUEUE, "localhost has named queues ({}); refusing factory reset because it would erase their configuration without stopping daemons. Run `shunt queue stop NAME -c localhost` for each queue, then back up clients/localhost.toml and reset the row manually after checking its qroots", queues.join(", "));
+                    }
                     return registry::remove("clients", &name);
                 }
                 crate::server::client_ops::remove(&name, purge)
@@ -300,22 +324,26 @@ pub fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
             ProjectAction::Remove { name } => registry::remove("projects", &name),
-            ProjectAction::Bind { name, client, workdir, env } => {
+            ProjectAction::Bind { name, client, client_pos, queue, workdir, env } => {
+                let client = client.or(client_pos).expect("clap requires a client");
+                let queue = registry::load_queue(&client, queue.as_deref())?.name;
                 let mut e = registry::load_project(&name)?;
                 let mut map = std::collections::BTreeMap::new();
                 for kv in &env {
                     let (k, v) = kv.split_once('=').ok_or_else(|| anyhow::anyhow!("--env expects KEY=value, got {kv}"))?;
                     map.insert(k.to_string(), v.to_string());
                 }
-                e.bind.retain(|b| b.client != client);
-                e.bind.push(registry::Binding { client, workdir, env: map });
+                e.bind.retain(|b| b.client != client || b.queue != queue);
+                e.bind.push(registry::Binding { client, queue, workdir, env: map });
                 let p = registry::save_project(&e)?;
                 println!("wrote {}", p.display());
                 Ok(())
             }
-            ProjectAction::Unbind { name, client } => {
+            ProjectAction::Unbind { name, client, client_pos, queue } => {
+                let client = client.or(client_pos).expect("clap requires a client");
+                let queue = registry::load_queue(&client, queue.as_deref())?.name;
                 let mut e = registry::load_project(&name)?;
-                e.bind.retain(|b| b.client != client);
+                e.bind.retain(|b| b.client != client || b.queue != queue);
                 let p = registry::save_project(&e)?;
                 println!("wrote {}", p.display());
                 Ok(())
@@ -418,18 +446,19 @@ pub fn run(cli: Cli) -> Result<()> {
                 Err(e) => jfail(a.json, &format!("{e:#}")),
             }
         }
-        Command::Cancel(a) => dual_mode(&a.client, &a.root, "cancel", |name| remote(name, &["cancel", "--json", "--", &a.pattern], None, true), || agent_cancel(&a)),
+        Command::Cancel(a) => dual_mode(&a.client, &a.root, &a.queue, "cancel", |name| remote_queue(name, a.queue.as_deref(), &["cancel", "--json", "--", &a.pattern], None, true), || agent_cancel(&a)),
         Command::Prio(a) => dual_mode(
             &a.client,
             &a.root,
+            &a.queue,
             "prio",
             |name| {
                 let n = a.n.to_string();
-                remote(name, &["prio", "--json", "--", &a.pattern, &n], None, true)
+                remote_queue(name, a.queue.as_deref(), &["prio", "--json", "--", &a.pattern, &n], None, true)
             },
             || agent_prio(&a),
         ),
-        Command::Kill(a) => dual_mode(&a.client, &a.root, "kill", |name| remote(name, &["kill", "--json", "--", &a.pattern], None, true), || agent_kill(&a)),
+        Command::Kill(a) => dual_mode(&a.client, &a.root, &a.queue, "kill", |name| remote_queue(name, a.queue.as_deref(), &["kill", "--json", "--", &a.pattern], None, true), || agent_kill(&a)),
         Command::Workers(a) => {
             // `workers 3 set 5` parses but is ambiguous — reject
             // rather than silently apply one spelling.
@@ -439,12 +468,13 @@ pub fn run(cli: Cli) -> Result<()> {
             dual_mode(
                 &a.client,
                 &a.root,
+                &a.queue,
                 "workers",
                 |name| {
                     let tail = workers_wire_tail(&a);
                     let mut refs: Vec<&str> = tail.iter().map(String::as_str).collect();
                     refs.push("--json");
-                    remote(name, &refs, None, true)
+                    remote_queue(name, a.queue.as_deref(), &refs, None, true)
                 },
                 || agent_workers(&a),
             )
@@ -453,6 +483,7 @@ pub fn run(cli: Cli) -> Result<()> {
             dual_mode(
                 &a.client,
                 &a.root,
+                &a.queue,
                 "shutdown",
                 |name| {
                     match &a.action {
@@ -465,6 +496,9 @@ pub fn run(cli: Cli) -> Result<()> {
                             // box hosts other people's work; arming
                             // idle poweroff would kill their jobs.
                             anyhow::ensure!(!client.shared, "client '{name}' is marked shared — idle poweroff refused (clear `shared` in clients/{name}.toml only if the user confirms sole use)");
+                            let resolved = registry::resolve_queue(&client, a.queue.as_deref())?;
+                            let t = crate::server::transport::transport_for(&client);
+                            crate::server::queue_ops::check_shutdown(t.as_ref(), &client, &resolved.name)?;
                             let g = grace_s.map(|n| n.to_string());
                             // --cmd > row.shutdown_cmd > facts.shutdown_cmd
                             // (the probe guess from §8 detection).
@@ -479,10 +513,10 @@ pub fn run(cli: Cli) -> Result<()> {
                             }
                             tail.push("--json".into());
                             let refs: Vec<&str> = tail.iter().map(String::as_str).collect();
-                            remote(name, &refs, None, true)
+                            remote_queue(name, a.queue.as_deref(), &refs, None, true)
                         }
-                        ShutdownAction::Off => remote(name, &["shutdown", "off", "--json"], None, true),
-                        ShutdownAction::Status => remote(name, &["shutdown", "status", "--json"], None, true),
+                        ShutdownAction::Off => remote_queue(name, a.queue.as_deref(), &["shutdown", "off", "--json"], None, true),
+                        ShutdownAction::Status => remote_queue(name, a.queue.as_deref(), &["shutdown", "status", "--json"], None, true),
                     }
                 },
                 || agent_shutdown(&a),

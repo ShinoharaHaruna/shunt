@@ -29,6 +29,10 @@ pub struct TaskRecord {
     pub id: String,
     pub project: String,
     pub client: String,
+    #[serde(default = "crate::proto::task::default_queue_name")]
+    pub queue: String,
+    #[serde(default)]
+    pub qroot: Option<String>,
     /// Slug as pushed (`<slug>-<shortid>`).
     pub slug: String,
     /// Queue entry name the box acked (`NNNN_<slug>`) — the handle
@@ -123,11 +127,11 @@ fn save(rec: &TaskRecord) -> Result<()> {
 /// entry is deleted — the ledger is the only place the mapping
 /// survives.
 pub fn record_push(entry: &SpoolEntry, queue_name: &str) -> Result<()> {
-    let rec = TaskRecord { id: entry.id.clone(), project: entry.project.clone(), client: entry.client.clone(), slug: entry.meta.slug.clone(), queue_name: queue_name.to_string(), submitted_at: entry.submitted_at.clone(), pushed_at: now_iso(), outcome: None };
+    let rec = TaskRecord { id: entry.id.clone(), project: entry.project.clone(), client: entry.client.clone(), queue: entry.queue.clone(), qroot: entry.qroot.clone(), slug: entry.meta.slug.clone(), queue_name: queue_name.to_string(), submitted_at: entry.submitted_at.clone(), pushed_at: now_iso(), outcome: None };
     save(&rec)?;
     append_event(serde_json::json!({
         "event": "pushed", "id": rec.id, "client": rec.client,
-        "queue": rec.queue_name,
+        "queue": rec.queue_name, "target_queue": rec.queue, "qroot": rec.qroot,
     }))?;
     Ok(())
 }
@@ -197,6 +201,20 @@ pub fn observe(t: &dyn Transport, client: &ClientEntry, rec: &mut TaskRecord) ->
     if let Some(o) = &rec.outcome {
         return Ok(if o.state == "done" { Observed::Done(o.rc) } else { Observed::Failed(o.rc) });
     }
+    let target = match (|| -> Result<_> {
+        anyhow::ensure!(client.name == rec.client, "task {} targets client {}, not {}; load its recorded client before observing", rec.id, rec.client, client.name);
+        let target = registry::resolve_queue(client, Some(&rec.queue))?;
+        crate::server::spool::validate_qroot(rec.qroot.as_deref(), &target.client.qroot)?;
+        Ok(target)
+    })() {
+        Ok(target) => target,
+        Err(e) => return Ok(Observed::Unreachable(format!("{e:#}"))),
+    };
+    if rec.qroot.is_none() {
+        rec.qroot = Some(target.client.qroot.clone());
+        save(rec)?;
+    }
+    let client = &target.client;
     let out = match t.exec(client, &wire_argv(client, &["status", "--json"]), None) {
         Ok(o) => o,
         Err(e) => return Ok(Observed::Unreachable(format!("{e:#}"))),
@@ -232,7 +250,7 @@ pub fn observe(t: &dyn Transport, client: &ClientEntry, rec: &mut TaskRecord) ->
     append_event(serde_json::json!({
         "event": if state == "done" { "finish" } else { "fail" },
         "id": rec.id, "client": rec.client, "queue": rec.queue_name,
-        "rc": rc,
+        "target_queue": rec.queue, "qroot": rec.qroot, "rc": rc,
     }))?;
     save(rec)?;
     Ok(obs)

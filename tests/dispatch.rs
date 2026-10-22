@@ -84,13 +84,13 @@ fn fixture(tag: &str) -> Result<(PathBuf, ClientEntry)> {
     let home = std::env::temp_dir().join(format!("shunt-itest-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&home)?;
     std::env::set_var("SHUNT_HOME", &home);
-    let client = ClientEntry { name: "fake-a".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: "/root/queue".into(), deploy_root: "/root".into(), facts: BTreeMap::new(), billing: None };
+    let client = ClientEntry { name: "fake-a".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: "/root/queue".into(), deploy_root: "/root".into(), facts: BTreeMap::new(), billing: None, queues: BTreeMap::new(), default_queue: None };
     registry::save_client(&client)?;
     Ok((home, client))
 }
 
 fn entry(id: &str, slug: &str) -> SpoolEntry {
-    SpoolEntry { id: id.into(), project: "p".into(), client: "fake-a".into(), meta: TaskMeta { id: None, slug: slug.into(), guard: None, workdir: None, env: BTreeMap::new(), cmd: vec!["echo".into(), "hi".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None }, submitted_at: "2024-01-01T00:00:00Z".into() }
+    SpoolEntry { id: id.into(), project: "p".into(), client: "fake-a".into(), queue: "default".into(), qroot: None, meta: TaskMeta { id: None, slug: slug.into(), guard: None, workdir: None, env: BTreeMap::new(), cmd: vec!["echo".into(), "hi".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None }, submitted_at: "2024-01-01T00:00:00Z".into() }
 }
 
 #[test]
@@ -324,7 +324,7 @@ fn dead_daemon_is_restarted_then_pushed() -> Result<()> {
 fn submit_file_merges_binding_directives() -> Result<()> {
     let _lock = HOME_LOCK.lock().unwrap();
     let (home, _c) = fixture("filemerge")?;
-    registry::save_project(&registry::ProjectEntry { name: "p".into(), desc: String::new(), repo: String::new(), defaults: Default::default(), bind: vec![registry::Binding { client: "fake-a".into(), workdir: "/bound/wd".into(), env: BTreeMap::from([("K".into(), "bound".into())]) }] })?;
+    registry::save_project(&registry::ProjectEntry { name: "p".into(), desc: String::new(), repo: String::new(), defaults: Default::default(), bind: vec![registry::Binding { client: "fake-a".into(), queue: "default".into(), workdir: "/bound/wd".into(), env: BTreeMap::from([("K".into(), "bound".into())]) }] })?;
 
     let f = home.join("t.sh");
     std::fs::write(&f, "#!/usr/bin/env bash\necho hi\n")?;
@@ -345,7 +345,7 @@ fn submit_file_merges_binding_directives() -> Result<()> {
 fn submit_file_own_directives_win() -> Result<()> {
     let _lock = HOME_LOCK.lock().unwrap();
     let (home, _c) = fixture("filewin")?;
-    registry::save_project(&registry::ProjectEntry { name: "p".into(), desc: String::new(), repo: String::new(), defaults: Default::default(), bind: vec![registry::Binding { client: "fake-a".into(), workdir: "/bound/wd".into(), env: BTreeMap::from([("K".into(), "bound".into()), ("K2".into(), "b2".into())]) }] })?;
+    registry::save_project(&registry::ProjectEntry { name: "p".into(), desc: String::new(), repo: String::new(), defaults: Default::default(), bind: vec![registry::Binding { client: "fake-a".into(), queue: "default".into(), workdir: "/bound/wd".into(), env: BTreeMap::from([("K".into(), "bound".into()), ("K2".into(), "b2".into())]) }] })?;
 
     let f = home.join("t.sh");
     std::fs::write(&f, "#!/bin/sh\n# shunt:workdir=/own/wd\n# shunt-env:K=own\nset -e\necho hi\n")?;

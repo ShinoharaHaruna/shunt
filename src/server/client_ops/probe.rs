@@ -25,7 +25,8 @@ pub fn probe_facts(t: &dyn Transport, client: &ClientEntry) -> Result<BTreeMap<S
 /// Roundtrip rewrites the TOML; comments are lost (documented in §4.1).
 pub fn probe(t: &dyn Transport, name: &str) -> Result<()> {
     let mut entry = registry::load_client(name)?;
-    let facts = probe_facts(t, &entry)?;
+    let target = registry::all_queues(&entry)?.into_iter().next().context("client has no registered queues — add a queue before probing")?;
+    let facts = probe_facts(t, &target.client)?;
     entry.facts.extend(facts);
     let p = registry::save_client(&entry)?;
     println!("wrote {}", p.display());

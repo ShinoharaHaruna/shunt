@@ -80,6 +80,17 @@ fn client_lock(dir: &Path, name: &str) -> Result<File> {
 /// Upsert or remove one KEY=value line in `<qroot>/env` on the box,
 /// over the client's transport (works for ssh and loopback alike).
 fn env_write(t: &dyn Transport, client: &ClientEntry, key: &str, value: Option<&str>) -> Result<()> {
+    let mut errors = Vec::new();
+    for queue in registry::all_queues(client)? {
+        if let Err(e) = env_write_one(t, &queue.client, key, value) {
+            errors.push(format!("{}: {e:#}", queue.name));
+        }
+    }
+    anyhow::ensure!(errors.is_empty(), "{} queue env reconciliation failed: {}; retry tunnel up/down", client.name, errors.join("; "));
+    Ok(())
+}
+
+fn env_write_one(t: &dyn Transport, client: &ClientEntry, key: &str, value: Option<&str>) -> Result<()> {
     const SCRIPT: &str = r#"
 f="$1/env"; k="$2"; v="$3"
 mkdir -p "$1"; touch "$f"
@@ -240,6 +251,9 @@ fn up_locked(dir: &Path, t: &dyn Transport, client: &ClientEntry, port: Option<u
     }
     if let Some(pid) = read_pid(dir, &client.name) {
         if pid_alive(pid, recorded_port(dir, &client.name), client_target(client).as_deref()) {
+            let port = recorded_port(dir, &client.name);
+            let proxy = port.map(|p| format!("socks5h://127.0.0.1:{p}"));
+            env_write(t, client, "ALL_PROXY", proxy.as_deref())?;
             return Ok(pid);
         }
     }
@@ -414,9 +428,26 @@ fn down_locked(dir: &Path, t: &dyn Transport, client: &ClientEntry) -> Result<()
     remove_state_file(&port_path(dir, &client.name))?;
     if !client.local {
         // Best-effort: a dead box may not answer; the tunnel is already down.
-        let _ = env_write(t, client, "ALL_PROXY", None);
+        if let Err(e) = env_write(t, client, "ALL_PROXY", None) {
+            eprintln!("tunnel: stopped, but queue env cleanup failed ({e:#}); retry tunnel down");
+        }
     }
     Ok(())
+}
+
+/// A newly configured queue must not bypass a live client tunnel or inherit
+/// a stale proxy. The same lock orders this edit against tunnel teardown.
+pub fn sync_queue_env(t: &dyn Transport, client_name: &str, queue_name: &str) -> Result<()> {
+    let client = registry::load_client(client_name)?;
+    let queue = registry::resolve_queue(&client, Some(queue_name))?;
+    let dir = tunnels_dir()?;
+    let _lock = client_lock(&dir, client_name)?;
+    if !recorded_in(&dir, client_name) {
+        return Ok(());
+    }
+    let state = status_in(&dir, client_name, client_target(&client).as_deref());
+    let proxy = if state.alive { state.port.map(|p| format!("socks5h://127.0.0.1:{p}")) } else { None };
+    env_write_one(t, &queue.client, "ALL_PROXY", proxy.as_deref())
 }
 
 fn remove_state_file(path: &Path) -> Result<()> {
@@ -435,13 +466,53 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn entry(root: &Path) -> ClientEntry {
-        ClientEntry { name: "tun-test".into(), local: true, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: root.display().to_string(), deploy_root: "/".into(), facts: BTreeMap::new(), billing: None }
+        ClientEntry { name: "tun-test".into(), local: true, disabled: false, local_bin: None, bin_path: None, queues: Default::default(), default_queue: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: root.display().to_string(), deploy_root: "/".into(), facts: BTreeMap::new(), billing: None }
     }
 
     fn tmp(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("shunt-tun-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         crate::server::fsutil::private_dir(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn proxy_reconciliation_covers_every_queue_and_preserves_other_env() {
+        let dir = tmp("multi-env");
+        let mut client = entry(&dir);
+        client.qroot.clear();
+        for name in ["train", "eval"] {
+            let root = dir.join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("env"), format!("MODE={name}\nALL_PROXY=stale\n")).unwrap();
+            client.queues.insert(name.into(), registry::QueueEntry { qroot: root.display().to_string(), ..Default::default() });
+        }
+        let transport = LocalTransport::default();
+        env_write(&transport, &client, "ALL_PROXY", Some("socks5h://127.0.0.1:2080")).unwrap();
+        env_write(&transport, &client, "ALL_PROXY", Some("socks5h://127.0.0.1:2080")).unwrap();
+        for name in ["train", "eval"] {
+            let env = std::fs::read_to_string(dir.join(name).join("env")).unwrap();
+            assert_eq!(env, format!("MODE={name}\nALL_PROXY=socks5h://127.0.0.1:2080\n"));
+        }
+        env_write(&transport, &client, "ALL_PROXY", None).unwrap();
+        for name in ["train", "eval"] {
+            assert_eq!(std::fs::read_to_string(dir.join(name).join("env")).unwrap(), format!("MODE={name}\n"));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn queue_env_failure_does_not_skip_siblings() {
+        let dir = tmp("multi-env-failure");
+        let mut client = entry(&dir);
+        client.qroot.clear();
+        let blocked = dir.join("blocked");
+        std::fs::write(&blocked, "not a directory").unwrap();
+        client.queues.insert("bad".into(), registry::QueueEntry { qroot: blocked.display().to_string(), ..Default::default() });
+        client.queues.insert("good".into(), registry::QueueEntry { qroot: dir.join("good").display().to_string(), ..Default::default() });
+        let err = env_write(&LocalTransport::default(), &client, "ALL_PROXY", Some("socks5h://127.0.0.1:2080")).unwrap_err();
+        assert!(err.to_string().contains("bad"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(dir.join("good/env")).unwrap(), "ALL_PROXY=socks5h://127.0.0.1:2080\n");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

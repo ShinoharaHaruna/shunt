@@ -55,8 +55,12 @@ const CLIENT_HEADER: &str = "\
 #   ssh.password                       sshpass path for one-time key deploy (plaintext — keep registry private)
 #   shutdown_cmd                       poweroff command pushed to <qroot>/shutdown_cmd at arm time
 #   expire                             \"unlimited\" | \"metered\" | ISO-8601 timestamp (subscription end)
-#   env_setup                          shell snippet sourced before every task (conda activate, exports)
-#   shell                              task/env_setup shell: bash | zsh | sh (default bash)
+#   default_queue                      named queue used when --queue is omitted
+#   queues.<name>.qroot                independent absolute queue root (must not overlap siblings)
+#   queues.<name>.env_setup            shell snippet sourced before tasks (conda activate, exports)
+#   queues.<name>.shell                task/env_setup shell: bash | zsh | sh (default bash)
+#   queues.<name>.exit_on_idle         exit the daemon when this queue drains
+#   queues.<name>.workers              optional worker preference (runtime file otherwise wins)
 #   endpoint_rotates                   true if the vendor reassigns IP/port across restarts
 #   billing.hourly / billing.currency  cost metadata surfaced to the agent
 # Facts (gpu, cores, can_root, shutdown_cmd guess, ...) fill in via `shunt client probe`.
@@ -70,7 +74,7 @@ const PROJECT_HEADER: &str = "\
 #   desc       what this project is (helps agents pick the right one)
 #   repo       canonical checkout on the dev machine (path or git URL)
 #   [defaults].env  merged UNDER every binding's env at submit
-#   [[bind]]   client + remote workdir (repo location on the box) + env
+#   [[bind]]   client + queue + remote workdir (repo location on the box) + env
 #\n";
 
 fn save_with_header<T: Serialize>(dir: &str, name: &str, value: &T, header: &str) -> Result<PathBuf> {
@@ -133,15 +137,13 @@ fn usable(entry: ClientEntry) -> Result<ClientEntry> {
     if entry.disabled {
         anyhow::bail!("client {} is disabled", entry.name);
     }
-    if entry.qroot.is_empty() {
-        anyhow::bail!("{}: qroot is empty — set it in the row (usually <deploy_root>/queue)", entry.name);
-    }
+    super::queues::validate_queues(&entry)?;
     Ok(entry)
 }
 
 fn localhost_default() -> Result<ClientEntry> {
     let home = std::env::var("HOME").context("HOME not set")?;
-    Ok(ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: "unlimited".into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: shunt_home()?.join("queue").display().to_string(), deploy_root: home, facts: BTreeMap::new(), billing: None })
+    Ok(ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: "unlimited".into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: shunt_home()?.join("queue").display().to_string(), queues: BTreeMap::new(), default_queue: None, deploy_root: home, facts: BTreeMap::new(), billing: None })
 }
 
 /// Client names including the pre-registered `localhost`. Disabled
@@ -167,6 +169,9 @@ pub fn list_clients() -> Result<Vec<String>> {
 }
 
 pub fn save_client(entry: &ClientEntry) -> Result<PathBuf> {
+    // Keep malformed rows writable for lifecycle repair/removal, but never
+    // persist an execution overlay that would corrupt canonical configuration.
+    super::queues::reject_mixed(entry)?;
     save_with_header("clients", &entry.name, entry, CLIENT_HEADER)
 }
 

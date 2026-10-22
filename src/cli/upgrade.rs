@@ -11,6 +11,12 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 pub fn cmd_upgrade(a: &UpgradeArgs) -> Result<()> {
+    anyhow::ensure!(a.queue.is_none() || a.client.is_some(), "--queue requires -c CLIENT for a remote upgrade");
+    if let Some(name) = &a.client {
+        let c = registry::load_client(name)?;
+        anyhow::ensure!(a.queue.is_some() || registry::queue_names(&c).len() == 1, "{name} has multiple queue binaries; select each explicitly with `shunt upgrade -c {name} --queue NAME` (list with `shunt queue ls -c {name}`)");
+        registry::resolve_queue(&c, a.queue.as_deref())?;
+    }
     let latest = release::latest_release()?;
     match &a.client {
         Some(name) => upgrade_remote(a, name, &latest),
@@ -60,31 +66,38 @@ fn upgrade_local(a: &UpgradeArgs, release: &release::Release) -> Result<()> {
 /// Skips when the box already reports the target version.
 fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Result<()> {
     let latest = release.version.as_str();
-    let c = registry::load_client(name)?;
+    let resolved = registry::load_queue(name, a.queue.as_deref())?;
+    let queue = &resolved.name;
+    let c = resolved.client;
     let t = transport::transport_for(&c);
     let bin = shunt_bin(&c);
     let cur = t.exec(&c, &["sh".into(), "-c".into(), format!("{} --version 2>&1", shell_quote(&bin))], None).context("remote --version")?;
     let curver = release::parse_version(&cur).map(|(v, _, _)| v).unwrap_or_else(|| "?".into());
     let newer = release::semver_newer(latest, &curver);
     if a.check || a.json {
-        let j = serde_json::json!({"action": "check", "client": name, "current": curver, "latest": latest, "newer": newer});
+        let j = serde_json::json!({"action": "check", "client": name, "queue": queue, "current": curver, "latest": latest, "newer": newer});
         if a.json {
             println!("{j}");
             return Ok(());
         }
     }
     if a.check {
-        println!("{name}: {}", if newer { format!("new release available: {curver} → {latest}") } else { format!("up to date ({curver})") });
+        println!("{name}/{queue}: {}", if newer { format!("new release available: {curver} → {latest}") } else { format!("up to date ({curver})") });
         return Ok(());
     }
     if !newer && !a.force {
-        println!("{name}: up to date ({curver})");
+        println!("{name}/{queue}: up to date ({curver})");
         return Ok(());
     }
     anyhow::ensure!(t.exec(&c, &["uname".into(), "-m".into()], None).map(|s| s.trim() == "x86_64").unwrap_or(false), "release assets are x86_64-only; {name} is not x86_64 — upgrade it by shipping a locally built binary: `client bootstrap {name} --bin-path <build>`");
     let tb = release::fetch_tag_asset(&release.tag, release::MUSL_TARGET)?;
     verify_release(tb.path(), latest)?;
-    client_ops::bootstrap(t.as_ref(), name, tb.path().to_str())?;
+    client_ops::bootstrap_queue(t.as_ref(), name, queue, tb.path().to_str())?;
+    if a.json {
+        println!("{}", serde_json::json!({"action": "upgraded", "client": name, "queue": queue, "from": curver, "to": latest}));
+    } else {
+        println!("{name}/{queue}: upgraded {curver} → {latest}");
+    }
     // Stage-then-mv replaced the binary FILE; a running daemon keeps
     // its old in-memory image — `shunt start` on a live daemon is a
     // no-op by design, so nothing else tells the operator. Restart
@@ -95,7 +108,7 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Re
         if let Ok(rep) = crate::proto::wire::parse::<crate::proto::wire::StatusReport>(&out) {
             if rep.daemon.alive {
                 let pid = rep.daemon.pid.map(|p| format!(" (pid {p})")).unwrap_or_default();
-                eprintln!("{name}: daemon{pid} still runs the OLD binary image — `shunt stop -c {name}` drains and exits, then `shunt start -c {name}` brings the new one up");
+                eprintln!("{name}/{queue}: daemon{pid} still runs the OLD binary image — `shunt queue stop {queue} -c {name}` drains and exits, then `shunt queue start {queue} -c {name}` brings the new one up");
             }
         }
     }

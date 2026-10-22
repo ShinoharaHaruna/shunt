@@ -2,9 +2,9 @@
 //! every piece of state a row name is load-bearing for.
 
 use super::hygiene::rekey;
-use crate::server::registry::{self, ClientEntry};
-use crate::server::transport::{self, Transport};
-use anyhow::{Context, Result};
+use crate::server::registry::{self, ClientEntry, ResolvedQueue};
+use crate::server::transport::{self, wire_argv, Transport};
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 fn public_key_path(private_key: impl AsRef<Path>) -> PathBuf {
@@ -28,8 +28,7 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
     let home = registry::shunt_home()?;
     let old_row = home.join("clients").join(format!("{old}.toml"));
     let new_row = home.join("clients").join(format!("{new}.toml"));
-    let text = std::fs::read_to_string(&old_row).with_context(|| format!("no client row {}", old_row.display()))?;
-    let mut e: ClientEntry = toml::from_str(&text).with_context(|| format!("bad TOML in {}", old_row.display()))?;
+    let mut e = registry::load_client_row(old)?;
     anyhow::ensure!(!new_row.exists(), "client {new} already exists");
 
     // Dedicated keypair moves only when ssh.key points at the managed
@@ -112,10 +111,8 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
 ///
 /// Remote side (best-effort — `localhost` itself is refused above,
 /// but other `local = true` rows are real execution targets):
-/// stop the daemon, pull our pubkey from authorized_keys — matched
-/// by the key blob, not the comment, so a renamed client still
-/// revokes correctly — and with --purge, `rm -rf <qroot>` wipes the
-/// queue state, env files, and the deployed binary. Bound workdirs
+/// stop every queue and optionally purge its state, then revoke the
+/// shared key by blob so renamed clients still revoke correctly. Bound workdirs
 /// are printed for the human to decide; we never rm task data.
 ///
 /// Local side (always): kill tunnel + mux master, then row file,
@@ -134,8 +131,18 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
     // before anything reaches a remote shell. A bad row must stop
     // the deregistration, not warn-and-continue — the remote steps
     // below are best-effort only after this gate passes.
+    let queues = match registry::all_queues(&e) {
+        Ok(queues) => queues,
+        Err(err) if !purge => {
+            eprintln!("warn: cannot resolve queues ({err:#}); skipping queue teardown and continuing deregistration");
+            Vec::new()
+        }
+        Err(err) => return Err(err),
+    };
     if purge {
-        check_purge_qroot(&e.qroot)?;
+        for queue in &queues {
+            check_purge_qroot(&queue.client.qroot)?;
+        }
     }
 
     // --- remote decommission (best-effort) ---
@@ -143,36 +150,10 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
     // loopback daemon is a real daemon and --purge a real rm -rf.
     if e.local || !e.ssh.host.is_empty() {
         let t = transport::transport_for(&e);
-        let _ = crate::server::tunnel::down(t.as_ref(), &e); // kill the -R forward if it is up
-        if !e.qroot.is_empty() {
-            let bin = format!("{}/bin/shunt", e.qroot);
-            if let Err(err) = t.exec(&e, &[bin, "stop".into(), "--root".into(), e.qroot.clone()], None) {
-                eprintln!("warn: remote stop failed ({err}); continuing deregistration");
-            }
+        if let Err(err) = crate::server::tunnel::down(t.as_ref(), &e) {
+            eprintln!("warn: tunnel teardown incomplete ({err:#}); continuing deregistration");
         }
-        // Revoke our key by blob match — comments track the name at
-        // keygen time, which a `client rename` leaves behind. The
-        // blob rides stdin (fixed-string `grep -vF`): base64 blobs
-        // legitimately contain `/`, which turns a `sed '/blob/d'`
-        // address into garbage — sed then exits 0 having done
-        // nothing, leaving our key in place.
-        // Local rows carry no ssh.key — nothing to revoke.
-        let pub_path = public_key_path(&e.ssh.key);
-        if !e.ssh.key.is_empty() {
-            if let Ok(pubkey) = std::fs::read_to_string(&pub_path) {
-                if let Some(blob) = pubkey.split_whitespace().nth(1) {
-                    if let Err(err) = revoke_key_blob(t.as_ref(), &e, blob) {
-                        eprintln!("warn: could not revoke authorized_keys ({err})");
-                    }
-                }
-            }
-        }
-        if purge && !e.qroot.is_empty() {
-            let script = format!("rm -rf {}", crate::server::transport::join_argv(std::slice::from_ref(&e.qroot)));
-            if let Err(err) = t.exec(&e, &["sh".into(), "-c".into(), script], None) {
-                eprintln!("warn: purge of {} failed ({err})", e.qroot);
-            }
-        }
+        decommission_queues(t.as_ref(), &e, &queues, purge);
         // Task data lives in bind workdirs — report, never delete.
         for pname in registry::list_names("projects")? {
             let pj = registry::load_project(&pname)?;
@@ -234,6 +215,39 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
     Ok(())
 }
 
+fn decommission_queues(t: &dyn Transport, e: &ClientEntry, queues: &[ResolvedQueue], purge: bool) {
+    // A stop can honor an armed idle shutdown; disarm every queue before stopping any.
+    for queue in queues {
+        let client = &queue.client;
+        if let Err(err) = t.exec(client, &wire_argv(client, &["shutdown", "off", "--json"]), None) {
+            eprintln!("warn: could not disarm shutdown for queue {} ({err}); continuing deregistration", queue.name);
+        }
+    }
+    for queue in queues {
+        let client = &queue.client;
+        if let Err(err) = t.exec(client, &wire_argv(client, &["stop", "--json"]), None) {
+            eprintln!("warn: remote stop of queue {} failed ({err}); continuing deregistration", queue.name);
+        }
+        // A failed stop must not prevent the remaining best-effort teardown.
+        if purge {
+            if let Err(err) = t.exec(client, &["rm".into(), "-rf".into(), "--".into(), client.qroot.clone()], None) {
+                eprintln!("warn: purge of {} failed ({err})", client.qroot);
+            }
+        }
+    }
+    // Keep the shared credential usable until every queue has been decommissioned.
+    // Match the blob rather than the comment, which survives client rename.
+    if !e.ssh.key.is_empty() {
+        if let Ok(pubkey) = std::fs::read_to_string(public_key_path(&e.ssh.key)) {
+            if let Some(blob) = pubkey.split_whitespace().nth(1) {
+                if let Err(err) = revoke_key_blob(t, e, blob) {
+                    eprintln!("warn: could not revoke authorized_keys ({err})");
+                }
+            }
+        }
+    }
+}
+
 /// Guard for `rm --purge`'s remote `rm -rf <qroot>`: the row's qroot
 /// is trusted input only after these checks. Rejects empty,
 /// relative, `~`-prefixed, or `..`-carrying paths; anything shorter
@@ -242,7 +256,7 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
 /// (`/home`, `/home/<user>`); and suspiciously short paths. The
 /// AutoDL default `/root/autodl-tmp/queue` passes — qroots under
 /// /root are normal, only the top-level dirs are dangerous.
-fn check_purge_qroot(qroot: &str) -> Result<()> {
+pub(crate) fn check_purge_qroot(qroot: &str) -> Result<()> {
     let p = qroot;
     anyhow::ensure!(!p.is_empty(), "--purge refused: qroot is empty");
     // The shell receives the original string, not a trimmed path.

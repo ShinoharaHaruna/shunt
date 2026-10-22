@@ -51,7 +51,7 @@ impl Fixture {
     }
 
     fn client(&self, name: &str, local: bool) -> Result<ClientEntry> {
-        let c = ClientEntry { name: name.into(), local, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "test".into(), key: String::new(), password: String::new() }, qroot: self.home.join(format!("queue-{name}")).display().to_string(), deploy_root: self.home.display().to_string(), facts: BTreeMap::new(), billing: None };
+        let c = ClientEntry { name: name.into(), local, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "test".into(), key: String::new(), password: String::new() }, qroot: self.home.join(format!("queue-{name}")).display().to_string(), deploy_root: self.home.display().to_string(), facts: BTreeMap::new(), billing: None, queues: BTreeMap::new(), default_queue: None };
         registry::save_client(&c)?;
         Ok(c)
     }
@@ -247,7 +247,7 @@ fn tunnel_workset_isolates_bad_rows_and_preserves_delivery_order() -> Result<()>
     disabled.disabled = true;
     registry::save_client(&disabled)?;
     for (id, client) in [("1", "b"), ("2", "a"), ("3", "b")] {
-        let e = SpoolEntry { id: id.into(), project: "p".into(), client: client.into(), meta: TaskMeta { id: None, slug: format!("task-{id}"), guard: None, workdir: None, env: BTreeMap::new(), cmd: vec!["true".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None }, submitted_at: format!("2024-01-01T00:00:0{id}Z") };
+        let e = SpoolEntry { id: id.into(), project: "p".into(), client: client.into(), queue: "default".into(), qroot: None, meta: TaskMeta { id: None, slug: format!("task-{id}"), guard: None, workdir: None, env: BTreeMap::new(), cmd: vec!["true".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None }, submitted_at: format!("2024-01-01T00:00:0{id}Z") };
         spool::stage(&e, id)?;
     }
     let t = Fake { daemon_dead: true, ..Fake::default() };
@@ -262,5 +262,49 @@ fn tunnel_workset_isolates_bad_rows_and_preserves_delivery_order() -> Result<()>
     assert_eq!(actual.len(), 12, "bad rows must not execute anything");
     assert_eq!(f.attempts(), 3);
     assert!(spool::list()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn multiple_queue_deliveries_heal_one_client_tunnel() -> Result<()> {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let f = Fixture::new("named")?;
+    let mut c = f.client("remote", false)?;
+    let first_root = std::mem::take(&mut c.qroot);
+    let second_root = f.home.join("second-queue").display().to_string();
+    for (name, qroot) in [("default", &first_root), ("second", &second_root)] {
+        c.queues.insert(
+            name.into(),
+            serde_json::from_value(serde_json::json!({
+                "qroot": qroot, "env_setup": "", "shell": "", "exit_on_idle": false,
+            }))?,
+        );
+        std::fs::create_dir_all(qroot)?;
+        std::fs::write(Path::new(qroot).join("env"), "KEEP=value\nALL_PROXY=socks5h://127.0.0.1:2080\n")?;
+    }
+    // Tunnel-only maintenance must also work without an execution default.
+    c.default_queue = None;
+    registry::save_client(&c)?;
+    f.record(&c.name, true)?;
+    for (id, queue, root) in [("one", "default", &first_root), ("two", "second", &second_root), ("three", "default", &first_root)] {
+        let entry: SpoolEntry = serde_json::from_value(serde_json::json!({
+            "id": id, "project": "", "client": c.name, "queue": queue, "qroot": root,
+            "meta": {"slug": id, "guard": null, "workdir": null}, "submitted_at": id,
+        }))?;
+        spool::stage(&entry, id)?;
+    }
+    let t = Fake { daemon_dead: true, ..Fake::default() };
+    assert_eq!(dispatch::sweep_with(&t)?, 3);
+    assert_eq!(f.attempts(), 1, "one reconnect attempt per instance, not per queue");
+    for op in ["status", "start", "env"] {
+        assert_eq!(calls(&t).iter().filter(|(_, actual)| actual == op).count(), 2, "{op}");
+    }
+    for root in [&first_root, &second_root] {
+        assert_eq!(std::fs::read_to_string(Path::new(root).join("env"))?, "KEEP=value\n");
+    }
+    let before = calls(&t).len();
+    assert_eq!(dispatch::sweep_with(&t)?, 0);
+    assert_eq!(f.attempts(), 2);
+    assert_eq!(calls(&t).len() - before, 4, "one deterministic probe/start and two queue env repairs");
     Ok(())
 }

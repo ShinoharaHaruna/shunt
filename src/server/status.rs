@@ -6,10 +6,23 @@ use crate::server::registry::{self, ClientEntry};
 use crate::server::transport::{transport_for, wire_argv, Transport};
 use anyhow::Result;
 use serde::Serialize;
+use std::collections::BTreeMap;
+
+#[derive(Debug, Serialize)]
+pub struct QueueStatus {
+    pub qroot: String,
+    pub reachable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
 
 #[derive(Debug, Serialize)]
 pub struct ClientStatus {
+    /// At least one queue answered transport; inspect queues for partial failure.
     pub reachable: bool,
+    pub queues: BTreeMap<String, QueueStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,13 +91,54 @@ pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
     let fails = registry::conn_fail_read(&client.name);
     let connect_failures = (fails > 0).then_some(fails);
     let endpoint_rotates = client.endpoint_rotates;
-    match t.exec(client, &wire_argv(client, &["status", "--json"]), None) {
-        Ok(out) => match crate::proto::wire::extract(&out) {
-            Ok(v) => ClientStatus { reachable: true, report: Some(v), error: None, billing: client.billing.clone(), expire, expires_in_s, connect_failures, endpoint_rotates, facts: (!client.facts.is_empty()).then(|| client.facts.clone()) },
-            Err(e) => ClientStatus { reachable: true, report: None, error: Some(format!("bad status JSON: {e}")), billing: client.billing.clone(), expire, expires_in_s, connect_failures, endpoint_rotates, facts: None },
-        },
-        Err(e) => ClientStatus { reachable: false, report: None, error: Some(format!("{e:#}")), billing: client.billing.clone(), expire, expires_in_s, connect_failures, endpoint_rotates, facts: None },
+    let mut queues = BTreeMap::new();
+    let mut errors = Vec::new();
+    match registry::all_queues(client) {
+        Ok(targets) => {
+            for queue in targets {
+                let status = match t.exec(&queue.client, &wire_argv(&queue.client, &["status", "--json"]), None) {
+                    Ok(out) => match crate::proto::wire::parse::<crate::proto::wire::StatusReport>(&out).and_then(|_| crate::proto::wire::extract(&out)) {
+                        Ok(report) => QueueStatus { qroot: queue.client.qroot, reachable: true, report: Some(report), error: None },
+                        Err(e) => QueueStatus { qroot: queue.client.qroot, reachable: true, report: None, error: Some(format!("bad status JSON: {e:#}")) },
+                    },
+                    Err(e) => QueueStatus { qroot: queue.client.qroot, reachable: false, report: None, error: Some(format!("{e:#}")) },
+                };
+                if let Some(error) = &status.error {
+                    errors.push(format!("{}: {error}", queue.name));
+                }
+                queues.insert(queue.name, status);
+            }
+        }
+        Err(e) => errors.push(format!("cannot resolve queues: {e:#}")),
     }
+    let report = if queues.len() == 1 { queues.values().next().and_then(|q| q.report.clone()) } else { None };
+    ClientStatus { reachable: queues.values().any(|q| q.reachable), queues, report, error: (!errors.is_empty()).then(|| errors.join("; ")), billing: client.billing.clone(), expire, expires_in_s, connect_failures, endpoint_rotates, facts: (!client.facts.is_empty()).then(|| client.facts.clone()) }
+}
+
+/// Preserve the single-queue wire surface, but never hide sibling queues
+/// behind a configured execution default when an instance status is requested.
+pub fn run_client(name: &str, json: bool) -> Result<()> {
+    let client = registry::load_client(name)?;
+    let transport = transport_for(&client);
+    let status = query(transport.as_ref(), &client);
+    if status.queues.len() == 1 {
+        let queue = status.queues.values().next().unwrap();
+        if let Some(report) = &queue.report {
+            println!("{}", serde_json::to_string_pretty(report)?);
+            return Ok(());
+        }
+        anyhow::bail!("{}: {}; re-run `shunt client bootstrap {name}` if the queue binary is missing or stale", name, queue.error.as_deref().unwrap_or("queue status unavailable"));
+    }
+    if json {
+        let mut value = serde_json::to_value(&status)?;
+        value["protocol"] = crate::proto::wire::PROTOCOL_VERSION.into();
+        value["client"] = name.into();
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        println!("== {name} ==");
+        print_rows(&rows_for(&client, &status));
+    }
+    Ok(())
 }
 
 /// Aggregate every registered client plus the built-in `localhost`.
@@ -127,8 +181,8 @@ pub fn run_all(json: bool, as_label: Option<&str>) -> Result<()> {
                 // A panicked probe degrades to an error row like
                 // every other failure mode here — one bad thread
                 // must never abort the whole aggregate.
-                Some(h) => h.join().unwrap_or_else(|_| ClientStatus { reachable: false, report: None, error: Some("probe panicked".into()), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None }),
-                None => ClientStatus { reachable: false, report: None, error: Some(format!("cannot load row: {:#}", c.as_ref().unwrap_err())), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None },
+                Some(h) => h.join().unwrap_or_else(|_| ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: Some("probe panicked".into()), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None }),
+                None => ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: Some(format!("cannot load row: {:#}", c.as_ref().unwrap_err())), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None },
             })
             .collect()
     });
@@ -136,11 +190,10 @@ pub fn run_all(json: bool, as_label: Option<&str>) -> Result<()> {
     let mut rows: Vec<Vec<String>> = Vec::new();
     for ((name, client), st) in names.iter().zip(&clients).zip(statuses) {
         if !json {
-            rows.push(match client {
-                Ok(client) => row_for(client, &st),
-                // Unloadable row: report name + error, no endpoint.
-                Err(_) => vec![name.clone(), "?".into(), "-".into(), "-".into(), "-".into(), "-".into(), st.error.as_deref().unwrap_or("unloadable row").lines().next().unwrap_or("unloadable row").chars().take(60).collect()],
-            });
+            match client {
+                Ok(client) => rows.extend(rows_for(client, &st)),
+                Err(_) => rows.push(vec![name.clone(), "?".into(), "-".into(), "-".into(), "-".into(), "-".into(), st.error.as_deref().unwrap_or("unloadable row").lines().next().unwrap_or("unloadable row").chars().take(60).collect()]),
+            }
         }
         out.insert(name.clone(), serde_json::to_value(&st)?);
     }
@@ -162,24 +215,7 @@ pub fn run_all(json: bool, as_label: Option<&str>) -> Result<()> {
     }
 
     println!("== clients ==  {} registered", names.len());
-    let headers = ["name", "transport", "daemon", "pending", "running", "expire", "note"];
-    let mut w = headers.map(|h| h.len());
-    for r in &rows {
-        for (i, c) in r.iter().enumerate() {
-            w[i] = w[i].max(c.chars().count());
-        }
-    }
-    let line = |cells: &[String]| {
-        print!("  ");
-        for (i, c) in cells.iter().enumerate() {
-            print!("{c:<width$}  ", width = w[i]);
-        }
-        println!();
-    };
-    line(&headers.map(String::from));
-    for r in &rows {
-        line(r);
-    }
+    print_rows(&rows);
     println!();
     match &staged {
         Err(e) => println!("== spool ==  unreadable: {e:#}"),
@@ -187,7 +223,7 @@ pub fn run_all(json: bool, as_label: Option<&str>) -> Result<()> {
         Ok(staged) => {
             println!("== spool ==  {} staged for dispatch", staged.len());
             for e in staged {
-                println!("  {}  {} -> {}  {} ({})", e.id, e.project, e.client, e.meta.slug, e.submitted_at);
+                println!("  {}  {} -> {}/{}  {} ({})", e.id, e.project, e.client, e.queue, e.meta.slug, e.submitted_at);
             }
         }
     }
@@ -210,7 +246,51 @@ pub fn run_all(json: bool, as_label: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn row_for(client: &ClientEntry, st: &ClientStatus) -> Vec<String> {
+fn print_rows(rows: &[Vec<String>]) {
+    let headers = ["name/queue", "transport", "daemon", "pending", "running", "expire", "note"];
+    let mut widths = headers.map(str::len);
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.chars().count());
+        }
+    }
+    let line = |cells: &[String]| {
+        print!("  ");
+        for (i, cell) in cells.iter().enumerate() {
+            print!("{cell:<width$}  ", width = widths[i]);
+        }
+        println!();
+    };
+    line(&headers.map(String::from));
+    for row in rows {
+        line(row);
+    }
+}
+
+fn rows_for(client: &ClientEntry, st: &ClientStatus) -> Vec<Vec<String>> {
+    if st.queues.is_empty() {
+        return vec![row_for(client, st, None)];
+    }
+    st.queues
+        .iter()
+        .enumerate()
+        .map(|(index, (name, queue))| {
+            let mut row = row_for(client, st, Some(queue));
+            row[0] = format!("{}/{name}", client.name);
+            // Instance billing and expiry belong to one row, not every queue.
+            if index > 0 {
+                row[1].clear();
+                row[5].clear();
+                if queue.error.is_none() {
+                    row[6].clear();
+                }
+            }
+            row
+        })
+        .collect()
+}
+
+fn row_for(client: &ClientEntry, st: &ClientStatus, queue: Option<&QueueStatus>) -> Vec<String> {
     let transport = if client.local { "local".to_string() } else { format!("ssh {}@{}:{}", client.ssh.user, client.ssh.host, client.ssh.port) };
     let expire = match expire_epoch(&client.expire) {
         Some(e) => {
@@ -229,7 +309,9 @@ fn row_for(client: &ClientEntry, st: &ClientStatus) -> Vec<String> {
             }
         }
     };
-    match &st.report {
+    let report = queue.and_then(|q| q.report.as_ref()).or(st.report.as_ref());
+    let error = queue.and_then(|q| q.error.as_deref()).or(st.error.as_deref());
+    match report {
         Some(rep) => {
             let daemon = if rep.pointer("/daemon/alive").and_then(|v| v.as_bool()).unwrap_or(false) { "up" } else { "down" }.to_string();
             let pending = rep.pointer("/pending").and_then(|v| v.as_array()).map(|a| a.len().to_string()).unwrap_or_else(|| "?".into());
@@ -241,7 +323,7 @@ fn row_for(client: &ClientEntry, st: &ClientStatus) -> Vec<String> {
             vec![client.name.clone(), transport, daemon, pending, running, expire, note]
         }
         None => {
-            let err = st.error.as_deref().unwrap_or("unreachable").lines().next().unwrap_or("unreachable");
+            let err = error.unwrap_or("unreachable").lines().next().unwrap_or("unreachable");
             let err: String = err.chars().take(60).collect();
             vec![client.name.clone(), transport, "-".into(), "-".into(), "-".into(), expire, err]
         }

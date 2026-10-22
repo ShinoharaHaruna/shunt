@@ -27,7 +27,7 @@ Raw cargo equivalents work too (`cargo build/test/clippy`).
 
 - `src/cli/` — full clap command tree (`args.rs`); server vs client subcommand dispatch (`mod.rs`, `server.rs`, `agent.rs`)
 - `src/agent/` — client side: daemon loop, FS queue ops, exec, probe, shutdown
-- `src/server/` — server side: registry CRUD (real), spool, dispatcher, ssh transport, SOCKS5 tunnel manager, `room.rs` coordination rooms (design.md §17)
+- `src/server/` — server side: registry CRUD (real; clients own named `[queues.<name>]` subresources — a queue holds qroot/env_setup/shell/exit_on_idle/workers while the client holds the SSH identity, tunnel, billing), spool, dispatcher, ssh transport, SOCKS5 tunnel manager, `room.rs` coordination rooms (design.md §17); `queue_ops.rs` = queue-scoped teardown + shutdown preflight, `registry/queues.rs` = resolution/mutation
 - `src/feedback/` — GitHub-issue feedback channel: compose + sanitize, persist-first ledger, gh/curl delivery (design.md §14)
 - `src/proto/` — shared types: task format, wire JSON (protocol version 1)
 - `docs/design.md` — **authoritative behavioral spec**; when ambiguous, this file wins
@@ -44,6 +44,6 @@ Raw cargo equivalents work too (`cargo build/test/clippy`).
 
 - Spec-first: `docs/design.md` §3 catalogs the queue state machine's edge cases (orphan requeue, pgid isolation, idle-shutdown) ported from the bash oracle; implement to the spec, don't invent semantics.
 - Implementation phase: the tree is implemented end to end — registry CRUD, `mktask`, spool, dispatcher, ssh/local transports, tunnel, and the full client queue state machine (design.md §3). No stubbed handlers remain.
-- Client queue is a filesystem state machine: `pending/ running/ done/ failed/` under `$QROOT`; resolution order `--root` > `$SHUNT_ROOT` > configured qroot.
+- Client queue is a filesystem state machine: `pending/ running/ done/ failed/` under `$QROOT`; resolution order `--root` > `$SHUNT_ROOT` > configured qroot. Server-side queue selection is `--queue` > `default_queue` > sole queue (design.md §4.1a); staged tasks pin `(queue, qroot)` — never retarget after the fact.
 - Registry lives at `~/.config/shunt/` (`$SHUNT_HOME` overrides for tests), human-editable TOML, one file per client/project.
 - Never put real hostnames, ports, or key paths in tracked files — use placeholders (see `etc/vendors/autodl.toml` FILL markers).

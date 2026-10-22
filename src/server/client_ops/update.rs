@@ -138,9 +138,10 @@ pub(crate) fn endpoint_peers(name: &str, host: &str, port: u16) -> Vec<String> {
 /// bootstrap). `client add` warns so the collision is loud at
 /// registration, not first detected at bootstrap.
 pub fn same_queue_peers(name: &str, e: &ClientEntry) -> Vec<String> {
-    if e.local || e.ssh.host.is_empty() || e.qroot.is_empty() {
+    if e.local || e.ssh.host.is_empty() {
         return Vec::new();
     }
+    let roots = queue_roots(e);
     let mut out = Vec::new();
     for n in registry::list_names("clients").unwrap_or_default() {
         if n == name {
@@ -148,13 +149,18 @@ pub fn same_queue_peers(name: &str, e: &ClientEntry) -> Vec<String> {
         }
         if let Ok(text) = std::fs::read_to_string(registry::shunt_home().map(|h| h.join("clients").join(format!("{n}.toml"))).unwrap_or_default()) {
             if let Ok(c) = toml::from_str::<ClientEntry>(&text) {
-                if !c.local && c.ssh.host == e.ssh.host && c.ssh.port == e.ssh.port && c.ssh.user == e.ssh.user && c.qroot == e.qroot {
+                if !c.local && c.ssh.host == e.ssh.host && c.ssh.port == e.ssh.port && c.ssh.user == e.ssh.user && queue_roots(&c).iter().any(|root| roots.contains(root)) {
                     out.push(n);
                 }
             }
         }
     }
     out
+}
+
+fn queue_roots(client: &ClientEntry) -> Vec<std::path::PathBuf> {
+    let roots: Vec<&str> = if client.queues.is_empty() { vec![&client.qroot] } else { client.queues.values().map(|queue| queue.qroot.as_str()).collect() };
+    roots.into_iter().filter(|root| !root.is_empty()).map(|root| std::path::Path::new(root).components().collect()).collect()
 }
 
 #[cfg(test)]
@@ -188,5 +194,36 @@ mod tests {
         assert!(endpoint_peers("a", "", 0).is_empty());
         std::env::remove_var("SHUNT_HOME");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn same_queue_peers_checks_every_queue_and_account() {
+        let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-queue-peers-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let mut a = entry();
+        a.name = "a".into();
+        a.ssh.host = "example.invalid".into();
+        a.ssh.user = "u".into();
+        crate::server::registry::canonicalize_queues(&mut a).unwrap();
+        a.queues.insert("second".into(), crate::server::registry::QueueEntry { qroot: "/data/shared".into(), env_setup: String::new(), shell: String::new(), exit_on_idle: false, workers: None });
+        let mut b = a.clone();
+        b.name = "b".into();
+        b.queues.clear();
+        b.default_queue = None;
+        b.qroot = "/data//./shared/".into();
+        let mut c = b.clone();
+        c.name = "c".into();
+        c.ssh.user = "other".into();
+        let mut d = b.clone();
+        d.name = "d".into();
+        d.ssh.port += 1;
+        for e in [&a, &b, &c, &d] {
+            crate::server::registry::save_client(e).unwrap();
+        }
+        assert_eq!(super::same_queue_peers("a", &a), ["b"]);
+        assert_eq!(super::same_queue_peers("b", &b), ["a"]);
+        std::env::remove_var("SHUNT_HOME");
+        std::fs::remove_dir_all(home).ok();
     }
 }

@@ -24,10 +24,11 @@ mod probe;
 pub(crate) mod release;
 mod update;
 
-pub use bootstrap::bootstrap;
-pub use env::push_env;
+pub use bootstrap::{bootstrap, bootstrap_queue};
+pub use env::{push_env, push_queue_env};
 pub use hygiene::rekey;
 pub use keys::{deploy_key, ensure_key};
+pub(crate) use lifecycle::check_purge_qroot;
 pub use lifecycle::{remove, rename};
 pub use probe::{probe, probe_facts};
 pub use update::{same_queue_peers, update, EndpointUpdate};
@@ -36,5 +37,5 @@ pub use update::{same_queue_peers, update, EndpointUpdate};
 /// every field spelled out so a new field forces one edit, not N.
 #[cfg(test)]
 pub(crate) fn test_entry() -> crate::server::registry::ClientEntry {
-    crate::server::registry::ClientEntry { name: "b".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: Default::default(), qroot: "/q".into(), deploy_root: "/data".into(), facts: Default::default(), billing: None }
+    crate::server::registry::ClientEntry { name: "b".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: Default::default(), qroot: "/q".into(), deploy_root: "/data".into(), facts: Default::default(), billing: None, queues: Default::default(), default_queue: None }
 }

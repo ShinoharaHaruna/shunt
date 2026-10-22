@@ -10,6 +10,7 @@ shunt is a FIFO + priority-band + at-least-once experiment queue for hourly-bill
 Mental model:
 
 - The wire is `ssh <box> 'shunt <cmd> --json --root <qroot>'`; the registry's `qroot` is authoritative. No ports, no server-side daemon besides the dispatcher, no client process besides `shuntd`.
+- **Client = box, queue = named subresource.** One client row is one managed instance and one SSH identity (endpoint, key, mux, tunnel, billing, facts). Under it, named queues (`[queues.<name>]` in the row) each own an independent qroot, sequence space, worker pool, daemon, env_setup/shell, and binary. Old flat rows keep working as a literal queue named `default`.
 - `localhost` is a peer client using the local transport (execs the `shunt` binary directly — no ssh, no key). Its row `clients/localhost.toml` is written on first use (default queue `~/.config/shunt/queue/`); edit it like any client row — `local_bin`/`timeout_s` tune the loopback transport. `shunt client rm localhost` resets the row to factory defaults (the name is reserved); to actually opt out, write `disabled = true` into the row. Use it for dry runs, integration smoke, and dev-loop tasks on the dev machine itself. `shunt client add <name> --local` creates additional loopback queues.
 - Execution is at-least-once. Tasks must guard on the artifact they produce so reruns are no-ops.
 - The box powers itself off when the queue drains and `shutdown_on_idle` is armed. Powering on is a human click in the vendor console; shunt never powers a box on.
@@ -60,7 +61,31 @@ shunt client bootstrap rw-a
 shunt project add riboworld --repo ~/Code/RiboWorld --desc "RNA-seq pipeline"
 shunt project bind riboworld --client rw-a \
     --workdir /root/autodl-tmp/RiboWorld --env TASK_THREADS=4
+#   bindings target a (client, queue) pair; --queue NAME selects
+#   a named queue (omitted = the client's configured default).
 ```
+
+### named queues on one box
+
+```bash
+# Two independent queues on one rented instance — separate qroots,
+# daemons, seq spaces and worker pools over ONE ssh identity.
+shunt queue add train -c rw-a --qroot /root/autodl-tmp/queue-train
+shunt queue add eval -c rw-a --qroot /root/autodl-tmp/queue-eval
+shunt queue bootstrap train -c rw-a      # installs binary + init + start
+shunt queue bootstrap eval -c rw-a
+shunt queue ls -c rw-a                    # names, qroots, default marker
+shunt queue default eval -c rw-a          # unqualified ops land here
+shunt submit -c rw-a --queue train -- ./task.sh
+shunt status -c rw-a --queue eval --json
+```
+
+- `--queue` exists on `submit`, `status`, `logs`, `cancel`, `prio`, `kill`, `workers`, `shutdown`, `upgrade`, and `project bind`/`unbind`. Without it: configured `default_queue` > the sole queue > ambiguity error — never a guess.
+- A staged task pins its `(queue, qroot)`: changing `queue default` afterwards does NOT retarget undelivered work. qroot drift is a loud error, not a silent reroute.
+- `client bootstrap`/`client env` cover every registered queue; the `queue` variants scope to one. `upgrade -c` on a multi-queue client requires `--queue` (one binary per qroot).
+- `queue rm` refuses while bound, staged, or running work references it, never revokes the shared client key, and `--purge` deletes only that qroot.
+- One tunnel per box: `tunnel up` writes `ALL_PROXY` into every queue's env; newly added queues reconcile on up/env automatically.
+- `shutdown -c rw-a on` still powers the whole box off — arming refuses while ANY sibling queue is busy or unreachable, including a stopped queue with pending work. This is a preflight, not a lock: an enqueue racing the final poweroff check can still lose (§3.11).
 
 Registry files are human-editable TOML under `~/.config/shunt/` (`$SHUNT_HOME` overrides, used by tests). A project binds to many clients; each binding supplies `workdir` and an env overlay. Useful overlay keys: `PATH_PREPEND`, `TASK_THREADS` (`auto` = cgroup probe).
 
@@ -174,7 +199,7 @@ The client queue is a directory of tracks under `qroot`:
 | `done/`    | `NNNN_<slug>/` with `task.sh` + `log` + `exit` (contains `0`)          |
 | `failed/`  | `NNNN_<slug>/` with `task.sh` + `log` + `exit` (nonzero rc, or killed) |
 
-Queue-level runner env lives in the `env` dotenv file under `qroot` (`WORKDIR`, `PATH_PREPEND`, `TASK_THREADS`, plus passthrough keys); per-task `# shunt-env:` directives override it. Values are literal `KEY=value` — no quote stripping or `$` expansion, so write `K=a b`, never `K="a b"` (the quotes would become part of the value).
+When a client has named queues, `status -c <client>` (no `--queue`) prints a per-queue block instead of a single wire report; `status --all --json` carries a `queues` map beside the single-queue `report` field. Queue-level runner env lives in the `env` dotenv file under `qroot` (`WORKDIR`, `PATH_PREPEND`, `TASK_THREADS`, plus passthrough keys); per-task `# shunt-env:` directives override it. Values are literal `KEY=value` — no quote stripping or `$` expansion, so write `K=a b`, never `K="a b"` (the quotes would become part of the value).
 
 `status --json` returns `{protocol:1, daemon:{alive,pid}, workers:{value,source}, running[], pending[], done_recent[], failed_recent[], stop, shutdown:{armed,grace_s}}`. On the server side, `status --all --json` merges per-client rows and adds `facts` and `billing` from the registry.
 
@@ -257,7 +282,7 @@ shunt status -c rw-a --json    # pending → running
 shunt logs -c rw-a exp1        # watch the task log
 
 # drain and walk away
-shunt shutdown -c rw-a on      # fires ~60 s after running+pending empty (dedicated boxes only — refused on `shared` rows)
+shunt shutdown -c rw-a on      # fires ~60 s after running+pending empty (dedicated boxes only — refused on `shared` rows or busy sibling queues)
 # box powers off; billing stops at the end of the paid window
 ```
 

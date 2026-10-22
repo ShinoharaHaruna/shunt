@@ -29,16 +29,17 @@ pub(crate) fn task_show(id: &str, json: bool) -> Result<()> {
         match registry::load_client(&rec.client) {
             Ok(client) => {
                 let t = crate::server::transport::transport_for(&client);
-                if let Ok(obs) = tasks::observe(t.as_ref(), &client, &mut rec) {
-                    live = Some(match obs {
+                live = Some(match tasks::observe(t.as_ref(), &client, &mut rec) {
+                    Ok(obs) => match obs {
                         Observed::Pending => "pending".into(),
                         Observed::Running => "running".into(),
                         Observed::Done(rc) => format!("done rc={rc}"),
                         Observed::Failed(rc) => format!("failed rc={rc}"),
                         Observed::Unknown => "unknown".into(),
                         Observed::Unreachable(e) => format!("unreachable: {}", e.lines().next().unwrap_or(&e)),
-                    });
-                }
+                    },
+                    Err(e) => format!("unreachable: {e:#}"),
+                });
             }
             Err(e) => live = Some(format!("client unloadable: {e:#}")),
         }
@@ -54,7 +55,7 @@ pub(crate) fn task_show(id: &str, json: bool) -> Result<()> {
         println!("client:    {}", rec.client);
         println!("project:   {}", if rec.project.is_empty() { "-" } else { &rec.project });
         println!("slug:      {}", rec.slug);
-        println!("queue:     {}  (on {})", rec.queue_name, rec.client);
+        println!("queue:     {}  (on {}/{})", rec.queue_name, rec.client, rec.queue);
         println!("submitted: {}", rec.submitted_at);
         println!("pushed:    {}", rec.pushed_at);
         match (&rec.outcome, &live) {
@@ -72,10 +73,23 @@ pub(crate) fn task_show(id: &str, json: bool) -> Result<()> {
 pub(crate) fn remote(name: &str, tail: &[&str], stdin: Option<&str>, expect_json: bool) -> Result<()> {
     use crate::server::registry;
     use crate::server::transport::{transport_for, wire_argv};
-    let client = registry::load_client(name)?;
+    let base = registry::load_client(name)?;
+    let queue = registry::queue_names(&base).into_iter().next().context("client has no registered queues")?;
+    let client = registry::resolve_queue(&base, Some(&queue))?.client;
     let argv = wire_argv(&client, tail);
     let t = transport_for(&client);
     let out = t.exec(&client, &argv, stdin)?;
+    print!("{}", remote_render(&out, expect_json)?);
+    Ok(())
+}
+
+/// Queue controls must resolve an execution target, never the machine row.
+pub(crate) fn remote_queue(name: &str, queue: Option<&str>, tail: &[&str], stdin: Option<&str>, expect_json: bool) -> Result<()> {
+    use crate::server::transport::{transport_for, wire_argv};
+    let resolved = crate::server::registry::load_queue(name, queue)?;
+    let client = &resolved.client;
+    let t = transport_for(client);
+    let out = t.exec(client, &wire_argv(client, tail), stdin)?;
     print!("{}", remote_render(&out, expect_json)?);
     Ok(())
 }
@@ -315,6 +329,7 @@ fn print_room_ls(label: Option<&str>, views: &[crate::server::room::RoomView], s
 /// then applies explicit flags. Real (server-local bookkeeping only).
 /// Optional field overrides for `client add`.
 pub(crate) struct ClientAddOpts {
+    pub(crate) queue: Option<String>,
     pub(crate) host: Option<String>,
     pub(crate) port: Option<u16>,
     pub(crate) user: Option<String>,
@@ -344,7 +359,7 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
     let qroot_explicit = opts.qroot.is_some();
     let mut entry = match template {
         Some(t) => load_vendor_template(t)?,
-        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: String::new(), deploy_root: String::new(), facts: Default::default(), billing: None },
+        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: String::new(), queues: Default::default(), default_queue: None, deploy_root: String::new(), facts: Default::default(), billing: None },
     };
     entry.name = name.into();
     // Adding a row for the built-in name materializes the loopback
@@ -408,6 +423,16 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
     if entry.qroot.is_empty() && !entry.deploy_root.is_empty() {
         entry.qroot = format!("{}/queue", entry.deploy_root.trim_end_matches('/'));
     }
+    let initial_queue = opts.queue.as_deref().unwrap_or(crate::server::registry::DEFAULT_QUEUE);
+    valid_name(initial_queue)?;
+    let legacy = entry.queues.is_empty();
+    crate::server::registry::canonicalize_queues(&mut entry)?;
+    if legacy && initial_queue != crate::server::registry::DEFAULT_QUEUE {
+        let initial = entry.queues.remove(crate::server::registry::DEFAULT_QUEUE).expect("canonical initial queue");
+        entry.queues.insert(initial_queue.into(), initial);
+        entry.default_queue = Some(initial_queue.into());
+    }
+    let execution = crate::server::registry::resolve_queue(&entry, Some(initial_queue))?.client;
     // Dedicated keypair per client (design.md §4.1): generated at
     // registration so the row is usable immediately.
     if !entry.local {
@@ -422,19 +447,13 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
     // tenant's queue — placement on a shared box is a user choice,
     // not a default to accept silently.
     if entry.shared && !qroot_explicit {
-        eprintln!("note: shared row defaults qroot to '{}' — confirm with the user it does not collide with other tenants' queues (--qroot)", entry.qroot);
+        eprintln!("note: shared row defaults qroot to '{}' — confirm with the user it does not collide with other tenants' queues (--qroot)", execution.qroot);
     }
     // Same endpoint+user+qroot = the same remote queue: a second
     // install on it merges silently (§4.1 owner claim). Warn at
     // registration, not at bootstrap.
-    for p in crate::server::client_ops::same_queue_peers(name, &entry) {
-        eprintln!("note: client '{p}' already targets {}@{}:{} + qroot '{}' — two installs on one queue merge silently; pick a different --qroot", entry.ssh.user, entry.ssh.host, entry.ssh.port, entry.qroot);
-    }
-    // An empty qroot survives add only when deploy_root was empty
-    // too; load_client now rejects such rows, so warn for any
-    // transport (local AND ssh-shaped rows with no deploy_root).
-    if entry.qroot.is_empty() {
-        eprintln!("note: row has no qroot — it will not load as a client; set qroot (or deploy_root) in the row");
+    for p in crate::server::client_ops::same_queue_peers(name, &execution) {
+        eprintln!("note: client '{p}' already targets {}@{}:{} + qroot '{}' — two installs on one queue merge silently; pick a different --qroot", entry.ssh.user, entry.ssh.host, entry.ssh.port, execution.qroot);
     }
     Ok(())
 }

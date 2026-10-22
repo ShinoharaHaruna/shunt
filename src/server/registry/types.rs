@@ -54,13 +54,13 @@ pub struct ClientEntry {
     /// first manual run proved necessary). Pushed to
     /// `<qroot>/env_setup` by `client env`/`bootstrap`; the runner
     /// sources it in the task wrapper (design.md §3.12).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub env_setup: String,
     /// Shell the task wrapper + env_setup run under on this box
     /// ("bash", "zsh", "sh"). Empty = bash. Pushed to
     /// `<qroot>/shell`. conda-activate-style snippets need bash/zsh,
     /// not POSIX sh — record what the box actually has.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub shell: String,
     /// Whether the vendor reassigns IP/port across stop/start
     /// (AutoDL does not). Drives the escalation text when connection
@@ -76,12 +76,17 @@ pub struct ClientEntry {
     /// bootstrap/env-push so the daemon exits cleanly once its queue
     /// drains instead of staying resident (§3.11a). Next dispatch
     /// revives it via the auto-heal `start`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub exit_on_idle: bool,
     #[serde(default)]
     pub ssh: SshEndpoint,
-    /// Queue dir on the box.
+    /// Legacy queue dir; populated only in flat rows or execution views.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub qroot: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub queues: BTreeMap<String, QueueEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_queue: Option<String>,
     /// Vendor work root (AutoDL: `/root/autodl-tmp`).
     pub deploy_root: String,
     /// Facts filled by `probe`/`bootstrap`; advisory only.
@@ -90,6 +95,24 @@ pub struct ClientEntry {
     /// Cost metadata surfaced to the agent (design.md §9).
     #[serde(default)]
     pub billing: Option<Billing>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Queue-local configuration; workers is a preference, not runtime state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct QueueEntry {
+    pub qroot: String,
+    #[serde(default)]
+    pub env_setup: String,
+    #[serde(default)]
+    pub shell: String,
+    #[serde(default)]
+    pub exit_on_idle: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -148,6 +171,8 @@ pub struct ProjectDefaults {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Binding {
     pub client: String,
+    #[serde(default = "super::queues::default_queue_name")]
+    pub queue: String,
     pub workdir: String,
     #[serde(default)]
     pub env: BTreeMap<String, String>,

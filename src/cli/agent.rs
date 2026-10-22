@@ -683,7 +683,7 @@ mod tests {
 
     #[test]
     fn logs_wire_tail_forwards_tail_and_pattern() {
-        let a = LogsArgs { pattern: Some("train".into()), client: None, root: None, follow: false, tail: Some(50) };
+        let a = LogsArgs { pattern: Some("train".into()), client: None, queue: None, root: None, follow: false, tail: Some(50) };
         assert_eq!(logs_wire_tail(&a), vec!["logs", "-n", "50", "--", "train"]);
         // Bare `logs` must not send an empty positional — that would
         // match every task log instead of the daemon log.
@@ -696,7 +696,7 @@ mod tests {
     /// old value as a silent no-op).
     #[test]
     fn workers_wire_tail_honors_set_subcommand() {
-        let wa = |n, action| WorkersArgs { n, action, client: None, root: None, json: false };
+        let wa = |n, action| WorkersArgs { n, action, client: None, queue: None, root: None, json: false };
         assert_eq!(workers_wire_tail(&wa(None, Some(WorkerAction::Set { n: 5 }))), vec!["workers", "set", "5"]);
         // Positional `N` still sets; `get` and bare both fetch.
         assert_eq!(workers_wire_tail(&wa(Some(3), None)), vec!["workers", "set", "3"]);
@@ -715,7 +715,7 @@ mod tests {
         // Flat source 0001_a.sh + dir target 0002_a/.
         std::fs::write(pending.join("0001_a.sh"), "echo hi\n").unwrap();
         std::fs::create_dir_all(pending.join("0002_a")).unwrap();
-        let args = PrioArgs { pattern: "0001_a".into(), n: 2, client: None, root: Some(root.display().to_string()), json: false };
+        let args = PrioArgs { pattern: "0001_a".into(), n: 2, client: None, queue: None, root: Some(root.display().to_string()), json: false };
         let err = agent_prio(&args).unwrap_err().to_string();
         assert!(err.contains("target name exists"), "flat->dir not refused: {err}");
         assert!(pending.join("0001_a.sh").exists() && pending.join("0002_a").exists());
@@ -725,7 +725,7 @@ mod tests {
         std::fs::create_dir_all(&pending).unwrap();
         std::fs::create_dir_all(pending.join("0001_b")).unwrap();
         std::fs::write(pending.join("0002_b.sh"), "echo hi\n").unwrap();
-        let args = PrioArgs { pattern: "0001_b".into(), n: 2, client: None, root: Some(root.display().to_string()), json: false };
+        let args = PrioArgs { pattern: "0001_b".into(), n: 2, client: None, queue: None, root: Some(root.display().to_string()), json: false };
         let err = agent_prio(&args).unwrap_err().to_string();
         assert!(err.contains("target name exists"), "dir->flat not refused: {err}");
         std::fs::remove_dir_all(&root).ok();

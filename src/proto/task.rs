@@ -85,6 +85,11 @@ pub fn parse_env_pairs(pairs: &[String]) -> anyhow::Result<BTreeMap<String, Stri
     Ok(env)
 }
 
+/// Missing historical targets mean this literal name, never a configured default.
+pub fn default_queue_name() -> String {
+    "default".into()
+}
+
 /// A staged server-side spool entry: metadata plus the rendered body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpoolEntry {
@@ -93,6 +98,10 @@ pub struct SpoolEntry {
     pub id: String,
     pub project: String,
     pub client: String,
+    #[serde(default = "default_queue_name")]
+    pub queue: String,
+    #[serde(default)]
+    pub qroot: Option<String>,
     pub meta: TaskMeta,
     pub submitted_at: String,
 }

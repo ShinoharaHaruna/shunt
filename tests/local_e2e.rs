@@ -73,7 +73,7 @@ fn localhost_submit_dispatch_execute_done() -> Result<()> {
     std::fs::create_dir_all(&workdir)?;
     let mut env = std::collections::BTreeMap::new();
     env.insert("E2E_HELLO".to_string(), "world".to_string());
-    registry::save_project(&registry::ProjectEntry { name: "proj".into(), desc: String::new(), repo: String::new(), defaults: Default::default(), bind: vec![registry::Binding { client: "localhost".into(), workdir: workdir.display().to_string(), env }] })?;
+    registry::save_project(&registry::ProjectEntry { name: "proj".into(), desc: String::new(), repo: String::new(), defaults: Default::default(), bind: vec![registry::Binding { client: "localhost".into(), queue: "default".into(), workdir: workdir.display().to_string(), env }] })?;
     spool::submit("localhost", Some("proj"), None, Some("e2e2"), None, &Default::default(), &["sh".into(), "-c".into(), "touch proj-$E2E_HELLO".into()])?;
     assert!(dispatch::sweep_with(&t)? >= 1);
     let deadline = Instant::now() + Duration::from_secs(30);

@@ -43,6 +43,9 @@ pub enum Command {
     /// Manage registered projects and their client bindings
     #[command(arg_required_else_help = true)]
     Project(ProjectCmd),
+    /// Manage named queues on a registered client
+    #[command(arg_required_else_help = true)]
+    Queue(QueueCmd),
     /// Run the spool dispatcher loop (server)
     Dispatch(DispatchArgs),
     /// Box-side SOCKS5 tunnel over ssh -R (server)
@@ -127,6 +130,9 @@ pub struct UpgradeArgs {
     /// Emit JSON
     #[arg(long)]
     pub json: bool,
+    /// Named queue on the selected server client
+    #[arg(long)]
+    pub queue: Option<String>,
 }
 
 #[derive(Args)]
@@ -189,6 +195,9 @@ pub struct SubmitArgs {
     // file positional; `trailing_var_arg` cannot combine with `last`.
     #[arg(last = true, num_args = 1.., allow_hyphen_values = true)]
     pub cmd: Vec<String>,
+    /// Named queue on the selected server client
+    #[arg(long)]
+    pub queue: Option<String>,
 }
 
 #[derive(Args)]
@@ -211,6 +220,9 @@ pub struct StatusArgs {
     /// Emit a single JSON object (wire protocol)
     #[arg(long)]
     pub json: bool,
+    /// Named queue on the selected server client
+    #[arg(long, conflicts_with_all = ["root", "all", "as_label"])]
+    pub queue: Option<String>,
 }
 
 #[derive(Args)]
@@ -229,6 +241,9 @@ pub struct LogsArgs {
     /// Print only the last N lines
     #[arg(short = 'n', long)]
     pub tail: Option<usize>,
+    /// Named queue on the selected server client
+    #[arg(long, conflicts_with = "root")]
+    pub queue: Option<String>,
 }
 
 #[derive(Args)]
@@ -307,6 +322,9 @@ pub struct PatternArgs {
     pub root: Option<String>,
     #[arg(long)]
     pub json: bool,
+    /// Named queue on the selected server client
+    #[arg(long, conflicts_with = "root")]
+    pub queue: Option<String>,
 }
 
 #[derive(Args)]
@@ -323,6 +341,9 @@ pub struct PrioArgs {
     pub root: Option<String>,
     #[arg(long)]
     pub json: bool,
+    /// Named queue on the selected server client
+    #[arg(long, conflicts_with = "root")]
+    pub queue: Option<String>,
 }
 
 #[derive(Args)]
@@ -341,6 +362,9 @@ pub struct WorkersArgs {
     pub root: Option<String>,
     #[arg(long, global = true)]
     pub json: bool,
+    /// Named queue on the selected server client
+    #[arg(long, global = true, conflicts_with = "root")]
+    pub queue: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -367,6 +391,9 @@ pub struct ShutdownArgs {
     pub root: Option<String>,
     #[arg(long, global = true)]
     pub json: bool,
+    /// Named queue on the selected server client
+    #[arg(long, global = true, conflicts_with = "root")]
+    pub queue: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -680,6 +707,9 @@ pub struct ClientAddArgs {
     /// next dispatch)
     #[arg(long)]
     pub exit_on_idle: bool,
+    /// Initial queue name (default: default)
+    #[arg(long)]
+    pub queue: Option<String>,
 }
 
 // Add is parsed once per invocation — a fat variant is fine and
@@ -799,8 +829,14 @@ pub enum ProjectAction {
     /// Bind the project to a client with a workdir + env overlay
     Bind {
         name: String,
+        /// Client name (or use --client)
+        #[arg(required_unless_present = "client", conflicts_with = "client")]
+        client_pos: Option<String>,
+        #[arg(long, required_unless_present = "client_pos")]
+        client: Option<String>,
+        /// Named queue; omitted resolves the client default
         #[arg(long)]
-        client: String,
+        queue: Option<String>,
         #[arg(long)]
         workdir: String,
         /// KEY=value env overlay entries (repeatable)
@@ -810,9 +846,68 @@ pub enum ProjectAction {
     /// Remove a binding
     Unbind {
         name: String,
+        /// Client name (or use --client)
+        #[arg(required_unless_present = "client", conflicts_with = "client")]
+        client_pos: Option<String>,
+        #[arg(long, required_unless_present = "client_pos")]
+        client: Option<String>,
+        /// Named queue; omitted resolves the client default
         #[arg(long)]
-        client: String,
+        queue: Option<String>,
     },
+}
+
+#[derive(Args)]
+pub struct QueueCmd {
+    #[command(subcommand)]
+    pub action: QueueAction,
+    /// Client name (default: server.toml default_client)
+    #[arg(short, long, global = true)]
+    pub client: Option<String>,
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+#[derive(Subcommand)]
+pub enum QueueAction {
+    /// Add queue configuration without contacting the client
+    Add {
+        name: String,
+        #[arg(long)]
+        qroot: String,
+        #[arg(long, default_value = "")]
+        env_setup: String,
+        #[arg(long, default_value = "bash")]
+        shell: String,
+        #[arg(long)]
+        exit_on_idle: bool,
+        #[arg(long)]
+        workers: Option<u32>,
+    },
+    /// List all registered queues
+    Ls,
+    /// Show a queue's configuration
+    Show { name: String },
+    /// Set the execution default without contacting the client
+    Default { name: String },
+    /// Remove an unreferenced queue, optionally deleting its qroot
+    Rm {
+        name: String,
+        #[arg(long)]
+        purge: bool,
+    },
+    /// Install the binary and initialize/start one queue
+    Bootstrap {
+        name: String,
+        #[arg(long)]
+        bin_path: Option<String>,
+    },
+    /// Push one queue's environment
+    Env { name: String },
+    /// Start one queue's daemon
+    Start { name: String },
+    /// Drain and stop one queue's daemon
+    Stop { name: String },
 }
 
 #[cfg(test)]
@@ -826,6 +921,52 @@ mod tests {
 
     fn parse(argv: &[&str]) -> Cli {
         Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?} failed: {e}"))
+    }
+
+    #[test]
+    fn named_queue_server_forms() {
+        for argv in [vec!["shunt", "submit", "-c", "box", "--queue", "fast", "--", "true"], vec!["shunt", "status", "-c", "box", "--queue", "fast", "--json"], vec!["shunt", "logs", "-c", "box", "--queue", "fast"], vec!["shunt", "cancel", "train", "-c", "box", "--queue", "fast"], vec!["shunt", "prio", "train", "1", "-c", "box", "--queue", "fast"], vec!["shunt", "kill", "train", "-c", "box", "--queue", "fast"], vec!["shunt", "workers", "set", "2", "-c", "box", "--queue", "fast", "--json"], vec!["shunt", "shutdown", "on", "-c", "box", "--queue", "fast", "--json"], vec!["shunt", "upgrade", "-c", "box", "--queue", "fast", "--check"]] {
+            parse(&argv);
+        }
+        let cli = parse(&["shunt", "status", "--queue", "fast"]);
+        let Command::Status(s) = cli.command else { panic!() };
+        assert_eq!(s.queue.as_deref(), Some("fast"));
+    }
+
+    #[test]
+    fn named_queue_rejects_local_roots_and_aggregate() {
+        for argv in [vec!["shunt", "status", "--all", "--queue", "fast"], vec!["shunt", "status", "--as", "p", "--queue", "fast"], vec!["shunt", "status", "--root", "/tmp/q", "--queue", "fast"], vec!["shunt", "logs", "--root", "/tmp/q", "--queue", "fast"], vec!["shunt", "cancel", "train", "--root", "/tmp/q", "--queue", "fast"], vec!["shunt", "prio", "train", "1", "--root", "/tmp/q", "--queue", "fast"], vec!["shunt", "kill", "train", "--root", "/tmp/q", "--queue", "fast"], vec!["shunt", "workers", "set", "2", "--root", "/tmp/q", "--queue", "fast"], vec!["shunt", "shutdown", "on", "--root", "/tmp/q", "--queue", "fast"]] {
+            assert!(Cli::try_parse_from(&argv).is_err(), "accepted {argv:?}");
+        }
+    }
+
+    #[test]
+    fn queue_actions_accept_global_flags_in_both_positions() {
+        for action in [vec!["add", "fast", "--qroot", "/tmp/fast", "--workers", "2"], vec!["ls"], vec!["show", "fast"], vec!["default", "fast"], vec!["rm", "fast", "--purge"], vec!["bootstrap", "fast", "--bin-path", "/tmp/shunt"], vec!["env", "fast"], vec!["start", "fast"], vec!["stop", "fast"]] {
+            for before in [true, false] {
+                let mut argv = vec!["shunt", "queue"];
+                if before {
+                    argv.extend(["-c", "box", "--json"]);
+                }
+                argv.extend(&action);
+                if !before {
+                    argv.extend(["-c", "box", "--json"]);
+                }
+                let cli = parse(&argv);
+                let Command::Queue(q) = cli.command else { panic!() };
+                assert_eq!(q.client.as_deref(), Some("box"));
+                assert!(q.json);
+            }
+        }
+    }
+
+    #[test]
+    fn project_pair_and_initial_queue_forms() {
+        for argv in [vec!["shunt", "project", "bind", "p", "box", "--queue", "fast", "--workdir", "/work"], vec!["shunt", "project", "bind", "p", "--client", "box", "--queue", "fast", "--workdir", "/work"], vec!["shunt", "project", "unbind", "p", "box", "--queue", "fast"], vec!["shunt", "project", "unbind", "p", "--client", "box", "--queue", "fast"], vec!["shunt", "client", "add", "box", "--queue", "fast"]] {
+            parse(&argv);
+        }
+        assert!(Cli::try_parse_from(["shunt", "project", "bind", "p", "--workdir", "/work"]).is_err());
+        assert!(Cli::try_parse_from(["shunt", "project", "unbind", "p", "box", "--client", "other"]).is_err());
     }
 
     #[test]

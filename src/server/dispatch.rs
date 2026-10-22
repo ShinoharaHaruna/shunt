@@ -8,7 +8,7 @@ use crate::server::registry;
 use crate::server::spool;
 use crate::server::transport::{wire_argv, Transport};
 use anyhow::Result;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const DEFAULT_POLL_S: u64 = 15;
 
@@ -20,15 +20,18 @@ const DEFAULT_POLL_S: u64 = 15;
 /// first periodic probe and resumes full service.
 const PROBE_BACKOFF_EVERY: u64 = 4;
 
-/// Per-client reachability for one sweep.
+/// Per-queue reachability for one sweep.
 enum Reach {
     /// status --json answered; carries daemon liveness.
     Up { daemon_alive: bool },
-    /// ssh failed entirely (box off). Skip quietly.
+    /// This queue's status failed without proof of a machine outage.
     Down,
+    /// SSH exhausted its connection retries; siblings share that outage.
+    ConnectionDown,
 }
 
 fn probe_client(t: &dyn Transport, client: &registry::ClientEntry) -> Reach {
+    let failures = registry::conn_fail_read(&client.name);
     match t.exec(client, &wire_argv(client, &["status", "--json"]), None) {
         Ok(out) => match crate::proto::wire::parse::<StatusReport>(&out) {
             Ok(rep) => Reach::Up { daemon_alive: rep.daemon.alive },
@@ -41,7 +44,14 @@ fn probe_client(t: &dyn Transport, client: &registry::ClientEntry) -> Reach {
                 Reach::Down
             }
         },
-        Err(_) => Reach::Down,
+        Err(e) => {
+            eprintln!("dispatch: {} queue at {} status failed: {e:#}", client.name, client.qroot);
+            if registry::conn_fail_read(&client.name) > failures {
+                Reach::ConnectionDown
+            } else {
+                Reach::Down
+            }
+        }
     }
 }
 
@@ -108,7 +118,10 @@ pub fn sweep_at(t: &dyn Transport, idx: u64) -> Result<usize> {
 fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
     let entries = spool::list()?;
     let mut clients: BTreeMap<String, registry::ClientEntry> = BTreeMap::new();
-    let mut reach: BTreeMap<String, Reach> = BTreeMap::new();
+    let mut reach: BTreeMap<(String, String), Reach> = BTreeMap::new();
+    let mut checked = BTreeSet::new();
+    let mut down = BTreeSet::new();
+    let mut live = BTreeSet::new();
     let mut pushed = 0;
     let tunnels = match crate::server::tunnel::list() {
         Ok(names) => names,
@@ -136,45 +149,81 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
             continue;
         }
 
+        if checked.insert(name.clone()) && registry::conn_fail_read(&name) >= registry::CONN_FAIL_ESCALATE && !idx.is_multiple_of(PROBE_BACKOFF_EVERY) {
+            down.insert(name.clone());
+        }
+        if down.contains(&name) {
+            continue;
+        }
+        // A spool probe already discharged this client's tunnel responsibility.
+        if entry.is_none() && live.contains(&name) {
+            continue;
+        }
+        let queue = match &entry {
+            Some(entry) => entry.queue.clone(),
+            // Tunnel maintenance must not require a configured execution default.
+            None => match registry::queue_names(client).into_iter().next() {
+                Some(queue) => queue,
+                None => continue,
+            },
+        };
+        let target = match registry::resolve_queue(client, Some(&queue)) {
+            Ok(target) => target,
+            Err(e) => {
+                eprintln!("dispatch: {name} queue {queue} retained: {e:#}");
+                continue;
+            }
+        };
+        let mut entry = entry;
+        if let Some(entry) = &mut entry {
+            if let Err(e) = spool::pin_target(entry, &target.client.qroot) {
+                eprintln!("dispatch: {} retained: {e:#}", entry.id);
+                continue;
+            }
+        }
         let owned = crate::server::transport::transport_for(client);
         let t: &dyn Transport = forced.unwrap_or_else(|| owned.as_ref());
-
-        if let std::collections::btree_map::Entry::Vacant(v) = reach.entry(name.clone()) {
-            let r = if registry::conn_fail_read(&client.name) >= registry::CONN_FAIL_ESCALATE && !idx.is_multiple_of(PROBE_BACKOFF_EVERY) {
-                // Known-dead box between periodic probes: skip the
-                // connect entirely this sweep.
-                Reach::Down
-            } else {
-                probe_client(t, client)
-            };
+        let key = (name.clone(), queue.clone());
+        if let std::collections::btree_map::Entry::Vacant(v) = reach.entry(key.clone()) {
+            let r = probe_client(t, &target.client);
             if let Reach::Up { daemon_alive } = r {
                 if !daemon_alive {
-                    // Auto-heal: ssh works but shuntd is dead; start it once.
-                    match t.exec(client, &wire_argv(client, &["start", "--json"]), None) {
-                        Ok(_) => eprintln!("dispatch: {} daemon restarted", client.name),
-                        Err(e) => eprintln!("dispatch: {} start failed: {e:#}", client.name),
+                    let failures = registry::conn_fail_read(&name);
+                    match t.exec(&target.client, &wire_argv(&target.client, &["start", "--json"]), None) {
+                        Ok(_) => eprintln!("dispatch: {name} queue {queue} daemon restarted"),
+                        Err(e) => {
+                            eprintln!("dispatch: {name} queue {queue} start failed: {e:#}");
+                            if registry::conn_fail_read(&name) > failures {
+                                down.insert(name.clone());
+                            }
+                        }
                     }
                 }
-                // Tunnel self-heal (design.md §4.3): a dead tunnel ssh
-                // leaves ALL_PROXY pointing at a dead proxy, poisoning
-                // every task on a live box. Only runs when the probe
-                // actually happened — backoff-skipped probes above
-                // also skip this, so a dead box never pays for it.
-                if !client.local && crate::server::tunnel::recorded(&client.name).unwrap_or(false) {
+                // The machine's tunnel is reconciled once, across all registered roots.
+                if !down.contains(&name) && live.insert(name.clone()) && !client.local && crate::server::tunnel::recorded(&name).unwrap_or(false) {
+                    let failures = registry::conn_fail_read(&name);
                     match crate::server::tunnel::heal(t, client) {
-                        Ok(crate::server::tunnel::Heal::Reconnected(pid)) => eprintln!("dispatch: {} tunnel reconnected pid {pid}", client.name),
-                        Ok(crate::server::tunnel::Heal::Stripped) => eprintln!("dispatch: {} tunnel dead; ALL_PROXY stripped from env", client.name),
+                        Ok(crate::server::tunnel::Heal::Reconnected(pid)) => eprintln!("dispatch: {name} tunnel reconnected pid {pid}"),
+                        Ok(crate::server::tunnel::Heal::Stripped) => eprintln!("dispatch: {name} tunnel dead; ALL_PROXY stripped from env"),
                         Ok(_) => {}
-                        Err(e) => eprintln!("dispatch: {} tunnel heal failed: {e:#}", client.name),
+                        Err(e) => eprintln!("dispatch: {name} tunnel heal failed: {e:#}"),
+                    }
+                    if registry::conn_fail_read(&name) > failures {
+                        down.insert(name.clone());
                     }
                 }
             }
+            if matches!(r, Reach::ConnectionDown) {
+                down.insert(name.clone());
+            }
             v.insert(r);
         }
-        if matches!(reach[&name], Reach::Down) {
-            continue; // box off is normal; leave for next poll
+        if !matches!(reach[&key], Reach::Up { .. }) || down.contains(&name) {
+            continue;
         }
         let Some(entry) = entry else { continue };
+        let failures = registry::conn_fail_read(&name);
+        let client = &target.client;
 
         match spool::body(&entry.id).and_then(|b| push(t, client, &entry, &b)) {
             Ok((name, deduped)) => {
@@ -199,6 +248,9 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
                 pushed += 1;
             }
             Err(e) => eprintln!("dispatch: {} retained: {e:#}", entry.id),
+        }
+        if registry::conn_fail_read(&client.name) > failures {
+            down.insert(client.name.clone());
         }
     }
     Ok(pushed)

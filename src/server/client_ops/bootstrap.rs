@@ -1,11 +1,11 @@
 //! `client bootstrap` (design.md §7): key + binary ship + remote
 //! init/start + facts merge. Doubles as the binary upgrade path.
 
-use super::env::push_env;
+use super::env::push_resolved_env;
 use super::keys::{deploy_key, ensure_key};
 use super::probe::probe_facts;
 use super::{compat, release};
-use crate::server::registry::{self, ClientEntry};
+use crate::server::registry::{self, ClientEntry, ResolvedQueue};
 use crate::server::transport::{shell_quote, shunt_bin, Transport};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -13,23 +13,30 @@ use std::path::PathBuf;
 /// The musl build recipe named in every incompatibility error.
 const MUSL_RECIPE: &str = "rustup target add x86_64-unknown-linux-musl && cargo build --release --target x86_64-unknown-linux-musl";
 
-/// `shunt client bootstrap <name>`: ensure key + try deploy, probe,
-/// ship the local binary to `<qroot>/bin/shunt`, remote `init` +
-/// `start`, push env_setup, merge facts.
-///
-/// `--bin-path` (flag) > row `bin_path` > `current_exe()`: an
-/// explicit path is the operator's choice — a glibc/musl mismatch
-/// fails with the musl recipe rather than substituting a binary.
-/// The auto path rescues via the matching release musl asset (§15).
+/// Bootstrap every registered queue, sharing one instance identity and facts probe.
 pub fn bootstrap(t: &dyn Transport, name: &str, bin_path: Option<&str>) -> Result<()> {
+    bootstrap_selected(t, name, None, bin_path)?;
+    println!("bootstrapped {name}");
+    Ok(())
+}
+
+/// Bootstrap one queue without changing the instance's configured default.
+pub fn bootstrap_queue(t: &dyn Transport, name: &str, queue: &str, bin_path: Option<&str>) -> Result<()> {
+    bootstrap_selected(t, name, Some(queue), bin_path)
+}
+
+fn bootstrap_selected(t: &dyn Transport, name: &str, queue: Option<&str>, bin_path: Option<&str>) -> Result<()> {
     let mut entry = registry::load_client(name)?;
-    // Any row: an empty qroot renders shunt_bin as `/bin/shunt` (the
-    // stage-then-mv would target SYSTEM /bin) and wire ops pass
-    // `--root ""`, landing queue dirs in the cwd.
-    if entry.qroot.is_empty() {
-        anyhow::bail!("{}: qroot is empty — set it in the row (usually <deploy_root>/queue)", entry.name);
-    }
+    // Validate every target before generating keys or contacting the instance.
+    let targets = match queue {
+        Some(q) => vec![registry::resolve_queue(&entry, Some(q))?],
+        None => registry::all_queues(&entry)?,
+    };
+    let original_key = entry.ssh.key.clone();
     ensure_key(&mut entry)?;
+    if entry.ssh.key != original_key {
+        registry::save_client(&entry)?;
+    }
     if deploy_key(&entry)? {
         eprintln!("key deployed: {}", entry.ssh.key);
     } else if !entry.local && entry.ssh.password.is_empty() || entry.shared {
@@ -37,24 +44,53 @@ pub fn bootstrap(t: &dyn Transport, name: &str, bin_path: Option<&str>) -> Resul
         eprintln!("note: {why} — install {}.pub on the box once\n      (vendor console or: ssh-copy-id -i {}.pub -p {} {}@{})", entry.ssh.key, entry.ssh.key, entry.ssh.port, entry.ssh.user, entry.ssh.host);
     }
 
+    let mut failures = Vec::new();
+    let mut probe_target = None;
+    for target in targets {
+        // Resolve again after key generation; execution views must never be saved.
+        let resolved = registry::resolve_queue(&entry, Some(&target.name))?;
+        match bootstrap_resolved(t, &resolved, bin_path) {
+            Ok(()) => {
+                if probe_target.is_none() {
+                    probe_target = Some(resolved);
+                }
+            }
+            Err(err) => failures.push(format!("{}: {err:#}", target.name)),
+        }
+    }
+    if let Some(target) = probe_target {
+        match probe_facts(t, &target.client) {
+            Ok(facts) => entry.facts.extend(facts),
+            Err(err) => failures.push(format!("probe: {err:#}")),
+        }
+    }
+    let path = registry::save_client(&entry)?;
+    eprintln!("wrote {}", path.display());
+    anyhow::ensure!(failures.is_empty(), "bootstrap incomplete for {name}: {}", failures.join("; "));
+    Ok(())
+}
+
+fn bootstrap_resolved(t: &dyn Transport, queue: &ResolvedQueue, bin_path: Option<&str>) -> Result<()> {
+    let entry = &queue.client;
+    let name = &entry.name;
     // .shunt-owner claim (§4.1): two independent shunt installs
     // pointed at the same qroot silently merge into one queue —
     // seq races between two dispatchers, one daemon serving both.
     // One atomic remote script, BEFORE any write: `set -C` gives
     // create-exclusive so a simultaneous claim cannot interleave —
     // a later bootstrap can never preempt an earlier owner's qroot.
-    if let Some(pubkey) = owner_pubkey(&entry) {
-        let owner = owner_path(&entry);
-        let verdict = t.exec(&entry, &["sh".into(), "-c".into(), CLAIM_SCRIPT.into(), owner, pubkey], None).context("claim .shunt-owner")?;
+    if let Some(pubkey) = owner_pubkey(entry) {
+        let owner = owner_path(entry);
+        let verdict = t.exec(entry, &["sh".into(), "-c".into(), CLAIM_SCRIPT.into(), owner, pubkey], None).context("claim .shunt-owner")?;
         let verdict = verdict.trim();
         if verdict == "FOREIGN" {
-            anyhow::bail!("qroot {} is claimed by a different shunt install (.shunt-owner mismatch) — pick a different qroot in the row; if the other install is gone, remove {}", entry.qroot, owner_path(&entry));
+            anyhow::bail!("qroot {} is claimed by a different shunt install (.shunt-owner mismatch) — pick a different qroot in the row; if the other install is gone, remove {}", entry.qroot, owner_path(entry));
         }
         anyhow::ensure!(matches!(verdict, "OWNED" | "CLAIMED"), "unexpected .shunt-owner claim reply: {verdict:?}");
     }
-    let bin = shunt_bin(&entry);
+    let bin = shunt_bin(entry);
     let bindir = bin.rsplit_once('/').map(|(d, _)| d).unwrap_or("").to_string();
-    t.exec(&entry, &["mkdir".into(), "-p".into(), bindir.clone()], None).context("mkdir remote bin dir")?;
+    t.exec(entry, &["mkdir".into(), "-p".into(), bindir.clone()], None).context("mkdir remote bin dir")?;
 
     // §15: pick the binary, verify the box's loader can serve it,
     // rescue via the matching musl release when it can't.
@@ -70,7 +106,7 @@ pub fn bootstrap(t: &dyn Transport, name: &str, bin_path: Option<&str>) -> Resul
     let mut ship = local.clone();
     let mut _rescue = None; // keeps the downloaded TempBin alive until copy_to ran
     if needs.is_some() {
-        if let compat::Verdict::Incompatible(why) = compat::check(needs, compat::remote_libc(t, &entry).as_ref()) {
+        if let compat::Verdict::Incompatible(why) = compat::check(needs, compat::remote_libc(t, entry).as_ref()) {
             if explicit.is_some() {
                 anyhow::bail!("{why} — {} cannot run on {name}; ship a libc-independent build: {MUSL_RECIPE}", local.display());
             }
@@ -88,7 +124,7 @@ pub fn bootstrap(t: &dyn Transport, name: &str, bin_path: Option<&str>) -> Resul
         // bin_path persists across re-bootstraps (the upgrade path) —
         // print what's being shipped vs what we run so drift is loud.
         let v = |p: &PathBuf| std::process::Command::new(p).arg("--version").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_else(|| "?".into());
-        println!("ship {} ({})", ship.display(), v(&ship));
+        eprintln!("ship {} ({})", ship.display(), v(&ship));
     }
 
     // Stage-then-mv: scp truncates the destination in place, which
@@ -96,40 +132,31 @@ pub fn bootstrap(t: &dyn Transport, name: &str, bin_path: Option<&str>) -> Resul
     // doubles as the binary upgrade path (init/start are idempotent),
     // so it must be safe to re-run on a live box.
     let staged = format!("{bin}.new");
-    t.copy_to(&entry, &ship, &staged).context("copy shunt binary")?;
-    t.exec(&entry, &["chmod".into(), "+x".into(), staged.clone()], None)?;
-    t.exec(&entry, &["mv".into(), "-f".into(), staged, bin.clone()], None).context("install shunt binary")?;
+    t.copy_to(entry, &ship, &staged).context("copy shunt binary")?;
+    t.exec(entry, &["chmod".into(), "+x".into(), staged.clone()], None)?;
+    t.exec(entry, &["mv".into(), "-f".into(), staged, bin.clone()], None).context("install shunt binary")?;
 
     // Post-install smoke (§15): `exec` returns stdout only, so the
     // loader's stderr (weak-version warnings) is merged in via 2>&1.
-    let smoke = t.exec(&entry, &["sh".into(), "-c".into(), format!("{} --version 2>&1", shell_quote(&bin))], None).context("shipped binary cannot run on the box")?;
+    let smoke = t.exec(entry, &["sh".into(), "-c".into(), format!("{} --version 2>&1", shell_quote(&bin))], None).context("shipped binary cannot run on the box")?;
     for line in smoke.lines() {
         if line.trim_start().starts_with("shunt ") {
-            println!("remote: {}", line.trim());
+            eprintln!("remote: {}", line.trim());
         } else if !line.trim().is_empty() {
             eprintln!("warning (box): {line}");
         }
     }
 
-    t.exec(&entry, &[bin.clone(), "init".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt init")?;
-    t.exec(&entry, &[bin.clone(), "start".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt start")?;
-
-    // Probe AFTER the binary lands: the wire `shunt probe` is the
-    // single facts implementation (design.md §8).
-    let facts = probe_facts(t, &entry)?;
-    entry.facts.extend(facts);
-
-    // env_setup/shell/exit_on_idle only push when the row actually
-    // carries them; an empty push would clobber a box-side edit,
-    // which is not the contract bootstrap has with the registry.
-    if !entry.env_setup.is_empty() || !entry.shell.is_empty() || entry.exit_on_idle {
-        if let Err(e) = push_env(t, name) {
-            eprintln!("note: env_setup push failed: {e:#}");
-        }
+    t.exec(entry, &[bin.clone(), "init".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt init")?;
+    // Apply residency and worker preferences before the daemon can claim its first task.
+    // Empty legacy preferences preserve box-side edits during bootstrap.
+    if !entry.env_setup.is_empty() || !entry.shell.is_empty() || entry.exit_on_idle || queue.workers.is_some() {
+        push_resolved_env(t, queue)?;
+    } else {
+        crate::server::tunnel::sync_queue_env(t, &entry.name, &queue.name)?;
     }
-    let p = registry::save_client(&entry)?;
-    println!("bootstrapped {} ({})", entry.name, bin);
-    println!("wrote {}", p.display());
+    t.exec(entry, &[bin.clone(), "start".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt start")?;
+    eprintln!("bootstrapped {} queue {} ({})", entry.name, queue.name, bin);
     Ok(())
 }
 
@@ -219,9 +246,14 @@ mod tests {
         /// Marker the .shunt-owner claim script answers.
         claim: &'static str,
         copied: Mutex<Vec<(PathBuf, String)>>,
+        calls: Mutex<Vec<RecordedCall>>,
     }
+    /// (queue root, argv, stdin) observed by the fake transport.
+    type RecordedCall = (String, Vec<String>, Option<String>);
+
     impl Transport for Stub {
-        fn exec(&self, _c: &ClientEntry, argv: &[String], _s: Option<&str>) -> anyhow::Result<String> {
+        fn exec(&self, c: &ClientEntry, argv: &[String], stdin: Option<&str>) -> anyhow::Result<String> {
+            self.calls.lock().unwrap().push((c.qroot.clone(), argv.to_vec(), stdin.map(str::to_string)));
             let j = argv.join(" ");
             if j.contains("ldd --version") {
                 return Ok(self.ldd.into());
@@ -262,7 +294,7 @@ mod tests {
     fn bootstrap_refuses_foreign_owned_qroot() {
         let _g = HOME_LOCK.lock().unwrap();
         let (tmp, _e) = fixture("foreign");
-        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "FOREIGN", copied: Mutex::new(Vec::new()) };
+        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "FOREIGN", copied: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()) };
         let err = bootstrap(&t, "foreign", None).unwrap_err();
         std::env::remove_var("SHUNT_HOME");
         std::fs::remove_dir_all(&tmp).ok();
@@ -294,7 +326,7 @@ mod tests {
     fn bootstrap_reowns_same_pub() {
         let _g = HOME_LOCK.lock().unwrap();
         let (tmp, _e) = fixture("reown");
-        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "OWNED", copied: Mutex::new(Vec::new()) };
+        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "OWNED", copied: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()) };
         bootstrap(&t, "reown", None).unwrap();
         std::env::remove_var("SHUNT_HOME");
         assert_eq!(t.copied.lock().unwrap().len(), 1);
@@ -316,7 +348,7 @@ mod tests {
         let probe = PathBuf::from("/bin/sh");
         let needs = crate::server::client_ops::compat::required_glibc(&probe).unwrap();
         assert!(needs.is_some(), "/bin/sh must be glibc-linked for this test");
-        let t = Stub { ldd: "ldd (GNU libc) 2.0", claim: "CLAIMED", copied: Mutex::new(Vec::new()) };
+        let t = Stub { ldd: "ldd (GNU libc) 2.0", claim: "CLAIMED", copied: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()) };
         let err = bootstrap(&t, "stub-old", Some("/bin/sh")).unwrap_err();
         std::env::remove_var("SHUNT_HOME");
         std::fs::remove_dir_all(&tmp).ok();
@@ -332,7 +364,7 @@ mod tests {
     fn bootstrap_compatible_box_ships() {
         let _g = HOME_LOCK.lock().unwrap();
         let (tmp, _e) = fixture("stub-ok");
-        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "CLAIMED", copied: Mutex::new(Vec::new()) };
+        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "CLAIMED", copied: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()) };
         bootstrap(&t, "stub-ok", None).unwrap();
         std::env::remove_var("SHUNT_HOME");
         let copied = t.copied.lock().unwrap();
@@ -340,5 +372,60 @@ mod tests {
         assert_eq!(copied[0].1, "/q/bin/shunt.new");
         assert_eq!(copied[0].0, std::env::current_exe().unwrap());
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn bootstrap_all_queues_applies_preferences_before_start_and_saves_base() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let (tmp, mut entry) = fixture("multi");
+        entry.qroot.clear();
+        for (name, root, workers) in [("alpha", "/data/alpha", Some(7)), ("beta", "/data/beta", None)] {
+            entry.queues.insert(name.into(), registry::QueueEntry { qroot: root.into(), env_setup: format!("export TARGET={name}"), shell: "bash".into(), exit_on_idle: true, workers });
+        }
+        registry::save_client(&entry).unwrap();
+        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "OWNED", copied: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()) };
+        bootstrap(&t, "multi", None).unwrap();
+        let saved = registry::load_client("multi").unwrap();
+        assert!(saved.qroot.is_empty() && saved.env_setup.is_empty() && saved.shell.is_empty());
+        assert!(!saved.exit_on_idle);
+        assert_eq!(saved.ssh.key, entry.ssh.key);
+        assert_eq!(serde_json::to_value(&saved.queues).unwrap(), serde_json::to_value(&entry.queues).unwrap());
+        assert_eq!(saved.default_queue, None);
+        assert_eq!(saved.facts["cores"], 4);
+        let calls = t.calls.lock().unwrap();
+        assert_eq!(calls.iter().filter(|(_, argv, _)| argv.iter().any(|arg| arg == "probe")).count(), 1);
+        for root in ["/data/alpha", "/data/beta"] {
+            let scoped: Vec<_> = calls.iter().filter(|(qroot, _, _)| qroot == root).collect();
+            let start = scoped.iter().position(|(_, argv, _)| argv.iter().any(|arg| arg == "start")).unwrap();
+            let residency = scoped.iter().position(|(_, argv, content)| argv.last() == Some(&format!("{root}/exit_on_idle")) && content.as_deref() == Some("1\n")).unwrap();
+            assert!(residency < start, "residency must precede the first task");
+            let worker = scoped.iter().position(|(_, argv, _)| argv.iter().any(|arg| arg == "workers"));
+            if root.ends_with("alpha") {
+                assert!(worker.unwrap() < start);
+                assert!(scoped[worker.unwrap()].1.windows(3).any(|args| args == ["workers", "set", "7"]));
+            } else {
+                assert!(worker.is_none(), "unset workers must preserve live tuning");
+            }
+        }
+        assert_eq!(t.copied.lock().unwrap().iter().map(|(_, path)| path.as_str()).collect::<Vec<_>>(), ["/data/alpha/bin/shunt.new", "/data/beta/bin/shunt.new"]);
+        std::env::remove_var("SHUNT_HOME");
+        std::fs::remove_dir_all(tmp).ok();
+    }
+
+    #[test]
+    fn bootstrap_queue_ignores_execution_default_and_preserves_legacy_empty_env() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let (tmp, mut entry) = fixture("selected");
+        registry::canonicalize_queues(&mut entry).unwrap();
+        entry.queues.insert("other".into(), registry::QueueEntry { qroot: "/data/other".into(), env_setup: String::new(), shell: String::new(), exit_on_idle: false, workers: None });
+        registry::save_client(&entry).unwrap();
+        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "OWNED", copied: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()) };
+        super::bootstrap_queue(&t, "selected", "other", None).unwrap();
+        let calls = t.calls.lock().unwrap();
+        assert!(calls.iter().all(|(root, _, _)| root == "/data/other"));
+        assert!(!calls.iter().any(|(_, argv, _)| argv.iter().any(|arg| arg.ends_with("/env_setup") || arg.ends_with("/shell") || arg.ends_with("/exit_on_idle"))));
+        assert_eq!(registry::load_client("selected").unwrap().default_queue.as_deref(), Some("default"));
+        std::env::remove_var("SHUNT_HOME");
+        std::fs::remove_dir_all(tmp).ok();
     }
 }

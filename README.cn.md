@@ -127,6 +127,8 @@ shunt shutdown -c gpu-a on
 | **Spool** —— 提交先暂存，直到机器确认收讫。                                 | **守护进程** —— 领取任务、运行 worker、记录日志、恢复孤儿条目。       |
 | **Dispatcher** —— 通过 SSH 推送任务，拉起已死但可达的守护进程。             | **空闲关机** —— 关机前检查本机队列和已登记的兄弟队列。                |
 
+一个 client 是一台受管实例、一个 SSH 身份；其下的具名 queue 各自拥有独立的 qroot、序列号空间、worker 池和守护进程——用 `shunt queue add eval -c gpu-a --qroot /root/autodl-tmp/queue-eval` 加第二条队列，`shunt queue bootstrap eval -c gpu-a` 初始化，然后用 `--queue eval` 指定 `submit`、`status`、`logs`、`cancel`、`prio`、`kill`、`workers`、`shutdown` 的目标。项目绑定的是 `(client, queue)` 对。存在多条队列时，不带 `--queue` 的操作落到 `queue default` 指定的默认队列；已暂存的任务固定在其提交时选定的队列，默认之后再改也不会改投。
+
 通信链路就是 `ssh <box> 'shunt <cmd> --json'`。不需要 HTTP 服务，也不需要机器反向连接开发机。同一个二进制还为 `localhost` 提供本地 transport。
 
 ### 一个可以直接检查的队列
@@ -141,21 +143,23 @@ shunt shutdown -c gpu-a on
 
 以下命令都在开发机上运行。针对具体 client 的示例使用已注册的 `gpu-a`。
 
-| 意图                          | 命令                             |
-| ----------------------------- | -------------------------------- |
-| 查看所有已登记的机器          | `shunt status --all --json`      |
-| 查看等待投递的提交            | `shunt spool ls`                 |
-| 按 ID 查看某个已提交的任务    | `shunt task show <id> --json`    |
-| 读取 server 侧的任务事件流    | `shunt task events`              |
-| 调整 worker 池大小            | `shunt workers 4 -c gpu-a`       |
-| 把一个 pending 任务提到队首   | `shunt prio exp1 0 -c gpu-a`     |
-| 取消一个 pending 任务         | `shunt cancel exp1 -c gpu-a`     |
-| 停掉一个 running 任务的进程组 | `shunt kill exp1 -c gpu-a`       |
-| 开启空闲关机                  | `shunt shutdown -c gpu-a on`     |
-| 关闭空闲关机                  | `shunt shutdown -c gpu-a off`    |
-| 查看解析出的关机命令          | `shunt shutdown -c gpu-a status` |
-| 刷新机器信息                  | `shunt client probe gpu-a`       |
-| 打开可选的机器侧 SOCKS5 代理  | `shunt tunnel up -c gpu-a`       |
+| 意图                          | 命令                                              |
+| ----------------------------- | ------------------------------------------------- |
+| 查看所有已登记的机器          | `shunt status --all --json`                       |
+| 查看等待投递的提交            | `shunt spool ls`                                  |
+| 按 ID 查看某个已提交的任务    | `shunt task show <id> --json`                     |
+| 读取 server 侧的任务事件流    | `shunt task events`                               |
+| 调整 worker 池大小            | `shunt workers 4 -c gpu-a`                        |
+| 把一个 pending 任务提到队首   | `shunt prio exp1 0 -c gpu-a`                      |
+| 取消一个 pending 任务         | `shunt cancel exp1 -c gpu-a`                      |
+| 停掉一个 running 任务的进程组 | `shunt kill exp1 -c gpu-a`                        |
+| 开启空闲关机                  | `shunt shutdown -c gpu-a on`                      |
+| 关闭空闲关机                  | `shunt shutdown -c gpu-a off`                     |
+| 查看解析出的关机命令          | `shunt shutdown -c gpu-a status`                  |
+| 刷新机器信息                  | `shunt client probe gpu-a`                        |
+| 列出机器上的队列              | `shunt queue ls -c gpu-a`                         |
+| 提交到指定队列                | `shunt submit -c gpu-a --queue eval -- ./task.sh` |
+| 打开可选的机器侧 SOCKS5 代理  | `shunt tunnel up -c gpu-a`                        |
 
 像 `exp1` 这样的任务控制 pattern 必须能唯一匹配一个任务；pattern 有歧义时请用完整的队列名。任务台账把提交 ID 映射到队列名。`task show` 会按需向机器查询以确定结果；超出近期状态窗口的条目可能显示为 `unknown`。
 
