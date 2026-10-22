@@ -287,12 +287,14 @@ fn unread_count(dir: &Path, label: &str) -> usize {
     msg_numbers(dir).into_iter().filter(|&n| n > mark).count()
 }
 
-/// Set `readers/<label>.json` to the stream's current max N — called
-/// AFTER a say/read/decide so the op's own message counts as read
-/// (§17.5). Temp-then-rename + 0600; then the 64-file cap evicts
-/// oldest-mtime first.
-fn mark(dir: &Path, label: &str) -> Result<()> {
-    let max_n = msg_numbers(dir).last().copied().unwrap_or(0);
+/// A read supplies its returned high-water mark; say/decide acknowledge
+/// the current live maximum. Serialize the read-modify-write and eviction
+/// so an older shared-label caller cannot regress a newer cursor or race
+/// on the same temporary file. Message loading stays outside the lock.
+fn mark(dir: &Path, label: &str, through: Option<u32>) -> Result<()> {
+    let _lock = seq_lock(dir)?;
+    let _ = fs::set_permissions(dir.join(".seq.lock"), fs::Permissions::from_mode(0o600));
+    let max_n = through.unwrap_or_else(|| msg_numbers(dir).last().copied().unwrap_or(0)).max(last_read(dir, label));
     let rdir = dir.join("readers");
     private_dir(&rdir)?;
     let path = rdir.join(format!("{label}.json"));
@@ -404,7 +406,7 @@ pub fn say(room: &str, label: &str, body: &str) -> Result<(u32, bool)> {
         }
         n
     };
-    mark(&dir, label)?;
+    mark(&dir, label, None)?;
     Ok((n, member))
 }
 
@@ -424,14 +426,16 @@ fn load_msgs(dir: &Path) -> Vec<(u32, Msg)> {
 }
 
 /// `room read` (§17.2/§17.5): returns messages past the caller's
-/// mark (or the full stream when `all`), then sets the mark to the
-/// current max — either way, a read is engagement and marks.
+/// mark (or the full live stream when `all`). Only successfully loaded,
+/// returned messages advance the cursor; concurrent arrivals stay unread.
 pub fn read(room: &str, label: &str, all: bool) -> Result<Vec<(u32, Msg)>> {
     let (_, dir) = resolve(room)?;
     let msgs = load_msgs(&dir);
     let mark0 = last_read(&dir, label);
-    mark(&dir, label)?;
-    Ok(if all { msgs } else { msgs.into_iter().filter(|(n, _)| *n > mark0).collect() })
+    let returned: Vec<_> = if all { msgs } else { msgs.into_iter().filter(|(n, _)| *n > mark0).collect() };
+    let through = returned.last().map(|(n, _)| *n).unwrap_or(0);
+    mark(&dir, label, Some(through))?;
+    Ok(returned)
 }
 
 /// `room decide` (§17.2): overwrite meta.decision — latest wins.
@@ -449,7 +453,7 @@ pub fn decide(room: &str, label: &str, note: &str) -> Result<Decision> {
     // degrades to last-writer-wins, which is the spec's "latest
     // wins" — no lock needed.
     save_meta(&dir, &meta)?;
-    mark(&dir, label)?;
+    mark(&dir, label, None)?;
     Ok(meta.decision.unwrap())
 }
 
