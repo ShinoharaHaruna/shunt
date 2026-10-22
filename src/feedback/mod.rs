@@ -139,17 +139,26 @@ pub fn ls(json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `feedback retry [id]`: deliver pending artifacts. `id` is a
-/// unique filename-stem prefix; None = all pending. Every match is
-/// tried; failures are reported per-artifact and surface after all
-/// attempts ran.
+/// `feedback retry [id]`: resolve an exact stem or unique ledger-wide
+/// prefix before any delivery side effects; None = all pending.
+/// Batch failures are reported per-artifact and surface after all attempts.
 pub fn retry(id: Option<&str>, json: bool) -> Result<()> {
-    let mut matched: Vec<_> = ledger::list()?.into_iter().filter(|(_, a)| a.delivered_at.is_none()).collect();
+    let mut matched = ledger::list()?;
     if let Some(id) = id {
-        matched.retain(|(p, _)| p.file_stem().map(|s| s.to_string_lossy().starts_with(id)).unwrap_or(false));
-        // An already-filed artifact whose stem matches is a hint the
-        // user picked a delivered entry — say so rather than "none".
-        anyhow::ensure!(!matched.is_empty(), "no pending feedback artifact matching {id:?} (filed ones are not retried)");
+        let stem = |p: &PathBuf| p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        // Resolve against delivered entries too: an id must not silently
+        // change meaning when another matching artifact gets filed.
+        if let Some(exact) = matched.iter().position(|(p, _)| stem(p) == id) {
+            matched = vec![matched.swap_remove(exact)];
+        } else {
+            matched.retain(|(p, _)| stem(p).starts_with(id));
+        }
+        anyhow::ensure!(!matched.is_empty(), "no feedback artifact matching {id:?} — run `shunt feedback ls --json` to find an id");
+        anyhow::ensure!(matched.len() == 1, "ambiguous feedback id {id:?}; candidates: {} — re-run `shunt feedback retry <full-id>` with one listed filename stem", matched.iter().map(|(p, _)| stem(p)).collect::<Vec<_>>().join(", "));
+        let (path, art) = &matched[0];
+        anyhow::ensure!(art.delivered_at.is_none(), "feedback {} already filed: {} (filed artifacts are not retried) — run `shunt feedback ls --json` to find a pending id", stem(path), art.issue_url.as_deref().unwrap_or("URL unavailable"));
+    } else {
+        matched.retain(|(_, a)| a.delivered_at.is_none());
     }
     anyhow::ensure!(!matched.is_empty(), "no pending feedback artifacts");
 

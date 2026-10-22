@@ -568,7 +568,7 @@ shunt feedback retry [<id>]          # re-deliver pending artifacts
 - Body source precedence: `--body` > `--body-file` > stdin (when stdin is not a TTY). One of the three is required; a bare interactive call errors naming the options.
 - `--client NAME` appends the row's `facts` (probe data), `billing`, and `expire` as a fenced JSON block — `ssh.*` is never included, and it costs no network. A row that fails to load fails the send.
 - `--dry-run` prints the composed issue body and files nothing — the human review path.
-- `retry`'s id is a unique filename-stem prefix, like `task show`; omitted = all pending.
+- `retry`'s id resolves by exact filename stem first, otherwise by a unique filename-stem prefix across the complete ledger (including filed artifacts); omitted = all pending. Ambiguous prefixes list the candidate stems and fail before delivery or artifact updates. A resolved filed artifact is not retried; the error includes its URL when available. Missing ids point to `shunt feedback ls --json`.
 
 ### 14.2 Pipeline
 

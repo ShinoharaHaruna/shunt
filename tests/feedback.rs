@@ -269,3 +269,100 @@ fn concurrent_reports_preserve_every_distinct_body() {
     assert_eq!(String::from_utf8_lossy(&o.stdout).lines().count(), 64);
     std::fs::remove_dir_all(home).unwrap();
 }
+
+fn stage_retry_artifact(home: &Path, id: &str, title: &str) {
+    let o = run(home, &["feedback", title, "--body", title, "--json"], &[("SHUNT_FEEDBACK_REPO", "")]);
+    assert!(!o.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    std::fs::rename(result["artifact"].as_str().unwrap(), home.join("feedback").join(format!("{id}.json"))).unwrap();
+}
+
+fn retry_snapshot(home: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    artifacts(home)
+        .into_iter()
+        .map(|p| {
+            let bytes = std::fs::read(&p).unwrap();
+            (p, bytes)
+        })
+        .collect()
+}
+
+fn gh_calls(home: &Path) -> usize {
+    std::fs::read_to_string(home.join("args.log")).unwrap_or_default().lines().count()
+}
+
+#[test]
+fn retry_ambiguous_prefix_has_no_side_effects() {
+    let home = tmpdir("retry-ambiguous");
+    stage_retry_artifact(&home, "1700000000_alpha", "alpha report");
+    stage_retry_artifact(&home, "1700000000_beta", "beta report");
+    let before = retry_snapshot(&home);
+    let stub = stub_gh(&home);
+    let path = format!("{}:{}", stub.display(), std::env::var("PATH").unwrap());
+    let env = [("PATH", path.as_str()), ("FBSTUB", home.to_str().unwrap()), ("SHUNT_FEEDBACK_REPO", "stub/repo")];
+    for json in [false, true] {
+        let mut args = vec!["feedback", "retry", "1700000000"];
+        if json {
+            args.push("--json");
+        }
+        let o = run(&home, &args, &env);
+        assert_eq!(gh_calls(&home), 0, "ambiguous retry must not call gh; status={}, stderr={}", o.status, String::from_utf8_lossy(&o.stderr));
+        assert!(!o.status.success());
+        let err = String::from_utf8_lossy(&o.stderr);
+        for hint in ["ambiguous", "1700000000_alpha", "1700000000_beta", "shunt feedback retry"] {
+            assert!(err.contains(hint), "missing {hint:?}: {err}");
+        }
+        assert_eq!(retry_snapshot(&home), before, "selection errors must not mutate attempts or state");
+    }
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn retry_resolves_exact_unique_and_all_with_delivered_candidates() {
+    let home = tmpdir("retry-selection");
+    for (id, title) in [("1700000000_alpha", "alpha report"), ("1700000000_alpha_extra", "extra report"), ("1700000000_beta", "beta report"), ("1800000000_other", "other report")] {
+        stage_retry_artifact(&home, id, title);
+    }
+    let stub = stub_gh(&home);
+    let path = format!("{}:{}", stub.display(), std::env::var("PATH").unwrap());
+    let env = [("PATH", path.as_str()), ("FBSTUB", home.to_str().unwrap()), ("SHUNT_FEEDBACK_REPO", "stub/repo"), ("SHUNT_FEEDBACK_MAX_PER_HOUR", "20")];
+    // An exact stem wins even when it also prefixes another pending artifact.
+    let o = run(&home, &["feedback", "retry", "1700000000_alpha", "--json"], &env);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(gh_calls(&home), 1);
+    let result: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(result["id"], "1700000000_alpha");
+
+    for (id, hints) in [("1700000000_al", vec!["ambiguous", "1700000000_alpha", "1700000000_alpha_extra", "shunt feedback retry"]), ("1700000000_alpha", vec!["already filed", "https://github.com/stub/repo/issues/7", "shunt feedback ls"]), ("missing", vec!["no feedback artifact", "shunt feedback ls"])] {
+        let before = retry_snapshot(&home);
+        let o = run(&home, &["feedback", "retry", id], &env);
+        assert!(!o.status.success());
+        let err = String::from_utf8_lossy(&o.stderr);
+        for hint in hints {
+            assert!(err.contains(hint), "missing {hint:?}: {err}");
+        }
+        assert_eq!(gh_calls(&home), 1);
+        assert_eq!(retry_snapshot(&home), before);
+    }
+    // A unique delivered prefix must not be mistaken for a nonexistent id.
+    let o = run(&home, &["feedback", "retry", "1700000000_b"], &env);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(gh_calls(&home), 2);
+    let before = retry_snapshot(&home);
+    let o = run(&home, &["feedback", "retry", "1700000000_b"], &env);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("already filed"));
+    assert_eq!(retry_snapshot(&home), before);
+    assert_eq!(gh_calls(&home), 2);
+
+    let o = run(&home, &["feedback", "retry", "--json"], &env);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(String::from_utf8_lossy(&o.stdout).lines().count(), 2);
+    assert_eq!(gh_calls(&home), 4);
+    for (_, bytes) in retry_snapshot(&home) {
+        let art: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(!art["delivered_at"].is_null());
+        assert_eq!(art["attempts"], 1);
+    }
+    std::fs::remove_dir_all(home).unwrap();
+}
