@@ -10,16 +10,19 @@
 //! file-set proxy wins). `down` removes both.
 //!
 //! State under `$SHUNT_HOME/tunnels/`: `<name>.pid`, `<name>.port`,
-//! `<name>.log`. Liveness is pidfile + `/proc` — same discipline as
+//! `<name>.log`, plus a stable private `.<name>.lock`. Liveness is pidfile + `/proc` — same discipline as
 //! the client daemon.
 
 use crate::server::registry::{self, ClientEntry};
 use crate::server::transport::{ssh_conn_args, Transport};
 use anyhow::{Context, Result};
+use fs2::FileExt;
+use std::fs::File;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_SOCKS_PORT: u16 = 1080;
 
@@ -33,6 +36,45 @@ fn pid_path(dir: &Path, name: &str) -> PathBuf {
 
 fn port_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{name}.port"))
+}
+
+#[cfg(test)]
+thread_local! {
+    // Signal actual contention so reader tests never infer it from a sleep.
+    static ON_LOCK_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+// The inode must remain stable: unlinking a lock on release lets a waiter
+// and a new caller acquire different inodes for the same client.
+fn lock_in(dir: &Path, name: &str, timeout: Duration) -> Result<File> {
+    registry::valid_name(name)?;
+    crate::server::fsutil::private_dir(dir)?;
+    let path = dir.join(format!(".{name}.lock"));
+    let lock = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&path).with_context(|| format!("open tunnel lock {}", path.display()))?;
+    lock.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Ok(lock),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                #[cfg(test)]
+                ON_LOCK_WAIT.with(|observer| {
+                    if let Some(observer) = observer.borrow_mut().take() {
+                        observer();
+                    }
+                });
+                if Instant::now() >= deadline {
+                    anyhow::bail!("timed out waiting for tunnel lock {}; retry the tunnel command", path.display());
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => return Err(e).context("lock tunnel state"),
+        }
+    }
+}
+
+fn client_lock(dir: &Path, name: &str) -> Result<File> {
+    lock_in(dir, name, Duration::from_secs(30))
 }
 
 /// Upsert or remove one KEY=value line in `<qroot>/env` on the box,
@@ -124,7 +166,9 @@ fn recorded_in(dir: &Path, name: &str) -> bool {
 
 /// `recorded_in` against the real `$SHUNT_HOME/tunnels/`.
 pub fn recorded(name: &str) -> Result<bool> {
-    Ok(recorded_in(&tunnels_dir()?, name))
+    let dir = tunnels_dir()?;
+    let _lock = client_lock(&dir, name)?;
+    Ok(recorded_in(&dir, name))
 }
 
 fn recorded_port(dir: &Path, name: &str) -> Option<u16> {
@@ -146,7 +190,9 @@ pub fn status(name: &str) -> Result<TunnelState> {
     // The row gives the `user@host` needle; an unloadable/missing
     // row degrades to port-only matching rather than failing status.
     let target = registry::load_client(name).ok().and_then(|c| client_target(&c));
-    Ok(status_in(&tunnels_dir()?, name, target.as_deref()))
+    let dir = tunnels_dir()?;
+    let _lock = client_lock(&dir, name)?;
+    Ok(status_in(&dir, name, target.as_deref()))
 }
 
 /// List every recorded tunnel name (clients/tunnels dir).
@@ -167,24 +213,37 @@ pub fn list() -> Result<Vec<String>> {
     }
     out.sort();
     out.dedup();
-    Ok(out)
+    let mut recorded = Vec::new();
+    for name in out {
+        let _lock = client_lock(&dir, &name)?;
+        if recorded_in(&dir, &name) {
+            recorded.push(name);
+        }
+    }
+    Ok(recorded)
 }
 
 /// Open the tunnel: detached `ssh -N -R <port>`, then write
 /// `ALL_PROXY=socks5h://127.0.0.1:<port>` into the box's queue env.
 /// Returns the pid. Idempotent: an already-live tunnel is reported.
 pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<u32> {
+    let dir = tunnels_dir()?;
+    let _lock = client_lock(&dir, &client.name)?;
+    up_locked(&dir, t, client, port)
+}
+
+// Callers hold the same client lock through state publication AND env edits.
+// heal calls this helper rather than reacquiring its own non-reentrant flock.
+fn up_locked(dir: &Path, t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<u32> {
     if client.local {
         anyhow::bail!("{} uses the loopback transport — no tunnel needed", client.name);
     }
-    let dir = tunnels_dir()?;
-    if let Some(pid) = read_pid(&dir, &client.name) {
-        if pid_alive(pid, recorded_port(&dir, &client.name), client_target(client).as_deref()) {
+    if let Some(pid) = read_pid(dir, &client.name) {
+        if pid_alive(pid, recorded_port(dir, &client.name), client_target(client).as_deref()) {
             return Ok(pid);
         }
     }
     let port = port.unwrap_or(DEFAULT_SOCKS_PORT);
-    crate::server::fsutil::private_dir(&dir)?;
     let log_path = dir.join(format!("{}.log", client.name));
     let log = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&log_path)?;
     // mode(0o600) only applies at creation — re-tighten a pre-existing
@@ -194,21 +253,41 @@ pub fn up(t: &dyn Transport, client: &ClientEntry, port: Option<u16>) -> Result<
 
     let args = up_argv(client, port)?;
     let mut child = Command::new("ssh").args(&args[1..]).stdin(Stdio::null()).stdout(log).stderr(err).process_group(0).spawn().context("spawn ssh tunnel")?;
-    // ExitOnForwardFailure makes a bad bind exit fast; give it a beat.
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    if let Ok(Some(_)) = child.try_wait() {
-        anyhow::bail!("ssh tunnel exited during setup; see {}", dir.join(format!("{}.log", client.name)).display());
-    }
     let pid = child.id();
-    // The tunnel must outlive `up`'s caller (the dispatcher calls this
-    // from heal), so the ssh stays detached — but a dropped Child is
-    // still our child and zombies on death until wait()ed. Hand it to
-    // a reaper thread: non-blocking for us, reaped for the kernel.
+    let mut publishing = false;
+    let setup = (|| -> Result<()> {
+        // ExitOnForwardFailure makes a bad bind exit fast; give it a beat.
+        std::thread::sleep(Duration::from_millis(500));
+        if child.try_wait().context("check ssh tunnel during setup")?.is_some() {
+            anyhow::bail!("ssh tunnel exited during setup; see {}", log_path.display());
+        }
+        // Publish the PID last. A failed setup may leave a port-only record
+        // for heal, but must never leave a newly spawned untracked process.
+        publishing = true;
+        crate::server::fsutil::write_private(&port_path(dir, &client.name), format!("{port}\n"))?;
+        crate::server::fsutil::write_private(&pid_path(dir, &client.name), format!("{pid}\n"))?;
+        Ok(())
+    })();
+    if let Err(e) = setup {
+        // Never signal an already-reaped setup failure: its PID may be reused.
+        // An unreaped child pins its PID while we kill the freshly spawned group.
+        if !matches!(child.try_wait(), Ok(Some(_))) {
+            let _ = crate::agent::exec::signal_pgid(pid, "KILL");
+            child.kill().ok();
+        }
+        child.wait().context("reap failed ssh tunnel setup")?;
+        // Keep a pre-existing PID-only marker if setup never published state,
+        // or port creation failed: heal must retain its retry responsibility.
+        if publishing && port_path(dir, &client.name).exists() {
+            remove_state_file(&pid_path(dir, &client.name))?;
+        }
+        return Err(e);
+    }
+    // Only committed tunnels may outlive their caller; the reaper prevents
+    // zombies when up is used by a long-running dispatcher.
     std::thread::spawn(move || {
         let _ = child.wait();
     });
-    crate::server::fsutil::write_private(&pid_path(&dir, &client.name), format!("{pid}\n"))?;
-    crate::server::fsutil::write_private(&port_path(&dir, &client.name), format!("{port}\n"))?;
 
     // Wire the queue env so tasks see the proxy without any task edits.
     let proxy = format!("socks5h://127.0.0.1:{port}");
@@ -242,12 +321,13 @@ pub enum Heal {
 /// dead box never reaches this (env cannot be edited anyway).
 pub fn heal(t: &dyn Transport, client: &ClientEntry) -> Result<Heal> {
     let dir = tunnels_dir()?;
+    let _lock = client_lock(&dir, &client.name)?;
     // Reconnect on the recorded port, not the default: a tunnel
     // brought up with `--port 2080` must self-heal onto 2080 — the
     // port file and the box's ALL_PROXY both name it.
     let port = std::fs::read_to_string(port_path(&dir, &client.name)).ok().and_then(|s| s.trim().parse::<u16>().ok());
     let alive = status_in(&dir, &client.name, client_target(client).as_deref()).alive;
-    heal_in(&dir, t, client, alive, |t, c| up(t, c, port))
+    heal_in(&dir, t, client, alive, |t, c| up_locked(&dir, t, c, port))
 }
 
 /// The decision logic, with the state dir, liveness verdict and the
@@ -306,23 +386,45 @@ fn up_argv(client: &ClientEntry, port: u16) -> Result<Vec<String>> {
 /// remove the ALL_PROXY line from the box's env.
 pub fn down(t: &dyn Transport, client: &ClientEntry) -> Result<()> {
     let dir = tunnels_dir()?;
-    if let Some(pid) = read_pid(&dir, &client.name) {
-        // pid_alive already cmdline-verified the pid as our ssh
-        // (port + user@host needles), so this can never signal a
-        // recycled pid or a stranger's -R forward. The tunnel spawned
-        // with process_group(0) — pid == pgid — so TERM the whole
-        // group and any children go with the leader.
-        if pid_alive(pid, recorded_port(&dir, &client.name), client_target(client).as_deref()) {
-            let _ = crate::agent::exec::signal_pgid(pid, "TERM");
+    let _lock = client_lock(&dir, &client.name)?;
+    down_locked(&dir, t, client)
+}
+
+fn down_locked(dir: &Path, t: &dyn Transport, client: &ClientEntry) -> Result<()> {
+    if let Some(pid) = read_pid(dir, &client.name) {
+        let port = recorded_port(dir, &client.name);
+        let target = client_target(client);
+        // Recheck identity before each signal: stale/recycled PIDs must never
+        // let down kill a stranger's SSH session. Keep the record on failure.
+        for signal in ["TERM", "KILL"] {
+            if !pid_alive(pid, port, target.as_deref()) {
+                break;
+            }
+            if let crate::agent::exec::SignalOutcome::Failed(e) = crate::agent::exec::signal_pgid(pid, signal) {
+                return Err(e).context("stop ssh tunnel; retry tunnel down");
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while pid_alive(pid, port, target.as_deref()) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(25));
+            }
         }
+        anyhow::ensure!(!pid_alive(pid, port, target.as_deref()), "ssh tunnel {pid} did not stop; retry tunnel down");
     }
-    let _ = std::fs::remove_file(pid_path(&dir, &client.name));
-    let _ = std::fs::remove_file(port_path(&dir, &client.name));
+    remove_state_file(&pid_path(dir, &client.name))?;
+    remove_state_file(&port_path(dir, &client.name))?;
     if !client.local {
         // Best-effort: a dead box may not answer; the tunnel is already down.
         let _ = env_write(t, client, "ALL_PROXY", None);
     }
     Ok(())
+}
+
+fn remove_state_file(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("remove tunnel state {}; repair the path and retry", path.display())),
+    }
 }
 
 #[cfg(test)]
@@ -340,6 +442,75 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("shunt-tun-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         crate::server::fsutil::private_dir(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn locks_are_private_bounded_per_client_and_stable() {
+        use std::os::unix::fs::MetadataExt;
+        let _home = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let _env = crate::server::transport::ENV_LOCK.lock().unwrap();
+        let home = tmp("locks");
+        let old_home = std::env::var_os("SHUNT_HOME");
+        std::env::set_var("SHUNT_HOME", &home);
+        let dir = home.join("tunnels");
+        let first = lock_in(&dir, "one", Duration::ZERO).unwrap();
+        let path = dir.join(".one.lock");
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let err = lock_in(&dir, "one", Duration::ZERO).unwrap_err();
+        assert!(err.to_string().contains("retry the tunnel command"));
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        let other = lock_in(&dir, "two", Duration::ZERO).unwrap();
+        drop(first);
+        let next = lock_in(&dir, "one", Duration::ZERO).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        drop((other, next));
+        match old_home {
+            Some(home) => std::env::set_var("SHUNT_HOME", home),
+            None => std::env::remove_var("SHUNT_HOME"),
+        }
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn state_readers_wait_for_complete_transaction() {
+        let _home = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let _env = crate::server::transport::ENV_LOCK.lock().unwrap();
+        let home = tmp("readers");
+        let old_home = std::env::var_os("SHUNT_HOME");
+        std::env::set_var("SHUNT_HOME", &home);
+        let dir = home.join("tunnels");
+        let lock = client_lock(&dir, "remote").unwrap();
+        // A writer has published only one half of a new record.
+        crate::server::fsutil::write_private(&pid_path(&dir, "remote"), "99999999\n").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut readers = Vec::new();
+        for op in ["status", "recorded", "list"] {
+            let tx = tx.clone();
+            readers.push(std::thread::spawn(move || {
+                ON_LOCK_WAIT.with(|observer| *observer.borrow_mut() = Some(Box::new(move || tx.send(()).unwrap())));
+                match op {
+                    "status" => assert_eq!(status("remote").unwrap().port, Some(2080)),
+                    "recorded" => assert!(recorded("remote").unwrap()),
+                    "list" => assert_eq!(list().unwrap(), ["remote"]),
+                    _ => unreachable!(),
+                }
+            }));
+        }
+        for _ in &readers {
+            rx.recv_timeout(Duration::from_secs(5)).expect("reader did not contend on the writer's independent flock");
+        }
+        crate::server::fsutil::write_private(&port_path(&dir, "remote"), "2080\n").unwrap();
+        drop(lock);
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        match old_home {
+            Some(home) => std::env::set_var("SHUNT_HOME", home),
+            None => std::env::remove_var("SHUNT_HOME"),
+        }
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
