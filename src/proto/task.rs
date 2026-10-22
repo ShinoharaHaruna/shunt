@@ -10,6 +10,12 @@ use std::collections::BTreeMap;
 /// used to render the task body (design.md §3.13, §4.4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskMeta {
+    /// Server-side task id; emitted as `# shunt:id=` in the body so
+    /// the box-side allocator can dedup a re-pushed delivery
+    /// (design.md §3.3, §4.4). `None` for locally-generated tasks
+    /// (`new`/`mktask`) — dedup simply does not apply to them.
+    #[serde(default)]
+    pub id: Option<String>,
     /// Human label; sanitized to `[A-Za-z0-9_.-]` before use.
     pub slug: String,
     /// Guard path: if it exists at run time, the task exits 0 (the
@@ -64,6 +70,31 @@ pub fn slug_problem(slug: &str) -> Option<&'static str> {
     }
 }
 
+/// The delivery-dedup key a body carries in its comment head
+/// (`# shunt:id=<server task id>`, design.md §3.3/§3.13): `submit`
+/// stamps it, and the box-side allocator returns the existing queue
+/// entry for a re-pushed body instead of minting a second number.
+/// Same head-scan rules as the runner's directive parser: leading
+/// whitespace still counts as a comment, scanning stops at the
+/// first non-comment, non-blank line. `None` for hand-written
+/// bodies without the directive — dedup does not apply to them.
+pub fn dedup_key(body: &str) -> Option<String> {
+    for line in body.lines() {
+        let line = line.trim_start();
+        if let Some(id) = line.strip_prefix("# shunt:id=") {
+            // A token, not a literal like workdir: trailing
+            // whitespace can never match the stored key.
+            let id = id.trim();
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        } else if !line.starts_with('#') && !line.trim().is_empty() {
+            break;
+        }
+    }
+    None
+}
+
 /// Reject meta fields that would inject extra lines into the
 /// rendered task body: `workdir`/`guard`/env keys and values ride in
 /// `# shunt:` comment lines, so a `\n`/`\r` inside any of them
@@ -72,7 +103,7 @@ pub fn slug_problem(slug: &str) -> Option<&'static str> {
 /// before `render_task`/`merge_file_directives`; `cmd` is exempt
 /// (shell-quoted, so embedded newlines stay inside quotes).
 pub fn validate_meta(meta: &TaskMeta) -> anyhow::Result<()> {
-    let fields = std::iter::once(("slug", meta.slug.as_str())).chain(meta.guard.iter().map(|g| ("guard", g.as_str()))).chain(meta.workdir.iter().map(|w| ("workdir", w.as_str()))).chain(meta.env.iter().flat_map(|(k, v)| [("env key", k.as_str()), ("env value", v.as_str())]));
+    let fields = std::iter::once(("slug", meta.slug.as_str())).chain(meta.id.iter().map(|i| ("id", i.as_str()))).chain(meta.guard.iter().map(|g| ("guard", g.as_str()))).chain(meta.workdir.iter().map(|w| ("workdir", w.as_str()))).chain(meta.env.iter().flat_map(|(k, v)| [("env key", k.as_str()), ("env value", v.as_str())]));
     for (what, s) in fields {
         anyhow::ensure!(!s.contains(['\n', '\r']), "task meta {what} contains a newline — would inject lines into the task body");
     }
@@ -123,7 +154,7 @@ mod tests {
     #[test]
     fn meta_rejects_embedded_newlines() {
         use super::{validate_meta, TaskMeta};
-        let base = TaskMeta { slug: "t".into(), guard: None, workdir: None, env: Default::default(), cmd: vec!["true".into()], timeout_s: None };
+        let base = TaskMeta { id: None, slug: "t".into(), guard: None, workdir: None, env: Default::default(), cmd: vec!["true".into()], timeout_s: None };
         assert!(validate_meta(&base).is_ok());
 
         let mut m = base.clone();
@@ -151,5 +182,21 @@ mod tests {
         let mut m = base;
         m.env.insert("K=X".into(), "v".into());
         assert!(validate_meta(&m).is_err());
+    }
+
+    /// `dedup_key` reads the first `# shunt:id=` in the comment head
+    /// (shebang and indented comments pass through) and stops at the
+    /// first code line — a directive below it is body, not head.
+    #[test]
+    fn dedup_key_reads_head_only() {
+        use super::dedup_key;
+        assert_eq!(dedup_key("#!/usr/bin/env bash\n# shunt:id=abc-1\nexec true\n").as_deref(), Some("abc-1"));
+        assert_eq!(dedup_key("  # shunt:id= spaced-2 \nexec true\n").as_deref(), Some("spaced-2"));
+        // First match wins — a stale embedded id never shadows the
+        // injected delivery id above it.
+        assert_eq!(dedup_key("# shunt:id=new\n# shunt:id=old\nx\n").as_deref(), Some("new"));
+        assert_eq!(dedup_key("#!/usr/bin/env bash\nexec true\n# shunt:id=later\n"), None);
+        assert_eq!(dedup_key("#!/usr/bin/env bash\nexec true\n"), None);
+        assert_eq!(dedup_key("# shunt:id=\nx\n"), None);
     }
 }

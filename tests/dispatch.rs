@@ -90,7 +90,7 @@ fn fixture(tag: &str) -> Result<(PathBuf, ClientEntry)> {
 }
 
 fn entry(id: &str, slug: &str) -> SpoolEntry {
-    SpoolEntry { id: id.into(), project: "p".into(), client: "fake-a".into(), meta: TaskMeta { slug: slug.into(), guard: None, workdir: None, env: BTreeMap::new(), cmd: vec!["echo".into(), "hi".into()], timeout_s: None }, submitted_at: "2024-01-01T00:00:00Z".into() }
+    SpoolEntry { id: id.into(), project: "p".into(), client: "fake-a".into(), meta: TaskMeta { id: None, slug: slug.into(), guard: None, workdir: None, env: BTreeMap::new(), cmd: vec!["echo".into(), "hi".into()], timeout_s: None }, submitted_at: "2024-01-01T00:00:00Z".into() }
 }
 
 #[test]

@@ -64,7 +64,7 @@ Under `$QROOT` (client-local; resolved as `--root` flag > `$SHUNT_ROOT` env. Eve
 | `shutdown_cmd`       | command exec'd at countdown end                                                                                                      |
 | `daemon.pid`         | daemon pid, written at startup                                                                                                       |
 | `daemon.log`         | structured JSONL event stream (see §3.9); rotated to `daemon.log.1` past `SHUNT_DAEMON_LOG_MAX` (default 1 MiB), one generation kept |
-| `.seq` + `.seq.lock` | enqueue counter under flock                                                                                                          |
+| `.seq` + `.seq.lock` | enqueue counter under flock; a corrupt `.seq` fails the enqueue with remediation, never reseeds silently (§3.2)                      |
 
 Every queue entry is a directory named `NNNN_<slug>` containing `task.sh` plus the sidecars it accumulates (`log`, `pid`, `exit`). Readers also understand the legacy flat layout (`NNNN_<slug>.sh` with `.sh.log`/`.sh.pid`/`.sh.exit` sidecars) so pre-existing queues need no migration; writers always create dirs, and `finalize` normalizes any legacy entry it touches. A suffixless flat file is NOT an entry — it is ignored entirely.
 
@@ -77,6 +77,8 @@ The daemon only manages tasks it dequeued itself, tracked via `running/*/pid`. O
 - `pending/` entry names are `NNNN_<slug>`, `NNNN` zero-padded to 4.
 - `.seq` starts at 99, so the first enqueued task is `0100`. Values `0000`–`0099` are the manual priority band: `shunt prio` renumbers into it (numbers outside the band are rejected — renumbering into the normal sequence would corrupt it), and requeued orphans land at `0000_requeued_*`.
 - `.seq` is read/incremented/written under an flock on `.seq.lock` (30 s wait, matching `flock -w 30`). Concurrent enqueues must never produce duplicate numbers.
+- A missing `.seq` is rebuilt implicitly: the mint is `max(SEQ_INIT, high-water) + 1`, so the counter is repairable by deletion. A `.seq` that exists but does not parse as `0`–`9999` is operator damage — the enqueue FAILS with a remediation message (`remove it to rebuild from the high-water mark, or write a valid counter`), never silently reseeds over it.
+- Hand-staged `NNNN_<slug>` names (any track, band or normal) are honored, never renumbered: the high-water floor guarantees the allocator never mints a taken number. A duplicate `NNNN_` across tracks is caught loudly at claim/finalize time by the quarantine paths (§3.7, §3.9).
 - Claim order is `LC_ALL=C` filename sort, so `0000_*` always runs ahead of `0100_*`. The 4-digit namespace tops out at `9999`; the next number issued is the larger of `.seq + 1` and the high-water NNNN prefix across all four tracks (and their `.archive/`s) + 1, so a new entry always sorts behind everything queued and can never collide at claim or finalize time. When `.seq` itself has reached `9999` the counter is treated as wrapped: the next number restarts at high-water + 1 rather than minting a 5-digit name. True exhaustion — the high-water prefix is already `9999` — fails the enqueue ("sequence space exhausted") instead of issuing a number that would leapfrog the queue.
 
 ### 3.3 Enqueue
@@ -84,8 +86,10 @@ The daemon only manages tasks it dequeued itself, tracked via `running/*/pid`. O
 `shunt enqueue` (or the stdin form used over the wire):
 
 1. Slug is sanitized to `[A-Za-z0-9_.-]` (anything else → `-`); an empty result — or one starting with `-` — is an error (the slug rides in remote argv where a leading dash would parse as a flag). The same check runs at `submit`/`new`/`mktask`/`enqueue`.
-2. Take the `.seq` lock, increment, write back, release.
-3. Install a `NNNN_<slug>/` entry dir holding `task.sh` (mode 0755) into `pending/` via a temp dir + `mv` inside `pending/` (atomic on the same filesystem). A remote `scp` + `mv` is _not_ atomic across filesystems; never install directly to the final name from an off-queue temp.
+2. Take `.seq.lock` once — the whole of steps 3–5 is one critical section, so concurrent pushes of the same delivery serialize instead of racing the dedup scan.
+3. **Delivery dedup.** If the body's comment head carries `# shunt:id=<server task id>` (§3.13), scan the four live tracks — in state-machine order pending → running → done → failed — for an entry whose `task.sh` head carries the same key. Scanning follows the forward direction so an entry claimed or finalized mid-scan moves only into a not-yet-scanned track; `.archive/` is out of scope (delivered + finished + archived inside one retry window is pathological, and a miss degrades to a guard-absorbed rerun). On a match the enqueue acks `{ok, name: <existing>, deduped: true}` and installs nothing — a re-push after a lost ack never mints a second number. Bodies without the directive (hand-written tasks, pre-dedup peers) skip the scan and always allocate.
+4. Mint `NNNN` from `.seq`, write it back.
+5. Install a `NNNN_<slug>/` entry dir holding `task.sh` (mode 0755) into `pending/` via a temp dir + `mv` inside `pending/` (atomic on the same filesystem). A remote `scp` + `mv` is _not_ atomic across filesystems; never install directly to the final name from an off-queue temp.
 
 ### 3.4 Daemon liveness
 
@@ -211,12 +215,13 @@ exec <cmd...>            # args shell-quoted
 A submitted task carries its binding inside the body, as comment-head directives the runner parses at spawn (the wire carries only the body, so metadata cannot travel beside it):
 
 ```bash
+# shunt:id=deadbeef-01           # delivery id (submit only); enqueue dedups on it, runner ignores it
 # shunt:workdir=/abs/path        # runner cwd for this task only
 # shunt-env:KEY=value            # env overlay; beats the queue env file
 # shunt:timeout_s=3600           # wall-clock budget; 0/absent = unlimited
 ```
 
-All are optional (`env` is repeatable); scanning stops at the first non-comment line, so hand-written tasks can set them too. An unrecognized `# shunt:` line is just a comment to older runners — new directives degrade harmlessly.
+All are optional (`env` is repeatable); scanning stops at the first non-comment line, so hand-written tasks can set them too. An unrecognized `# shunt:` line is just a comment to older runners — new directives degrade harmlessly. `# shunt:id=` is consumed by the enqueue allocator (§3.3), not the runner; `submit` always injects it above the file's own head so a stale embedded id can never shadow the current delivery's (first match wins).
 
 The timeout is a wall-clock budget counted from spawn, not a retry: at the deadline the daemon sends TERM to the task's verified pgid (§3.9a discipline), escalates to KILL after a 10 s grace, and finalizes per §3.9. A daemon restart re-times the requeued rerun from its new spawn — at-least-once re-executes the whole task, budget included. A guard-hit task exits before the budget can ever matter. No `cd` line — the runner already places cwd at `workdir` (the bash version's generated `cd` was redundant). The guard convention is the contract that makes at-least-once safe: tasks must be idempotent or guard on the artifact they produce.
 
@@ -336,7 +341,7 @@ Two-phase dispatch, at-least-once end to end:
 1. Dispatcher (server-side loop, poll interval from `server.toml`) scans `spool/` oldest-first.
 2. For each entry bound to client C, over the row's transport: `shunt enqueue - <slug>-<shortid> --json --root <qroot>` with the body on stdin.
 3. Only on a clean ack (exit 0 + JSON `{ok: true, name: ...}`) does the server remove the spool entry. Any failure leaves it for the next poll.
-4. Dupes from a retry after a lost ack are absorbed client-side by the task's guard; the server task id is embedded in the slug (`<slug>-<shortid>`) so a re-pushed task is recognizable in logs.
+4. Dupes from a retry after a lost ack are deduped box-side: the rendered body carries `# shunt:id=<task id>` and the remote returns the existing entry (`{ok, name, deduped: true}`) instead of minting a second number (§3.3). The task guard remains the backstop for remotes that predate the directive, and the server task id is also embedded in the slug (`<slug>-<shortid>`) so a re-pushed task is recognizable in logs. A spool entry staged before this change carries no directive in its body — it simply allocates a fresh number per push, the pre-dedup behavior.
 
 Fault isolation: a spool file that fails to read or parse is quarantined — `<id>.json`/`<id>.sh` renamed to `*.bad` — with a stderr warning, and the sweep continues; one corrupt entry must never stop delivery for any client. A client row that fails to load skips only that client's entries. In the looping dispatcher a failed sweep is logged and retried next poll; `dispatch --once` still propagates errors.
 
@@ -362,8 +367,8 @@ Transport is chosen per client row: `ssh` (default) execs over SSH; `local` (`lo
 
 | op                                       | request                               | response sketch                                                                                                                          |
 | ---------------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `enqueue`                                | task body on stdin; `--slug`          | `{ok, name}`                                                                                                                             |
-| `new`                                    | `--slug`, `--guard`, `--` argv        | `{ok, name}`                                                                                                                             |
+| `enqueue`                                | task body on stdin; `--slug`          | `{ok, name, deduped?}` — `deduped: true` when `# shunt:id=` matched an existing entry                                                    |
+| `new`                                    | `--slug`, `--guard`, `--` argv        | `{ok, name, deduped?}`                                                                                                                   |
 | `mktask`                                 | same as `new`                         | task body on stdout                                                                                                                      |
 | `status`                                 | —                                     | `{daemon:{alive,pid}, workers:{value,source}, running[], pending[], done_recent[], failed_recent[], stop, shutdown:{armed,grace_s,cmd}}` |
 | `cancel`                                 | pattern                               | `{ok, name}` or error on 0/multi match                                                                                                   |
@@ -459,6 +464,8 @@ Integration tests spawn a real daemon against a tmp `SHUNT_ROOT`; the poll inter
 
 - dispatch order (filename sort; `0000_` band ahead of `0100_`)
 - enqueue concurrency vs dispatch (`.seq` under lock; no dup numbers)
+- delivery dedup: same `# shunt:id=` returns the existing entry across all four live tracks; concurrent same-key pushes mint exactly once; no-directive bodies always allocate
+- `.seq` fault handling: corrupt counter bails with remediation; missing counter rebuilds from high-water
 - `cancel` 0/1/many match; `prio` renumber incl. target-exists refusal
 - `kill`: TERM → 10 s → KILL, rc recorded, lands in `failed/`; recycled-pgid refusal (leader start_time mismatch → `gone`, foreign group untouched)
 - orphan requeue: dead daemon leaves `running/` entries → restart → front-of-queue, prefix strip, interrupted logs swept; requeue-target collision quarantines to `failed/`

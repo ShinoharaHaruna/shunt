@@ -57,7 +57,7 @@ pub(crate) fn agent_enqueue(a: &EnqueueArgs) -> Result<()> {
 fn enqueue_impl(a: &EnqueueArgs) -> Result<()> {
     use std::io::Read;
     let root = agent_root(&a.root)?;
-    let inner = || -> Result<String> {
+    let inner = || -> Result<crate::agent::queue::EnqueueOutcome> {
         let body = if a.file == "-" {
             let mut b = String::new();
             std::io::stdin().read_to_string(&mut b)?;
@@ -77,11 +77,16 @@ fn enqueue_impl(a: &EnqueueArgs) -> Result<()> {
         crate::agent::queue::enqueue(&root, &slug, &body)
     };
     match inner() {
-        Ok(name) => {
+        Ok(outcome) => {
+            let name = outcome.name();
             if a.json {
-                jprint(jobj(jfields(serde_json::json!({"name": name}))));
+                jprint(jobj(jfields(serde_json::json!({"name": name, "deduped": outcome.deduped()}))));
             } else {
-                println!("enqueued: {name}");
+                if outcome.deduped() {
+                    println!("enqueued: {name} (deduped — this delivery already had an entry)");
+                } else {
+                    println!("enqueued: {name}");
+                }
                 if crate::agent::daemon::alive(&root)?.is_none() {
                     eprintln!("note: queue daemon not running; start with `shunt start`");
                 }
@@ -98,11 +103,11 @@ pub(crate) fn agent_new(a: &NewArgs) -> Result<()> {
 
 fn new_impl(a: &NewArgs) -> Result<()> {
     let json = a.json;
-    let inner = || -> Result<String> {
+    let inner = || -> Result<crate::agent::queue::EnqueueOutcome> {
         if a.cmd.is_empty() {
             anyhow::bail!("missing command after --");
         }
-        let meta = crate::proto::task::TaskMeta { slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard.clone(), workdir: None, env: Default::default(), cmd: a.cmd.clone(), timeout_s: a.timeout };
+        let meta = crate::proto::task::TaskMeta { id: None, slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard.clone(), workdir: None, env: Default::default(), cmd: a.cmd.clone(), timeout_s: a.timeout };
         if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
             anyhow::bail!("bad slug '{}': {p}", a.slug);
         }
@@ -112,11 +117,16 @@ fn new_impl(a: &NewArgs) -> Result<()> {
         crate::agent::queue::enqueue(&root, &meta.slug, &body)
     };
     match inner() {
-        Ok(name) => {
+        Ok(outcome) => {
+            let name = outcome.name();
             if json {
-                jprint(jobj(jfields(serde_json::json!({"name": name}))));
+                jprint(jobj(jfields(serde_json::json!({"name": name, "deduped": outcome.deduped()}))));
             } else {
-                println!("enqueued: {name}");
+                if outcome.deduped() {
+                    println!("enqueued: {name} (deduped — this delivery already had an entry)");
+                } else {
+                    println!("enqueued: {name}");
+                }
                 let root = agent_root(&a.root)?;
                 if crate::agent::daemon::alive(&root)?.is_none() {
                     eprintln!("note: queue daemon not running; start with `shunt start`");

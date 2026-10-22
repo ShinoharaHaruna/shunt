@@ -95,15 +95,18 @@ pub fn init(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Read + increment `.seq` under an flock on `.seq.lock`, retrying
-/// for up to 30 s (matching `flock -w 30`).
-pub fn next_seq(root: &Path) -> Result<u32> {
+/// Acquire the exclusive `.seq.lock` flock, retrying for up to
+/// 30 s (matching `flock -w 30`). The returned File owns the hold —
+/// dropping it releases the lock. `enqueue` holds it across
+/// dedup-scan + mint + install so two same-key pushes serialize and
+/// the second sees the first's entry.
+fn seq_lock(root: &Path) -> Result<std::fs::File> {
     let lock_path = root.join(".seq.lock");
     let lock = std::fs::OpenOptions::new().create(true).append(true).open(&lock_path).with_context(|| format!("cannot open {}", lock_path.display()))?;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match lock.try_lock_exclusive() {
-            Ok(()) => break,
+            Ok(()) => return Ok(lock),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if Instant::now() >= deadline {
                     anyhow::bail!("timed out waiting for .seq.lock");
@@ -113,8 +116,21 @@ pub fn next_seq(root: &Path) -> Result<u32> {
             Err(e) => return Err(e).context("flock .seq.lock failed"),
         }
     }
+}
+
+/// Read `.seq`, mint the next number, write it back. Caller holds
+/// `.seq.lock`. A missing `.seq` seeds at SEQ_INIT (the high-water
+/// floor below still keeps the mint behind every queued entry);
+/// a present-but-unreadable counter — garbage, negative, or past
+/// the 4-digit ceiling — bails loudly instead of silently
+/// reseeding over operator intent (design.md §3.2).
+fn mint_locked(root: &Path) -> Result<u32> {
     let seq_path = root.join(".seq");
-    let cur: u32 = std::fs::read_to_string(&seq_path).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(SEQ_INIT);
+    let cur: u32 = match std::fs::read_to_string(&seq_path) {
+        Ok(s) => s.trim().parse::<u32>().ok().filter(|&v| v <= SEQ_MAX).with_context(|| format!("{} is corrupt (contains {:?}); remove it to rebuild from the queue's high-water mark, or write a valid 0-{SEQ_MAX} counter", seq_path.display(), s.trim()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SEQ_INIT,
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", seq_path.display())),
+    };
     // The new entry must sort BEHIND every queued one (claim order
     // is byte sort on the 4-digit prefix). Normally `cur + 1`
     // qualifies; when the counter wrapped at SEQ_MAX (or a
@@ -139,8 +155,14 @@ pub fn next_seq(root: &Path) -> Result<u32> {
         anyhow::bail!("sequence space exhausted: a track already holds {SEQ_MAX}; let tasks drain or cancel some");
     }
     std::fs::write(&seq_path, format!("{next}\n"))?;
-    lock.unlock()?;
     Ok(next)
+}
+
+/// Read + increment `.seq` under an flock on `.seq.lock`, retrying
+/// for up to 30 s (matching `flock -w 30`).
+pub fn next_seq(root: &Path) -> Result<u32> {
+    let _lock = seq_lock(root)?;
+    mint_locked(root)
 }
 
 /// Entry base names in a track, `LC_ALL=C` byte sort. A queue entry
@@ -324,12 +346,78 @@ pub fn match_running(root: &Path, pat: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// What `enqueue` did with a body: minted a fresh entry, or
+/// recognized a re-pushed delivery by its `# shunt:id=` key and
+/// returned the existing one.
+pub enum EnqueueOutcome {
+    Fresh(String),
+    Deduped(String),
+}
+
+impl EnqueueOutcome {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Fresh(n) | Self::Deduped(n) => n,
+        }
+    }
+
+    pub fn deduped(&self) -> bool {
+        matches!(self, Self::Deduped(_))
+    }
+}
+
+/// Scan the four live tracks for an entry whose task.sh head
+/// carries `# shunt:id=<key>`; first hit wins. Scan order follows
+/// the state machine's forward direction (pending → running →
+/// done → failed): an entry claimed or finalized mid-scan moves
+/// only into a track not yet scanned, so it cannot slip through
+/// between scans. `.archive/` is out of scope — an entry delivered,
+/// finished AND archived inside one retry window is pathological,
+/// and a missed dedup there degrades to a guard-absorbed rerun.
+/// Runs under `.seq.lock` (callers), so no same-key push can
+/// interleave between this scan and the install.
+fn dedup_lookup(root: &Path, key: &str) -> Result<Option<String>> {
+    use std::io::Read;
+    for track in ["pending", "running", "done", "failed"] {
+        for name in list_entries(root, track)? {
+            let tf = task_file(root, track, &name);
+            // Directives live in the comment head; 8 KiB covers any
+            // plausible head without reading a whole body.
+            let mut buf = Vec::new();
+            let found = match std::fs::File::open(&tf).and_then(|f| f.take(8192).read_to_end(&mut buf)) {
+                Ok(_) => crate::proto::task::dedup_key(&String::from_utf8_lossy(&buf)).is_some_and(|k| k == key),
+                // Entry vanished mid-scan (cancel/claim race): not a
+                // dedup target anymore. Any other read failure is a
+                // real fault — skipping it could silently mint a
+                // duplicate, so it fails the enqueue instead.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => return Err(e).with_context(|| format!("cannot read {}", tf.display())),
+            };
+            if found {
+                return Ok(Some(name));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Install a task body into pending/ as `NNNN_<slug>/task.sh`, mode
 /// 0755, via write-temp-dir-then-mv inside pending/ (atomic same-fs
-/// rename). Returns the entry name (`NNNN_<slug>`).
-pub fn enqueue(root: &Path, slug: &str, body: &str) -> Result<String> {
+/// rename). A body carrying `# shunt:id=` that already exists in a
+/// live track returns `Deduped` with the existing name — a re-push
+/// after a lost ack never mints a second number (design.md §3.3).
+pub fn enqueue(root: &Path, slug: &str, body: &str) -> Result<EnqueueOutcome> {
     use std::os::unix::fs::PermissionsExt;
-    let n = next_seq(root)?;
+    // One critical section — dedup-scan, mint, install — under a
+    // single `.seq.lock` hold, so concurrent same-key pushes
+    // serialize and the loser dedup-hits the winner's entry.
+    let _lock = seq_lock(root)?;
+    if let Some(key) = crate::proto::task::dedup_key(body) {
+        if let Some(name) = dedup_lookup(root, &key)? {
+            return Ok(EnqueueOutcome::Deduped(name));
+        }
+    }
+    let n = mint_locked(root)?;
     let name = format!("{n:04}_{slug}");
     let pending = root.join("pending");
     std::fs::create_dir_all(&pending)?;
@@ -349,7 +437,7 @@ pub fn enqueue(root: &Path, slug: &str, body: &str) -> Result<String> {
         let _ = std::fs::remove_dir_all(&tmp);
     }
     result?;
-    Ok(name)
+    Ok(EnqueueOutcome::Fresh(name))
 }
 
 /// Recent finished tasks in a track: `(entry name, rc)` newest first.
@@ -474,6 +562,90 @@ mod tests {
         // true exhaustion: 9999 occupied in a terminal track
         std::fs::create_dir_all(root.join("done/9999_last")).unwrap();
         assert!(next_seq(&root).is_err());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A re-push after a lost ack carries the same `# shunt:id=`:
+    /// the second enqueue must return the existing entry's name and
+    /// mint nothing (§3.3). Bodies without the directive are
+    /// distinct submissions — each mints its own number.
+    #[test]
+    fn enqueue_dedups_on_shunt_id() {
+        let root = tmp_root("dedup");
+        let body = "#!/usr/bin/env bash\n# shunt:id=abc-123\nexec true\n";
+        let first = enqueue(&root, "t-abc123", body).unwrap();
+        let EnqueueOutcome::Fresh(name) = first else {
+            panic!("first push must mint");
+        };
+        match enqueue(&root, "t-abc123", body).unwrap() {
+            EnqueueOutcome::Deduped(n) => assert_eq!(n, name),
+            EnqueueOutcome::Fresh(n) => panic!("re-push minted {n}"),
+        }
+        assert_eq!(pending_list(&root).unwrap(), vec![name]);
+        // No id -> no dedup, even for byte-identical bodies.
+        let plain = "#!/usr/bin/env bash\nexec true\n";
+        assert!(matches!(enqueue(&root, "x", plain).unwrap(), EnqueueOutcome::Fresh(_)));
+        assert!(matches!(enqueue(&root, "x", plain).unwrap(), EnqueueOutcome::Fresh(_)));
+        assert_eq!(pending_list(&root).unwrap().len(), 3);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The dedup scan follows the state machine's forward direction:
+    /// by retry time the original delivery may already sit in
+    /// running/ or a terminal track — the re-push must still hit it.
+    #[test]
+    fn enqueue_dedup_finds_claimed_and_finished() {
+        let root = tmp_root("deduptracks");
+        for track in ["running", "done", "failed"] {
+            let entry = root.join(track).join("0200_t");
+            std::fs::create_dir_all(&entry).unwrap();
+            std::fs::write(entry.join("task.sh"), "#!/usr/bin/env bash\n# shunt:id=zzz-9\nexec true\n").unwrap();
+            match enqueue(&root, "t-zzz9", "#!/usr/bin/env bash\n# shunt:id=zzz-9\nexec true\n").unwrap() {
+                EnqueueOutcome::Deduped(n) => assert_eq!(n, "0200_t"),
+                EnqueueOutcome::Fresh(n) => panic!("entry in {track}/ missed by dedup; minted {n}"),
+            }
+            std::fs::remove_dir_all(&entry).unwrap();
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Same-key pushes under `.seq.lock` serialize: exactly one
+    /// mints, every other thread dedup-hits the same entry name.
+    #[test]
+    fn enqueue_concurrent_same_key_single_entry() {
+        let root = tmp_root("deduprace");
+        let body = "#!/usr/bin/env bash\n# shunt:id=race-1\nexec true\n";
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let r = root.clone();
+            handles.push(std::thread::spawn(move || enqueue(&r, "t-race1", body).unwrap()));
+        }
+        let mut names = std::collections::BTreeSet::new();
+        let mut minted = 0;
+        for h in handles {
+            let out = h.join().unwrap();
+            minted += usize::from(!out.deduped());
+            names.insert(out.name().to_string());
+        }
+        assert_eq!(minted, 1, "more than one push minted a number");
+        assert_eq!(names.len(), 1, "threads disagreed on the entry: {names:?}");
+        assert_eq!(pending_list(&root).unwrap().len(), 1);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A corrupt `.seq` fails loudly (§3.2) — garbage, negative,
+    /// and >9999 are all operator damage, never silently reseeded.
+    /// A missing `.seq` is fine: the high-water floor rebuilds it.
+    #[test]
+    fn next_seq_corrupt_counter_bails() {
+        let root = tmp_root("corruptseq");
+        for bad in ["garbage", "-5", "10000", "99999999", ""] {
+            std::fs::write(root.join(".seq"), bad).unwrap();
+            let e = next_seq(&root).unwrap_err().to_string();
+            assert!(e.contains("corrupt"), "{bad:?} should bail as corrupt, got: {e}");
+        }
+        std::fs::remove_file(root.join(".seq")).unwrap();
+        assert_eq!(next_seq(&root).unwrap(), SEQ_INIT + 1);
         std::fs::remove_dir_all(&root).ok();
     }
 }

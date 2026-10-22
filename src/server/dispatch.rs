@@ -45,10 +45,13 @@ fn probe_client(t: &dyn Transport, client: &registry::ClientEntry) -> Reach {
     }
 }
 
-/// Push one staged body to the client; returns Ok on a clean ack.
-/// `entry.meta.slug` is already the collision-mangled `<slug>-<id>`
-/// (spool::submit); the remote uses it for the pending filename.
-fn push(t: &dyn Transport, client: &registry::ClientEntry, entry: &crate::proto::task::SpoolEntry, body: &str) -> Result<String> {
+/// Push one staged body to the client; returns Ok(name, deduped)
+/// on a clean ack. `entry.meta.slug` is already the
+/// collision-mangled `<slug>-<id>` (spool::submit); the remote uses
+/// it for the pending filename. `deduped` means the remote already
+/// held this delivery (`# shunt:id=` match) and returned the
+/// existing entry — the normal outcome of a retry after a lost ack.
+fn push(t: &dyn Transport, client: &registry::ClientEntry, entry: &crate::proto::task::SpoolEntry, body: &str) -> Result<(String, bool)> {
     // `--slug` is the §5 wire spelling; the submit-side slug check
     // guarantees the value never leads with a dash.
     let out = t.exec(client, &wire_argv(client, &["enqueue", "--json", "--slug", &entry.meta.slug, "--", "-"]), Some(body))?;
@@ -64,7 +67,8 @@ fn push(t: &dyn Transport, client: &registry::ClientEntry, entry: &crate::proto:
         // reports `unknown` with no diagnostic, design.md §4.6).
         // Treat it as a failed push — the spool entry stays for retry.
         anyhow::ensure!(queue_name_ok(name), "enqueue on {} acked ok but name {name:?} is not NNNN_<slug>", client.name);
-        Ok(name.to_string())
+        let deduped = v.get("deduped").and_then(|d| d.as_bool()).unwrap_or(false);
+        Ok((name.to_string(), deduped))
     } else {
         let msg = v.get("error").and_then(|e| e.as_str()).unwrap_or("enqueue rejected");
         anyhow::bail!("enqueue on {} failed: {msg}", client.name)
@@ -159,8 +163,8 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
         }
 
         match spool::body(&entry.id).and_then(|b| push(t, client, &entry, &b)) {
-            Ok(name) => {
-                eprintln!("dispatch: {} -> {} as {name}", entry.id, client.name);
+            Ok((name, deduped)) => {
+                eprintln!("dispatch: {} -> {} as {name}{}", entry.id, client.name, if deduped { " (deduped)" } else { "" });
                 // Ledger (design.md §4.5): the spool id -> queue
                 // name mapping survives only here once the spool
                 // entry is gone. Best-effort — a ledger failure
@@ -172,9 +176,11 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
                 // remaining deliverable entry would be skipped this
                 // poll for one fs error. The entry WAS delivered —
                 // log LOUDLY: the leftover spool file re-pushes next
-                // sweep (the task guard absorbs the double-run).
+                // sweep, where box-side `# shunt:id=` dedup returns
+                // the existing entry (the task guard is the backstop
+                // for remotes that predate the directive).
                 if let Err(e) = spool::remove(&entry.id) {
-                    eprintln!("dispatch: {} spool remove failed ({e:#}); entry will RE-PUSH next sweep — the remote guard must absorb the duplicate", entry.id);
+                    eprintln!("dispatch: {} spool remove failed ({e:#}); entry will RE-PUSH next sweep — box-side dedup returns the same name", entry.id);
                 }
                 pushed += 1;
             }

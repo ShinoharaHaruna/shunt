@@ -75,7 +75,7 @@ pub fn run(cli: Cli) -> Result<()> {
             // same slot (clap already rejects file + trailing argv).
             let file = a.file.as_deref().or(a.file_pos.as_deref());
             let id = crate::server::spool::submit(&client, a.project.as_deref(), a.guard.as_deref(), a.slug.as_deref(), file, a.timeout, &a.cmd)?;
-            println!("spooled {id}");
+            println!("spooled {id} (queue number is assigned on delivery; track with `shunt task show {id}`)");
             Ok(())
         }
         Command::Status(a) => {
@@ -398,7 +398,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 if a.cmd.is_empty() {
                     anyhow::bail!("missing command after --");
                 }
-                let meta = crate::proto::task::TaskMeta { slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard, workdir: None, env: Default::default(), cmd: a.cmd, timeout_s: a.timeout };
+                let meta = crate::proto::task::TaskMeta { id: None, slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard, workdir: None, env: Default::default(), cmd: a.cmd, timeout_s: a.timeout };
                 if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
                     anyhow::bail!("bad slug '{}': {p}", a.slug);
                 }
