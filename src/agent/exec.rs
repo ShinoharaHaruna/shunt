@@ -57,11 +57,11 @@ pub fn read_env_file(root: &Path) -> BTreeMap<String, String> {
 /// Spawn a claimed task under its own process group (pgid = leader
 /// pid), output appended to `running/<name>.log`. The `.pid` file is
 /// written by the daemon right after this returns. The returned
-/// `Option<u64>` is the task's wall-clock budget from its
-/// `# shunt:timeout_s=` head directive — the daemon counts it from
-/// spawn and a daemon restart re-times the requeued rerun wholesale
-/// (at-least-once, design.md §3.6).
-pub fn spawn_task(root: &Path, task_name: &str) -> Result<(Child, Option<u64>)> {
+/// `TaskDirectives` is the task's parsed comment head — the daemon
+/// counts `timeout_s` from spawn (a daemon restart re-times the
+/// requeued rerun wholesale, design.md §3.6) and reads the
+/// reschedule budget from `retry` at reap time (§3.9).
+pub fn spawn_task(root: &Path, task_name: &str) -> Result<(Child, TaskDirectives)> {
     let task = queue::task_file(root, "running", task_name);
     let log_path = queue::piece_file(root, "running", task_name, "log");
 
@@ -72,8 +72,8 @@ pub fn spawn_task(root: &Path, task_name: &str) -> Result<(Child, Option<u64>)> 
     }
 
     let env = read_env_file(root);
-    let (task_workdir, task_envs, timeout_s) = task_directives(&task);
-    let workdir = task_workdir.or_else(|| env.get("WORKDIR").cloned()).unwrap_or_else(|| root.to_string_lossy().into_owned());
+    let td = task_directives(&task);
+    let workdir = td.workdir.clone().or_else(|| env.get("WORKDIR").cloned()).unwrap_or_else(|| root.to_string_lossy().into_owned());
 
     let log_out = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
     let log_err = log_out.try_clone()?;
@@ -143,28 +143,44 @@ pub fn spawn_task(root: &Path, task_name: &str) -> Result<(Child, Option<u64>)> 
     }
     // Per-task `shunt-env:` directives applied last: a submitted
     // binding's overlay beats the queue-level env file.
-    for (k, v) in &task_envs {
+    for (k, v) in &td.envs {
         cmd.env(k, v);
     }
-    cmd.spawn().map(|c| (c, timeout_s)).context("spawn task failed")
+    cmd.spawn().map(|c| (c, td)).context("spawn task failed")
+}
+
+/// Directives parsed from a task file's comment head (design.md
+/// §3.13). Carried in the daemon's runpid handle so reap can reach
+/// the retry budget without re-reading the file.
+#[derive(Debug, Default)]
+pub struct TaskDirectives {
+    pub workdir: Option<String>,
+    pub envs: Vec<(String, String)>,
+    pub timeout_s: Option<u64>,
+    pub retry: Option<u32>,
+    pub retry_delay_s: Option<u64>,
+    pub gpu_mem_mb: Option<u32>,
+    pub ram_mb: Option<u32>,
+    pub cpu_cores: Option<u32>,
 }
 
 /// Parse the task file's comment head for per-task overrides
 /// (design.md §3.13):
-///   `# shunt:workdir=<abs path>`  — runner cwd for this task only
-///   `# shunt-env:<KEY>=<value>`   — env overlay, beats queue `env`
-///   `# shunt:timeout_s=<secs>`    — wall-clock budget; 0 = unlimited
+///   `# shunt:workdir=<abs path>`   — runner cwd for this task only
+///   `# shunt-env:<KEY>=<value>`    — env overlay, beats queue `env`
+///   `# shunt:timeout_s=<secs>`     — wall-clock budget; 0 = unlimited
+///   `# shunt:retry=<n>`            — reschedule budget on rc 75 (§3.9)
+///   `# shunt:retry_delay_s=<secs>` — wait before a requeued task is claimable
+///   `# shunt:gpu_mem_mb|ram_mb|cpu_cores=<n>` — declared estimates, annotation only (§3.16)
 /// Directives live in the comment head only; scanning stops at the
 /// first non-comment, non-blank line. Unknown `# shunt:` lines are
 /// skipped silently, so a task pushed to an older runner degrades to
 /// a no-op comment (backward compat).
-fn task_directives(task: &Path) -> (Option<String>, Vec<(String, String)>, Option<u64>) {
+pub fn task_directives(task: &Path) -> TaskDirectives {
+    let mut td = TaskDirectives::default();
     let Ok(text) = std::fs::read_to_string(task) else {
-        return (None, Vec::new(), None);
+        return td;
     };
-    let mut workdir = None;
-    let mut envs = Vec::new();
-    let mut timeout_s = None;
     for line in text.lines() {
         // trim_start like read_env_file: an indented `#` is still a
         // comment to the shell, so leading whitespace must neither
@@ -177,12 +193,12 @@ fn task_directives(task: &Path) -> (Option<String>, Vec<(String, String)>, Optio
             // NUL would panic `Command::arg` at spawn — drop the
             // directive so the env-file/default workdir applies.
             if !w.contains('\0') {
-                workdir = Some(w.to_string());
+                td.workdir = Some(w.to_string());
             }
         } else if let Some(t) = line.strip_prefix("# shunt:timeout_s=") {
             // Number parse stays whitespace-tolerant: `3600 ` means
             // 3600 either way, unlike env values where spaces are data.
-            timeout_s = t.trim().parse::<u64>().ok().filter(|&n| n > 0);
+            td.timeout_s = t.trim().parse::<u64>().ok().filter(|&n| n > 0);
         } else if let Some(kv) = line.strip_prefix("# shunt-env:") {
             if let Some((k, v)) = kv.split_once('=') {
                 // Key trimmed, value literal — the same semantics as
@@ -192,14 +208,24 @@ fn task_directives(task: &Path) -> (Option<String>, Vec<(String, String)>, Optio
                 // yields an empty key and a NUL in either half is a
                 // `Command::env` panic — both must be dropped.
                 if !k.is_empty() && !k.contains('\0') && !v.contains('\0') {
-                    envs.push((k.to_string(), v.to_string()));
+                    td.envs.push((k.to_string(), v.to_string()));
                 }
             }
+        } else if let Some(n) = line.strip_prefix("# shunt:retry=") {
+            td.retry = n.trim().parse::<u32>().ok();
+        } else if let Some(n) = line.strip_prefix("# shunt:retry_delay_s=") {
+            td.retry_delay_s = n.trim().parse::<u64>().ok();
+        } else if let Some(n) = line.strip_prefix("# shunt:gpu_mem_mb=") {
+            td.gpu_mem_mb = n.trim().parse::<u32>().ok();
+        } else if let Some(n) = line.strip_prefix("# shunt:ram_mb=") {
+            td.ram_mb = n.trim().parse::<u32>().ok();
+        } else if let Some(n) = line.strip_prefix("# shunt:cpu_cores=") {
+            td.cpu_cores = n.trim().parse::<u32>().ok();
         } else if !line.starts_with('#') && !line.trim().is_empty() {
             break;
         }
     }
-    (workdir, envs, timeout_s)
+    td
 }
 
 /// Outcome of `signal_pgid`. The distinction matters: `Gone`
@@ -497,6 +523,102 @@ pub fn finalize(root: &Path, base: &str, rc: i32, timeout_s: Option<u64>) -> Res
     Ok(())
 }
 
+/// Default wait before a rescheduled task may be claimed again when
+/// the task doesn't declare `# shunt:retry_delay_s=` (design.md
+/// §3.9). Long enough that a transient co-tenant burst can clear;
+/// short enough that a paid box doesn't idle for a wrong guess.
+pub const DEFAULT_RETRY_DELAY_S: u64 = 60;
+
+/// What `maybe_reschedule` decided — `Queued` reports the requeue
+/// details for the daemon's `task_rescheduled` event.
+pub enum Resched {
+    /// Not eligible: no retry budget declared, budget exhausted,
+    /// the rc isn't reschedule-shaped, or a same-named pending
+    /// entry already holds the target.
+    No,
+    /// Moved back to `pending/` under its original name.
+    Queued { attempt: u32, via: &'static str, next_at: u64 },
+}
+
+/// Bounded OOM-signature scan over the tail of a running task's
+/// log — the heuristic half of reschedule eligibility (design.md
+/// §3.9): only tasks that declared `# shunt:retry=` ever reach it,
+/// so a misread costs at most a bounded rerun, and a task that
+/// reports rc 75 itself never needs the scan at all.
+fn log_says_oom(root: &Path, base: &str) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let log = queue::piece_file(root, "running", base, "log");
+    let Ok(mut f) = std::fs::File::open(&log) else {
+        return false;
+    };
+    // OOM tracebacks sit at the end of the log; 16 KiB covers the
+    // longest plausible traceback block.
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let _ = f.seek(SeekFrom::Start(len.saturating_sub(16 * 1024)));
+    let mut buf = Vec::new();
+    if f.read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    let hay = String::from_utf8_lossy(&buf).to_lowercase();
+    ["out of memory", "outofmemoryerror", "cuda_error_out_of_memory", "alloc_failed", "cannot allocate memory"].iter().any(|p| hay.contains(p))
+}
+
+/// Reschedule a failed task instead of finalizing it (design.md
+/// §3.9): the task opts in with `# shunt:retry=N`, reports
+/// "resource was busy" via rc 75 (EX_TEMPFAIL), or — because most
+/// real OOM exits are plain rc 1 — trips the log heuristic. The
+/// entry keeps its `NNNN_` name: the number stays leased to this
+/// task, `task show`'s lazy queue_name match keeps resolving, and
+/// it rejoins pending/ at its sorted position. The failed
+/// attempt's log is swept to `failed/<base>.attempt<K>.log` — spawn
+/// truncates `log` each run, so keeping it inside would destroy
+/// the evidence. `attempts`/`retry_after` sidecars inside the
+/// entry carry the consumed budget and the wait deadline.
+/// Returns `Resched::No` when the task should just finalize
+/// normally; `Err` means the requeue itself broke (the caller
+/// finalizes anyway and logs the failure loudly).
+pub fn maybe_reschedule(root: &Path, base: &str, rc: i32, td: &TaskDirectives) -> Result<Resched> {
+    let Some(max_retry) = td.retry.filter(|&n| n > 0) else {
+        return Ok(Resched::No);
+    };
+    let entry = root.join("running").join(base);
+    if !entry.is_dir() {
+        return Ok(Resched::No); // legacy flat entry: no sidecar home
+    }
+    let attempts: u32 = std::fs::read_to_string(entry.join("attempts")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    if attempts >= max_retry {
+        return Ok(Resched::No); // budget exhausted -> failed/
+    }
+    let via = if rc == 75 {
+        "rc75"
+    } else if log_says_oom(root, base) {
+        "oom_heuristic"
+    } else {
+        return Ok(Resched::No);
+    };
+    let pending = root.join("pending");
+    if pending.join(base).exists() || pending.join(format!("{base}.sh")).exists() {
+        // Same-numbered pending entry already exists — requeueing
+        // would collide. Finalize normally; the caller logs the
+        // finish line, and the anomaly is visible in failed/.
+        return Ok(Resched::No);
+    }
+    // Sidecars go in BEFORE the move so a failed write bails while
+    // the entry still sits in running/ — the caller then finalizes
+    // it normally rather than losing the budget bookkeeping.
+    let attempt = attempts + 1;
+    std::fs::write(entry.join("attempts"), format!("{attempt}\n"))?;
+    let next_at = queue::unix_now() + td.retry_delay_s.unwrap_or(DEFAULT_RETRY_DELAY_S);
+    std::fs::write(entry.join("retry_after"), format!("{next_at}\n"))?;
+    let _ = std::fs::remove_file(entry.join("pid"));
+    std::fs::create_dir_all(root.join("failed"))?;
+    if entry.join("log").exists() {
+        let _ = std::fs::rename(entry.join("log"), root.join("failed").join(format!("{base}.attempt{attempt}.log")));
+    }
+    std::fs::rename(&entry, pending.join(base)).with_context(|| format!("cannot requeue {base} into pending/"))?;
+    Ok(Resched::Queued { attempt, via, next_at })
+}
+
 /// Exit status → shell-style rc: exit code, or 128+signal.
 pub fn status_rc(status: &std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
@@ -527,6 +649,21 @@ pub fn render_task(meta: &crate::proto::task::TaskMeta) -> String {
     }
     if let Some(t) = meta.timeout_s.filter(|&n| n > 0) {
         out.push_str(&format!("# shunt:timeout_s={t}\n"));
+    }
+    if let Some(n) = meta.retry.filter(|&n| n > 0) {
+        out.push_str(&format!("# shunt:retry={n}\n"));
+    }
+    if let Some(n) = meta.retry_delay_s {
+        out.push_str(&format!("# shunt:retry_delay_s={n}\n"));
+    }
+    if let Some(n) = meta.gpu_mem_mb {
+        out.push_str(&format!("# shunt:gpu_mem_mb={n}\n"));
+    }
+    if let Some(n) = meta.ram_mb {
+        out.push_str(&format!("# shunt:ram_mb={n}\n"));
+    }
+    if let Some(n) = meta.cpu_cores {
+        out.push_str(&format!("# shunt:cpu_cores={n}\n"));
     }
     for (k, v) in &meta.env {
         out.push_str(&format!("# shunt-env:{k}={v}\n"));
@@ -636,7 +773,7 @@ mod tests {
     #[test]
     fn guard_echo_uses_quoted_form() {
         for guard in ["runs/$(touch X).json", "runs/evil\".json", "runs/`id`.json"] {
-            let meta = crate::proto::task::TaskMeta { id: None, slug: "t".into(), guard: Some(guard.into()), workdir: None, env: Default::default(), cmd: vec!["true".into()], timeout_s: None };
+            let meta = crate::proto::task::TaskMeta { id: None, slug: "t".into(), guard: Some(guard.into()), workdir: None, env: Default::default(), cmd: vec!["true".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None };
             let body = super::render_task(&meta);
             let q = crate::server::transport::shell_quote(guard);
             let line = format!("if [ -e {q} ]; then printf 'guard hit: %s exists; skipping\\n' {q}; exit 0; fi");
@@ -659,7 +796,7 @@ mod tests {
         // `$( )` payload carries no slashes of its own.
         let guard = root.join("x$(touch PWNED).json");
         std::fs::write(&guard, "").unwrap();
-        let meta = crate::proto::task::TaskMeta { id: None, slug: "t".into(), guard: Some("x$(touch PWNED).json".into()), workdir: None, env: Default::default(), cmd: vec!["true".into()], timeout_s: None };
+        let meta = crate::proto::task::TaskMeta { id: None, slug: "t".into(), guard: Some("x$(touch PWNED).json".into()), workdir: None, env: Default::default(), cmd: vec!["true".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None };
         let body = super::render_task(&meta);
         let out = std::process::Command::new("bash").arg("-c").arg(&body).current_dir(&root).output().unwrap();
         assert!(out.status.success(), "bash exited {:?}: {}", out.status, String::from_utf8_lossy(&out.stderr));
@@ -703,7 +840,8 @@ mod tests {
 
         let task = std::env::temp_dir().join(format!("shunt-emptydir-{}", std::process::id()));
         std::fs::write(&task, "#!/usr/bin/env bash\n# shunt-env:=bad\n# shunt-env:OK=yes\n# shunt-env:PAD= x \necho hi\n").unwrap();
-        let (_, envs, _) = super::task_directives(&task);
+        let td = super::task_directives(&task);
+        let envs = td.envs;
         // Literal values here too: PAD's spaces ride through verbatim.
         assert_eq!(envs, vec![("OK".to_string(), "yes".to_string()), ("PAD".to_string(), " x ".to_string())]);
         std::fs::remove_file(&task).ok();
@@ -725,9 +863,9 @@ mod tests {
 
         let task = root.join("t.sh");
         std::fs::write(&task, "#!/usr/bin/env bash\n# shunt:workdir=/x\u{0}y\n# shunt-env:A\u{0}B=x\n# shunt-env:C=d\u{0}e\n# shunt-env:OK=yes\necho hi\n").unwrap();
-        let (workdir, envs, _) = super::task_directives(&task);
-        assert_eq!(workdir, None, "NUL workdir directive must be dropped");
-        assert_eq!(envs, vec![("OK".to_string(), "yes".to_string())]);
+        let td = super::task_directives(&task);
+        assert_eq!(td.workdir, None, "NUL workdir directive must be dropped");
+        assert_eq!(td.envs, vec![("OK".to_string(), "yes".to_string())]);
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -740,9 +878,9 @@ mod tests {
     fn indented_comments_do_not_end_directive_head() {
         let task = std::env::temp_dir().join(format!("shunt-indent-{}", std::process::id()));
         std::fs::write(&task, "#!/usr/bin/env bash\n# shunt-env:EARLY=1\n  # an indented note\n\t# shunt-env:LATE=2\n   # shunt:timeout_s=60\necho hi\n# shunt-env:NEVER=seen\n").unwrap();
-        let (_, envs, timeout_s) = super::task_directives(&task);
-        assert_eq!(envs, vec![("EARLY".to_string(), "1".to_string()), ("LATE".to_string(), "2".to_string())]);
-        assert_eq!(timeout_s, Some(60));
+        let td = super::task_directives(&task);
+        assert_eq!(td.envs, vec![("EARLY".to_string(), "1".to_string()), ("LATE".to_string(), "2".to_string())]);
+        assert_eq!(td.timeout_s, Some(60));
         std::fs::remove_file(&task).ok();
     }
 
@@ -868,6 +1006,87 @@ mod tests {
         assert!(running.join("0001_t.sh").exists());
         super::quarantine(&root, "running", "0001_t", "finalize failed (rc 0)").unwrap();
         assert!(root.join("failed").join("0001_t").join("task.sh").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Reschedule fixture: a running/ dir entry with a retry
+    /// directive task.sh plus log + pid sidecars.
+    fn running_entry(root: &std::path::Path, base: &str, head: &str, log: &str) {
+        let entry = root.join("running").join(base);
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(entry.join("task.sh"), head).unwrap();
+        std::fs::write(entry.join("log"), log).unwrap();
+        std::fs::write(entry.join("pid"), "1\n").unwrap();
+    }
+
+    /// rc 75 on a retry-declared task requeues into pending/ under
+    /// the SAME name — the ledger's queue_name keeps resolving —
+    /// with attempts/retry_after sidecars and the failed log swept
+    /// out (spawn truncates `log` on the rerun).
+    #[test]
+    fn reschedule_rc75_requeues_same_name() {
+        let root = std::env::temp_dir().join(format!("shunt-rs75-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(root.join("pending")).unwrap();
+        std::fs::create_dir_all(root.join("failed")).unwrap();
+        let head = "#!/usr/bin/env bash\n# shunt:retry=2\n# shunt:retry_delay_s=7\nexec false\n";
+        running_entry(&root, "0100_t", head, "=== task 0100_t\nbusy\n");
+        let td = super::task_directives(&root.join("running/0100_t/task.sh"));
+        match super::maybe_reschedule(&root, "0100_t", 75, &td).unwrap() {
+            super::Resched::Queued { attempt, via, .. } => {
+                assert_eq!(attempt, 1);
+                assert_eq!(via, "rc75");
+            }
+            _ => panic!("rc 75 + retry=2 must requeue"),
+        }
+        let entry = root.join("pending/0100_t");
+        assert!(entry.is_dir(), "entry did not land back in pending/");
+        assert_eq!(std::fs::read_to_string(entry.join("attempts")).unwrap(), "1\n");
+        let ra: u64 = std::fs::read_to_string(entry.join("retry_after")).unwrap().trim().parse().unwrap();
+        assert!(ra >= crate::agent::queue::unix_now() + 6, "retry_after not ~7s out: {ra}");
+        assert!(!entry.join("pid").exists());
+        assert!(root.join("failed/0100_t.attempt1.log").exists(), "failed log not swept");
+        assert!(!entry.join("log").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The OOM heuristic is bounded by declaration: a retry task
+    /// dying rc 1 with an OOM traceback requeues via the heuristic,
+    /// while a task WITHOUT `# shunt:retry=` saying the same words
+    /// still finalizes — the estimate never turns into a silent
+    /// retry of an arbitrary failure.
+    #[test]
+    fn reschedule_oom_heuristic_only_for_retry_tasks() {
+        let root = std::env::temp_dir().join(format!("shunt-rsom-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(root.join("pending")).unwrap();
+        let oom_log = "=== task 0100_t\ntorch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.50 GiB\n";
+        running_entry(&root, "0100_t", "#!/usr/bin/env bash\n# shunt:retry=1\nexec false\n", oom_log);
+        let td = super::task_directives(&root.join("running/0100_t/task.sh"));
+        match super::maybe_reschedule(&root, "0100_t", 1, &td).unwrap() {
+            super::Resched::Queued { via, .. } => assert_eq!(via, "oom_heuristic"),
+            _ => panic!("OOM traceback + retry=1 must requeue"),
+        }
+        // Same log, no retry declared -> No.
+        running_entry(&root, "0200_u", "#!/usr/bin/env bash\nexec false\n", oom_log);
+        let td = super::task_directives(&root.join("running/0200_u/task.sh"));
+        assert!(matches!(super::maybe_reschedule(&root, "0200_u", 1, &td).unwrap(), super::Resched::No));
+        // rc 1, retry declared, but log is clean -> No.
+        running_entry(&root, "0300_v", "#!/usr/bin/env bash\n# shunt:retry=1\nexec false\n", "=== task\nsyntax error near token\n");
+        let td = super::task_directives(&root.join("running/0300_v/task.sh"));
+        assert!(matches!(super::maybe_reschedule(&root, "0300_v", 1, &td).unwrap(), super::Resched::No));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `attempts` reaching the declared budget finalizes instead of
+    /// requeueing — retry=N means N extra runs, not N failures.
+    #[test]
+    fn reschedule_budget_exhaustion_finalizes() {
+        let root = std::env::temp_dir().join(format!("shunt-rsex-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(root.join("pending")).unwrap();
+        running_entry(&root, "0100_t", "#!/usr/bin/env bash\n# shunt:retry=1\nexec false\n", "=== task\n");
+        std::fs::write(root.join("running/0100_t/attempts"), "1\n").unwrap();
+        let td = super::task_directives(&root.join("running/0100_t/task.sh"));
+        assert!(matches!(super::maybe_reschedule(&root, "0100_t", 75, &td).unwrap(), super::Resched::No));
+        assert!(root.join("running/0100_t").exists(), "exhausted entry must stay for finalize");
         std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -90,7 +90,7 @@ fn fixture(tag: &str) -> Result<(PathBuf, ClientEntry)> {
 }
 
 fn entry(id: &str, slug: &str) -> SpoolEntry {
-    SpoolEntry { id: id.into(), project: "p".into(), client: "fake-a".into(), meta: TaskMeta { id: None, slug: slug.into(), guard: None, workdir: None, env: BTreeMap::new(), cmd: vec!["echo".into(), "hi".into()], timeout_s: None }, submitted_at: "2024-01-01T00:00:00Z".into() }
+    SpoolEntry { id: id.into(), project: "p".into(), client: "fake-a".into(), meta: TaskMeta { id: None, slug: slug.into(), guard: None, workdir: None, env: BTreeMap::new(), cmd: vec!["echo".into(), "hi".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None }, submitted_at: "2024-01-01T00:00:00Z".into() }
 }
 
 #[test]
@@ -328,7 +328,7 @@ fn submit_file_merges_binding_directives() -> Result<()> {
 
     let f = home.join("t.sh");
     std::fs::write(&f, "#!/usr/bin/env bash\necho hi\n")?;
-    let id = spool::submit("fake-a", Some("p"), Some("runs/g.json"), None, Some(f.to_str().unwrap()), None, &[])?;
+    let id = spool::submit("fake-a", Some("p"), Some("runs/g.json"), None, Some(f.to_str().unwrap()), &Default::default(), &[])?;
     let body = spool::body(&id)?;
     let head_end = body.find("echo hi").unwrap();
     let head = &body[..head_end];
@@ -349,7 +349,7 @@ fn submit_file_own_directives_win() -> Result<()> {
 
     let f = home.join("t.sh");
     std::fs::write(&f, "#!/bin/sh\n# shunt:workdir=/own/wd\n# shunt-env:K=own\nset -e\necho hi\n")?;
-    let id = spool::submit("fake-a", Some("p"), None, None, Some(f.to_str().unwrap()), None, &[])?;
+    let id = spool::submit("fake-a", Some("p"), None, None, Some(f.to_str().unwrap()), &Default::default(), &[])?;
     let body = spool::body(&id)?;
     // Binding workdir/K suppressed; K2 merged in above the file's lines.
     assert_eq!(body.matches("# shunt:workdir=").count(), 1, "{body}");
@@ -369,7 +369,7 @@ fn submit_file_own_directives_win() -> Result<()> {
 fn submit_rejects_dash_slug() -> Result<()> {
     let _lock = HOME_LOCK.lock().unwrap();
     let (_home, _c) = fixture("dashslug")?;
-    let e = spool::submit("fake-a", None, None, Some("-rf"), None, None, &["echo".into(), "hi".into()]);
+    let e = spool::submit("fake-a", None, None, Some("-rf"), None, &Default::default(), &["echo".into(), "hi".into()]);
     assert!(e.is_err(), "dash slug spooled");
     assert!(e.unwrap_err().to_string().contains("bad slug"));
     assert!(spool::list()?.is_empty(), "rejected submit must not stage");

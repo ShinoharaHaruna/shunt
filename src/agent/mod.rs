@@ -7,3 +7,4 @@ pub mod exec;
 pub mod probe;
 pub mod queue;
 pub mod shutdown;
+pub mod usage;

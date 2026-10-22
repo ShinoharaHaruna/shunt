@@ -2,7 +2,7 @@
 //! `<SHUNT_HOME>/spool/` as `<task-id>.json` + `<task-id>.sh` so a
 //! submission survives while the box is powered off.
 
-use crate::proto::task::{sanitize_slug, SpoolEntry, TaskMeta};
+use crate::proto::task::{sanitize_slug, SpoolEntry, TaskFlags, TaskMeta};
 use crate::server::registry::{self, shunt_home};
 use crate::server::transport::shell_quote;
 use anyhow::{bail, Context, Result};
@@ -32,12 +32,27 @@ fn merge_file_directives(body: &str, meta: &TaskMeta) -> String {
     // the binding (workdir by key presence, env per key).
     let mut have_workdir = false;
     let mut have_timeout = false;
+    let mut have_retry = false;
+    let mut have_retry_delay = false;
+    let mut have_gpu_mem = false;
+    let mut have_ram = false;
+    let mut have_cpu_cores = false;
     let mut have_env: std::collections::BTreeSet<String> = Default::default();
     for l in &lines[head_start..head_end] {
         if l.starts_with("# shunt:workdir=") {
             have_workdir = true;
         } else if l.starts_with("# shunt:timeout_s=") {
             have_timeout = true;
+        } else if l.starts_with("# shunt:retry=") {
+            have_retry = true;
+        } else if l.starts_with("# shunt:retry_delay_s=") {
+            have_retry_delay = true;
+        } else if l.starts_with("# shunt:gpu_mem_mb=") {
+            have_gpu_mem = true;
+        } else if l.starts_with("# shunt:ram_mb=") {
+            have_ram = true;
+        } else if l.starts_with("# shunt:cpu_cores=") {
+            have_cpu_cores = true;
         } else if let Some(kv) = l.strip_prefix("# shunt-env:") {
             if let Some((k, _)) = kv.split_once('=') {
                 have_env.insert(k.trim().to_string());
@@ -61,6 +76,31 @@ fn merge_file_directives(body: &str, meta: &TaskMeta) -> String {
     if !have_timeout {
         if let Some(t) = meta.timeout_s {
             inject_head.push_str(&format!("# shunt:timeout_s={t}\n"));
+        }
+    }
+    if let Some(n) = meta.retry.filter(|&n| n > 0) {
+        if !have_retry {
+            inject_head.push_str(&format!("# shunt:retry={n}\n"));
+        }
+    }
+    if let Some(n) = meta.retry_delay_s {
+        if !have_retry_delay {
+            inject_head.push_str(&format!("# shunt:retry_delay_s={n}\n"));
+        }
+    }
+    if let Some(n) = meta.gpu_mem_mb {
+        if !have_gpu_mem {
+            inject_head.push_str(&format!("# shunt:gpu_mem_mb={n}\n"));
+        }
+    }
+    if let Some(n) = meta.ram_mb {
+        if !have_ram {
+            inject_head.push_str(&format!("# shunt:ram_mb={n}\n"));
+        }
+    }
+    if let Some(n) = meta.cpu_cores {
+        if !have_cpu_cores {
+            inject_head.push_str(&format!("# shunt:cpu_cores={n}\n"));
         }
     }
     for (k, v) in &meta.env {
@@ -146,12 +186,12 @@ fn new_task_id(dir: &std::path::Path) -> String {
 
 /// `shunt submit`: resolve client (+ project binding), build the task
 /// body, stage it. Returns the task id.
-pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slug: Option<&str>, file: Option<&str>, timeout_s: Option<u64>, cmd: &[String]) -> Result<String> {
+pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slug: Option<&str>, file: Option<&str>, flags: &TaskFlags, cmd: &[String]) -> Result<String> {
     let client = registry::load_client(client_name)?;
 
     // Project binding supplies workdir + env for the record; the body
     // itself carries no `cd` (the runner places cwd, design.md §3.12).
-    let mut meta = TaskMeta { id: None, slug: String::new(), guard: guard.map(str::to_string), workdir: None, env: Default::default(), cmd: Vec::new(), timeout_s: timeout_s.filter(|&n| n > 0) };
+    let mut meta = TaskMeta { id: None, slug: String::new(), guard: guard.map(str::to_string), workdir: None, env: Default::default(), cmd: Vec::new(), timeout_s: flags.timeout_s.filter(|&n| n > 0), retry: flags.retry.filter(|&n| n > 0), retry_delay_s: flags.retry_delay_s, gpu_mem_mb: flags.gpu_mem_mb, ram_mb: flags.ram_mb, cpu_cores: flags.cpu_cores };
     if let Some(pname) = project {
         let p = registry::load_project(pname)?;
         let b = p.bind.iter().find(|b| b.client == client_name).with_context(|| format!("project {pname} is not bound to client {client_name}"))?;
@@ -161,6 +201,10 @@ pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slu
         meta.env = p.defaults.env.clone();
         meta.env.extend(b.env.clone());
     }
+    // CLI `--env` is the most specific layer: it beats the binding
+    // (and therefore [defaults]) per key, which is how an agent pins
+    // e.g. CUDA_VISIBLE_DEVICES onto one submission.
+    meta.env.extend(flags.env.clone());
 
     let body = if let Some(path) = file {
         // The positional file slot means a bare word lands here; the
@@ -333,7 +377,7 @@ mod tests {
 
     #[test]
     fn body_matches_task_format() {
-        let meta = TaskMeta { id: Some("deadbeef-01".into()), slug: "train-v2-ab12".into(), guard: Some("runs/x.json".into()), workdir: Some("/root/autodl-tmp/P".into()), env: Default::default(), cmd: vec!["uv".into(), "run".into(), "python".into(), "a b.py".into()], timeout_s: None };
+        let meta = TaskMeta { id: Some("deadbeef-01".into()), slug: "train-v2-ab12".into(), guard: Some("runs/x.json".into()), workdir: Some("/root/autodl-tmp/P".into()), env: Default::default(), cmd: vec!["uv".into(), "run".into(), "python".into(), "a b.py".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None };
         let body = crate::agent::exec::render_task(&meta);
         assert!(body.starts_with("#!/usr/bin/env bash\n"));
         assert!(body.contains("# task: train-v2-ab12 (generated by shunt "));
@@ -350,7 +394,7 @@ mod tests {
     #[test]
     fn file_merge_guard_echo_uses_quoted_form() {
         for guard in ["runs/$(touch X).json", "runs/evil\".json", "runs/`id`.json"] {
-            let meta = TaskMeta { id: None, slug: "t".into(), guard: Some(guard.into()), workdir: None, env: Default::default(), cmd: Vec::new(), timeout_s: None };
+            let meta = TaskMeta { id: None, slug: "t".into(), guard: Some(guard.into()), workdir: None, env: Default::default(), cmd: Vec::new(), timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None };
             let out = merge_file_directives("#!/usr/bin/env bash\necho hi\n", &meta);
             let q = shell_quote(guard);
             let line = format!("if [ -e {q} ]; then printf 'guard hit: %s exists; skipping\\n' {q}; exit 0; fi");

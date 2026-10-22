@@ -51,7 +51,7 @@ fn localhost_submit_dispatch_execute_done() -> Result<()> {
 
     // Server side: stage a task for localhost, then one dispatch sweep.
     // The sweep auto-heals (starts) the real daemon, then enqueues.
-    spool::submit("localhost", None, None, Some("e2e"), None, None, &["touch".into(), "e2e.done".into()])?;
+    spool::submit("localhost", None, None, Some("e2e"), None, &Default::default(), &["touch".into(), "e2e.done".into()])?;
     assert!(dispatch::sweep_with(&t)? >= 1);
     assert!(spool::list()?.is_empty(), "spool should drain on ack");
 
@@ -74,7 +74,7 @@ fn localhost_submit_dispatch_execute_done() -> Result<()> {
     let mut env = std::collections::BTreeMap::new();
     env.insert("E2E_HELLO".to_string(), "world".to_string());
     registry::save_project(&registry::ProjectEntry { name: "proj".into(), desc: String::new(), repo: String::new(), defaults: Default::default(), bind: vec![registry::Binding { client: "localhost".into(), workdir: workdir.display().to_string(), env }] })?;
-    spool::submit("localhost", Some("proj"), None, Some("e2e2"), None, None, &["sh".into(), "-c".into(), "touch proj-$E2E_HELLO".into()])?;
+    spool::submit("localhost", Some("proj"), None, Some("e2e2"), None, &Default::default(), &["sh".into(), "-c".into(), "touch proj-$E2E_HELLO".into()])?;
     assert!(dispatch::sweep_with(&t)? >= 1);
     let deadline = Instant::now() + Duration::from_secs(30);
     while !workdir.join("proj-world").exists() {

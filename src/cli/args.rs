@@ -152,6 +152,28 @@ pub struct SubmitArgs {
     /// Wall-clock budget in seconds; 0/omitted = unlimited
     #[arg(long)]
     pub timeout: Option<u64>,
+    /// Reschedule budget: on rc 75 ("resource busy") — or a
+    /// retry-declared OOM heuristic — the daemon requeues the task
+    /// up to N extra times instead of failing it
+    #[arg(long)]
+    pub retry: Option<u32>,
+    /// Seconds a rescheduled task waits before it is claimable
+    /// again (default 60)
+    #[arg(long = "retry-delay")]
+    pub retry_delay_s: Option<u64>,
+    /// Declared resource estimates (MiB / cores) — recorded in the
+    /// task head and shown beside measured usage; never gated on
+    #[arg(long = "gpu-mem-mb")]
+    pub gpu_mem_mb: Option<u32>,
+    #[arg(long = "ram-mb")]
+    pub ram_mb: Option<u32>,
+    #[arg(long = "cpu-cores")]
+    pub cpu_cores: Option<u32>,
+    /// KEY=value env overlay for this task (repeatable); beats the
+    /// project binding's env per key — e.g.
+    /// --env CUDA_VISIBLE_DEVICES=1 pins GPU 1
+    #[arg(long = "env", value_name = "KEY=value")]
+    pub env: Vec<String>,
     /// Task file to spool (same as --file): `submit -c x file.sh`.
     /// A bare word that is not a file is an error, not a command —
     /// commands must come after `--`, or a typo'd path would spool
@@ -238,6 +260,23 @@ pub struct NewArgs {
     /// Wall-clock budget in seconds; 0/omitted = unlimited
     #[arg(long)]
     pub timeout: Option<u64>,
+    /// Reschedule budget: requeue on rc 75 up to N extra times
+    #[arg(long)]
+    pub retry: Option<u32>,
+    /// Seconds a rescheduled task waits before it is claimable
+    /// again (default 60)
+    #[arg(long = "retry-delay")]
+    pub retry_delay_s: Option<u64>,
+    /// Declared resource estimates — annotation only, never gated
+    #[arg(long = "gpu-mem-mb")]
+    pub gpu_mem_mb: Option<u32>,
+    #[arg(long = "ram-mb")]
+    pub ram_mb: Option<u32>,
+    #[arg(long = "cpu-cores")]
+    pub cpu_cores: Option<u32>,
+    /// KEY=value env overlay (repeatable), e.g. --env CUDA_VISIBLE_DEVICES=1
+    #[arg(long = "env", value_name = "KEY=value")]
+    pub env: Vec<String>,
     #[arg(long)]
     pub root: Option<String>,
     #[arg(long)]

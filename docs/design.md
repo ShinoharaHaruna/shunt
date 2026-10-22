@@ -15,7 +15,7 @@ FIFO is the _claim_ order, not the execution shape: the client runs a concurrent
 Non-goals, by deliberate exclusion:
 
 - No DAG dependencies between tasks. Use Airflow.
-- No retry backoff or retry budget. Failed tasks land in `failed/`; the agent decides what to do next.
+- No automatic retry of arbitrary failures. A task opts into rescheduling explicitly (rc 75 + `# shunt:retry=N`, §3.9); everything else still lands in `failed/` and the agent decides. Declared resource estimates are annotations for the agent's estimation loop, never admission gates (§3.16).
 - No user-facing HTTP API. The client CLI is the API; SSH carries it.
 - No multi-machine load balancing or automatic client selection. Task submission always names the client explicitly; matching task requirements to machine facts is the agent's job, with facts exposed via `shunt clients --json`.
 - No remote power-on. Billing on AutoDL-class vendors is bound to the console "power on" action a human (or an upstream automation outside shunt's scope) performs. shunt only ever powers a box _off_.
@@ -65,6 +65,8 @@ Under `$QROOT` (client-local; resolved as `--root` flag > `$SHUNT_ROOT` env. Eve
 | `daemon.pid`         | daemon pid, written at startup                                                                                                       |
 | `daemon.log`         | structured JSONL event stream (see §3.9); rotated to `daemon.log.1` past `SHUNT_DAEMON_LOG_MAX` (default 1 MiB), one generation kept |
 | `.seq` + `.seq.lock` | enqueue counter under flock; a corrupt `.seq` fails the enqueue with remediation, never reseeds silently (§3.2)                      |
+
+Per-entry sidecars beyond `task.sh`/`log`/`pid`/`exit`: `usage` (measured resource peaks, §3.16), `attempts` + `retry_after` (reschedule bookkeeping, §3.9; `retry_after` lives in pending/ only and is removed on claim), `timeout` (budget-death marker, §3.9), `shunt_error` (quarantine note).
 
 Every queue entry is a directory named `NNNN_<slug>` containing `task.sh` plus the sidecars it accumulates (`log`, `pid`, `exit`). Readers also understand the legacy flat layout (`NNNN_<slug>.sh` with `.sh.log`/`.sh.pid`/`.sh.exit` sidecars) so pre-existing queues need no migration; writers always create dirs, and `finalize` normalizes any legacy entry it touches. A suffixless flat file is NOT an entry — it is ignored entirely.
 
@@ -128,10 +130,11 @@ Then sweep legacy strays: any remaining `running/*.pid` files are removed; any r
 
 - Read desired workers (see §3.8). While `len(running) < workers`:
   1. Snapshot the `pending/` list once per cycle (`LC_ALL=C` name sort) and walk it — re-reading the head after every failed claim would hot-spin on the same unclaimable entry for the whole poll.
-  2. Claim by `mv pending/<f> running/<f>`. If the entry vanished mid-race (a concurrent `shunt cancel` won), skip to the next candidate — the `mv` result is the recheck, not a prior existence test. If the `mv` fails but the entry still exists (a name collision with a leftover `running/<f>` dir, permissions), the entry can never be claimed: log `claim_failed` and quarantine it to `failed/` with a `shunt_error` note rather than letting it poison every future poll's head-of-queue.
-  3. `chmod +x`, write log header (`=== task`, `=== start <iso>`).
-  4. Spawn via `process_group(0)` (setsid) so the task's pgid equals its leader pid; stdout/stderr append to `running/<name>/log`.
-  5. Write the leader pid **and its /proc start_time** to `running/<name>/pid` (`<pgid> <start_time>`), record pgid → entry name. The start_time pin lets `shunt kill` distinguish the leader it spawned from a recycled pid (§3.9a below).
+  2. A rescheduled entry is not claimable until its `retry_after` timestamp passes (§3.9): not-yet-due candidates are skipped this cycle; an expired or unparseable sidecar counts as due and is removed on the way through.
+  3. Claim by `mv pending/<f> running/<f>`. If the entry vanished mid-race (a concurrent `shunt cancel` won), skip to the next candidate — the `mv` result is the recheck, not a prior existence test. If the `mv` fails but the entry still exists (a name collision with a leftover `running/<f>` dir, permissions), the entry can never be claimed: log `claim_failed` and quarantine it to `failed/` with a `shunt_error` note rather than letting it poison every future poll's head-of-queue.
+  4. `chmod +x`, write log header (`=== task`, `=== start <iso>`).
+  5. Spawn via `process_group(0)` (setsid) so the task's pgid equals its leader pid; stdout/stderr append to `running/<name>/log`.
+  6. Write the leader pid **and its /proc start_time** to `running/<name>/pid` (`<pgid> <start_time>`), record pgid → entry name. The start_time pin lets `shunt kill` distinguish the leader it spawned from a recycled pid (§3.9a below).
 - Each task runs in its own process group precisely so `shunt kill` and the daemon's signal forwarding can address the whole task tree by pgid without touching the daemon or sibling tasks.
 
 ### 3.8 Worker pool resolution
@@ -155,6 +158,13 @@ Re-read every cycle. One resolution path serves the daemon loop and `status`/`wo
   - if the task exceeded its `# shunt:timeout_s=` budget (§3.13): it lands in `failed/` even on a clean-exit race, the log gains a `=== timeout: exceeded wall-clock limit <n>s` line, and a `timeout` marker file carrying the limit is written beside `exit` so agents can tell budget death from a plain non-zero rc;
   - log `finish` (`{task, rc, dest}`).
 - If the finalize `mv` fails, the entry is quarantined to `failed/` with a `shunt_error` note and a `finalize_failed` event is logged — same rule as §3.6: no pid-less ghosts in `running/`. If quarantine itself fails, a `ghost_entry` WARNING is logged.
+- **Reschedule (rc 75 / EX_TEMPFAIL) runs BEFORE finalize.** A task that declared `# shunt:retry=N` and dies with rc 75 — or, via the bounded OOM heuristic below, any nonzero rc whose log tail matches a fixed OOM-signature list (`out of memory`, `OutOfMemoryError`, `CUDA_ERROR_OUT_OF_MEMORY`, `ALLOC_FAILED`, `cannot allocate memory`, case-insensitive) — is moved back to `pending/` under its SAME `NNNN_<slug>` name instead of landing in `failed/`:
+  - the entry's `attempts` sidecar is incremented; at `attempts > N` the entry finalizes normally (budget exhausted — `retry=N` means N extra runs).
+  - a `retry_after` sidecar (`unix now + # shunt:retry_delay_s=`, default 60 s) holds it unclaimable until then (§3.7 step 2) — without it a still-busy resource would burn the whole budget in one poll burst.
+  - the `pid` file is removed; the failed attempt's `log` is swept to `failed/<base>.attempt<K>.log` (spawn truncates `log` on each run, so keeping it inside would destroy the evidence), and a `task_rescheduled` event is logged `{task, rc, via: rc75|oom_heuristic, attempt, retry_after}`.
+  - eligibility deliberately requires BOTH a declared budget AND a reschedule-shaped rc: the OOM heuristic never applies to undeclared tasks, so a plain failure can never turn into a silent retry of a real bug — and rc 75 without `# shunt:retry=` is just another nonzero rc.
+  - a requeue that cannot complete (rename collision, fs error) falls back to normal finalize with a `reschedule_failed` WARNING — the entry never ghosts in `running/`.
+  - same-name requeue preserves the `task show` ledger mapping and the entry's sorted position; it also keeps `# shunt:id=` delivery dedup honest (a re-push still finds the entry).
 - Terminal tracks are capped: after each finalize, when `done/` or `failed/` exceeds `SHUNT_TRACK_KEEP` (default 500) entries, the oldest by name sort (sequence order) move to `<track>/.archive/` — dot-prefixed, invisible to every listing, preserved on disk. Without the cap a long-lived queue makes every `status` readdir grow without bound.
 
 ### 3.9a Signaling discipline (`shunt kill`)
@@ -219,6 +229,11 @@ A submitted task carries its binding inside the body, as comment-head directives
 # shunt:workdir=/abs/path        # runner cwd for this task only
 # shunt-env:KEY=value            # env overlay; beats the queue env file
 # shunt:timeout_s=3600           # wall-clock budget; 0/absent = unlimited
+# shunt:retry=2                  # reschedule budget on rc 75 / OOM heuristic (§3.9)
+# shunt:retry_delay_s=60         # wait before a requeued task is claimable (default 60)
+# shunt:gpu_mem_mb=1500          # declared estimates — ANNOTATION ONLY (§3.16)
+# shunt:ram_mb=2048              #   nothing is gated on these; the agent refines
+# shunt:cpu_cores=4              #   them against measured `usage` after each run
 ```
 
 All are optional (`env` is repeatable); scanning stops at the first non-comment line, so hand-written tasks can set them too. An unrecognized `# shunt:` line is just a comment to older runners — new directives degrade harmlessly. `# shunt:id=` is consumed by the enqueue allocator (§3.3), not the runner; `submit` always injects it above the file's own head so a stale embedded id can never shadow the current delivery's (first match wins).
@@ -234,6 +249,16 @@ The timeout is a wall-clock budget counted from spawn, not a retry: at the deadl
 | `daemon_alive` duplicated in three scripts with the grep string inline                             | liveness check + identity string are single-sourced                    |
 | `qstatus.sh` prints `3 (default)` as a literal                                                     | report the resolved workers value and source                           |
 | task-wrap logic duplicated client-side (`rwq_enqueue`) and remote (`qnew`)                         | one generator: `shunt mktask` on the client; submit paths forward args |
+
+### 3.16 Resource declarations and usage telemetry
+
+The estimate/measure loop (the issue-#3 design): the server proposes a task with declared estimates (`# shunt:gpu_mem_mb=`/`ram_mb=`/`cpu_cores=`, set via `submit --gpu-mem-mb`/`--ram-mb`/`--cpu-cores`), the box runs it and measures actual peaks, `status` reports declared-vs-observed side by side, and the agent refines its next estimate against the diff. **Estimates are annotations, never gates** — an estimate that gated would be a wrong-guess amplifier (too low admits OOM anyway, too high waits forever); the protective mechanism is the reschedule signal (§3.9), which acts on the real failure, not the prediction.
+
+- **Sampling.** Every poll cycle the daemon takes one Snapshot of `/proc` (one sweep, shared across the pool): pid → (pgid, utime+stime, rss) via `/proc/<pid>/stat` (comm may hold spaces/parens — parse from the last `)`), plus `nvidia-smi --query-compute-apps=pid,gpu_uuid,used_gpu_memory` mapped back to process groups for per-card VRAM attribution (unknown uuids are skipped, never guessed onto index 0). RAM peak = max summed group RSS; CPU = cumulative core-seconds (Σ group jiffies deltas, 100 Hz); VRAM peak = max per-card usage.
+- **The `usage` sidecar.** Peaks are written into `running/<entry>/usage` (JSON `{peak_vram_mb:{<idx>:mb}, peak_ram_mb, cpu_seconds, samples}`, tmp+rename) every cycle, so the file travels with the entry to `done/`/`failed/` at finalize for free — the SAME file backs live status and terminal records. Peak-only, no time series: the agent needs the ceiling, not the curve.
+- **status --json gains** `resources{gpus[]:{index,uuid,name,mem_total_mb,mem_free_mb,util_pct}, ram_total_mb, ram_free_mb, load1}` (host `/proc/meminfo` deliberately, not the cgroup view — on a shared box the contention that matters is foreign HOST use), `pending_detail`/`running_detail` (`{name, declared, usage}`; the `pending`/`running` name lists stay for order-only consumers), and `usage`+`declared` on `done_recent`/`failed_recent` ExitRecords. All serde-defaulted — older remotes simply omit the fields.
+- **GPU placement** needs no machinery: `# shunt-env:CUDA_VISIBLE_DEVICES=<idx>` (or `submit --env`) already lands in the task's environment; the agent picks a card from `resources.gpus[]` at submit time. Multi-GPU attribution is per-card in `peak_vram_mb` — no `gpu_id` directive exists because placement is env data, not shunt policy.
+- **Residual limits:** GPU SM% is not attributable per process (reported per card only); cpu_seconds loses children that die unsampled; usage files exist only on dir-layout entries; `.archive/` entries are never detail-scanned; a task rescheduled past its budget lands in `failed/` normally — reschedule is not infinite.
 
 ## 4. Server: registry, spool, dispatcher
 
@@ -365,21 +390,21 @@ The `protocol` field is validated, not just located: an answer whose `protocol` 
 
 Transport is chosen per client row: `ssh` (default) execs over SSH; `local` (`local = true` in a row, including the pre-registered `localhost`) spawns the same argv via the local `shunt` binary — the wire surface is identical and the loopback needs no network, no key. Every wire call appends `--root <qroot>` from the client row, so the registry is the single source of truth for where the queue lives; ops that read state also pass `--json`.
 
-| op                                       | request                               | response sketch                                                                                                                          |
-| ---------------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `enqueue`                                | task body on stdin; `--slug`          | `{ok, name, deduped?}` — `deduped: true` when `# shunt:id=` matched an existing entry                                                    |
-| `new`                                    | `--slug`, `--guard`, `--` argv        | `{ok, name, deduped?}`                                                                                                                   |
-| `mktask`                                 | same as `new`                         | task body on stdout                                                                                                                      |
-| `status`                                 | —                                     | `{daemon:{alive,pid}, workers:{value,source}, running[], pending[], done_recent[], failed_recent[], stop, shutdown:{armed,grace_s,cmd}}` |
-| `cancel`                                 | pattern                               | `{ok, name}` or error on 0/multi match                                                                                                   |
-| `prio`                                   | pattern, n                            | `{ok, from, to}`; error if target exists                                                                                                 |
-| `kill`                                   | pattern                               | `{ok, pgid, escalated}`; `{ok, gone}` when the recorded leader is dead/recycled — nothing was signaled                                   |
-| `workers get` / `workers set N`          | —                                     | `{workers, source}`                                                                                                                      |
-| `shutdown on [grace]` / `off` / `status` | —                                     | `{armed, grace_s, running, pending}`                                                                                                     |
-| `probe`                                  | —                                     | `{gpu, driver, cuda, cores, mem_gb, disk_free_gb, python}`                                                                               |
-| `logs`                                   | `-n N` and/or `-- pat`; bare = daemon | text stream (`-f` is local-only: ssh exec is collected under the §5 deadline, so wire follow is refused, not streamed)                   |
-| `start` / `stop` / `daemon`              | —                                     | `{ok, pid}` / `{ok}` / runs the loop (foreground; `start` daemonizes)                                                                    |
-| `init`                                   | `--qroot`                             | `{ok}` creates dirs                                                                                                                      |
+| op                                       | request                               | response sketch                                                                                                                                                                                |
+| ---------------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enqueue`                                | task body on stdin; `--slug`          | `{ok, name, deduped?}` — `deduped: true` when `# shunt:id=` matched an existing entry                                                                                                          |
+| `new`                                    | `--slug`, `--guard`, `--` argv        | `{ok, name, deduped?}`                                                                                                                                                                         |
+| `mktask`                                 | same as `new`                         | task body on stdout                                                                                                                                                                            |
+| `status`                                 | —                                     | `{daemon:{alive,pid}, workers:{value,source}, running[], pending[], done_recent[], failed_recent[], stop, shutdown:{armed,grace_s,cmd}, resources?, pending_detail?, running_detail?}` (§3.16) |
+| `cancel`                                 | pattern                               | `{ok, name}` or error on 0/multi match                                                                                                                                                         |
+| `prio`                                   | pattern, n                            | `{ok, from, to}`; error if target exists                                                                                                                                                       |
+| `kill`                                   | pattern                               | `{ok, pgid, escalated}`; `{ok, gone}` when the recorded leader is dead/recycled — nothing was signaled                                                                                         |
+| `workers get` / `workers set N`          | —                                     | `{workers, source}`                                                                                                                                                                            |
+| `shutdown on [grace]` / `off` / `status` | —                                     | `{armed, grace_s, running, pending}`                                                                                                                                                           |
+| `probe`                                  | —                                     | `{gpu, driver, cuda, cores, mem_gb, disk_free_gb, python}`                                                                                                                                     |
+| `logs`                                   | `-n N` and/or `-- pat`; bare = daemon | text stream (`-f` is local-only: ssh exec is collected under the §5 deadline, so wire follow is refused, not streamed)                                                                         |
+| `start` / `stop` / `daemon`              | —                                     | `{ok, pid}` / `{ok}` / runs the loop (foreground; `start` daemonizes)                                                                                                                          |
+| `init`                                   | `--qroot`                             | `{ok}` creates dirs                                                                                                                                                                            |
 
 All argv crossing SSH is shell-quoted with `%q`-equivalent escaping on the server side; quoting is centralized in the transport layer, never hand-rolled per call site.
 
@@ -476,6 +501,8 @@ Integration tests spawn a real daemon against a tmp `SHUNT_ROOT`; the poll inter
 - workers resize: raise dispatches immediately; lower drains only; invalid value falls back to last-known
 - env file overlay, workdir, proxy unset, thread caps
 - dispatcher: spool → push → ack → delete; unreachable client retains; auto-heal restarts a dead daemon
+- reschedule: rc 75 requeues same-name to pending/ with `attempts`/`retry_after`; budget exhaustion finalizes; OOM heuristic only fires for retry-declared tasks; `retry_after` gates dispatch until due
+- usage telemetry: `usage` sidecar written per cycle, travels to terminal tracks; `status` reports resources + declared-vs-observed detail
 - bootstrap compat (§15): GLIBC byte-scan (no refs → ship unconditionally); ldd parse over `2>&1`; refuse on older-glibc/musl/undeterminable box with musl-build remediation; release rescue verifies checksum + embedded sha; smoke `--version 2>&1` surfaces loader stderr
 - feedback: sanitize redacts registry secrets (host/port/user/password/key/$HOME) and skips the common-name allowlist; persist-before-deliver leaves a pending artifact when delivery is disabled (`SHUNT_FEEDBACK_REPO=` empty); dedup returns the existing URL within 24 h; the hourly cap refuses but still persists; `retry` delivers pending entries; delivery itself runs against a stub `gh` on PATH (never the real API)
 

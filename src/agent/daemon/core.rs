@@ -59,9 +59,17 @@ struct Exited {
 struct RunHandle {
     base: String,
     child: Child,
-    /// Wall-clock budget seconds from `# shunt:timeout_s=` (None = unlimited).
-    timeout_s: Option<u64>,
+    /// Directives parsed from the task head at spawn — carries the
+    /// wall-clock budget AND the reschedule budget (design.md §3.9)
+    /// so neither is re-read from disk at reap.
+    dirs: exec::TaskDirectives,
     deadline: Option<std::time::Instant>,
+    /// Usage peaks folded in every poll; the file inside the entry
+    /// is what `status` reads (design.md §3.16).
+    usage: crate::agent::usage::TaskUsage,
+    /// Σ group jiffies at the previous sample — cpu_seconds accrues
+    /// only the delta since then.
+    last_jiffies: u64,
     timed_out: Option<u64>,
     kill_at: Option<std::time::Instant>,
     /// ESRCH race: the §3.9a gate passed but TERM found the group
@@ -126,7 +134,7 @@ impl Daemon {
                 match exec::read_pid_file(&self.root, "running", &h.base) {
                     Some((pgid, start)) if exec::pgid_is_task_group(pgid, start) => match exec::signal_pgid(pgid, "TERM") {
                         exec::SignalOutcome::Delivered => {
-                            h.timed_out = h.timeout_s;
+                            h.timed_out = h.dirs.timeout_s;
                             h.kill_at = Some(now + TIMEOUT_GRACE);
                             dlog(&self.root, "task_timeout", ev(json!({"task": h.base, "pgid": pgid, "limit_s": h.timed_out})));
                         }
@@ -236,8 +244,8 @@ impl Daemon {
             }
         }
         for (pid, base, rc, lingering) in done {
-            let timed_out = self.runpids.get(&pid).and_then(|h| h.timed_out);
-            self.runpids.remove(&pid);
+            let h = self.runpids.remove(&pid);
+            let timed_out = h.as_ref().and_then(|h| h.timed_out);
             if lingering {
                 dlog(
                     &self.root,
@@ -245,6 +253,32 @@ impl Daemon {
                     ev(json!({"task": base, "pgid": pid,
                        "warning": "task leader exited but the process group is still alive; finalized anyway — survivors keep writing to the moved log and are unreachable by kill"})),
                 );
+            }
+            // Reschedule before finalize (§3.9): a retry-declared
+            // task reporting rc 75 — or matching the bounded OOM
+            // heuristic — goes back to pending/ under its own name
+            // instead of landing in failed/.
+            if rc != 0 && timed_out.is_none() {
+                if let Some(dirs) = h.as_ref().map(|h| &h.dirs) {
+                    match exec::maybe_reschedule(&self.root, &base, rc, dirs) {
+                        Ok(exec::Resched::Queued { attempt, via, next_at }) => {
+                            dlog(
+                                &self.root,
+                                "task_rescheduled",
+                                ev(json!({"task": base, "rc": rc, "via": via,
+                                   "attempt": attempt, "retry_after": next_at})),
+                            );
+                            continue;
+                        }
+                        Ok(exec::Resched::No) => {}
+                        Err(e) => {
+                            // Requeue broken is not a reason to
+                            // ghost the entry: finalize it normally
+                            // and say why.
+                            dlog(&self.root, "reschedule_failed", ev(json!({"task": base, "error": format!("{e:#}"), "warning": "could not requeue; finalizing to failed/"})));
+                        }
+                    }
+                }
             }
             if let Err(e) = exec::finalize(&self.root, &base, rc, timed_out) {
                 // A failed rename leaves a pid-less entry in
@@ -268,6 +302,21 @@ impl Daemon {
                        "timeout": timed_out,
                        "dest": if rc == 0 && timed_out.is_none() { "done" } else { "failed" }})),
             );
+        }
+    }
+
+    /// Fold one usage reading into every tracked task's peaks and
+    /// persist the `usage` sidecar (design.md §3.16). One Snapshot
+    /// per cycle — the /proc + nvidia-smi cost is paid once even
+    /// with a full worker pool.
+    fn sample_usage(&mut self) {
+        if self.runpids.is_empty() {
+            return;
+        }
+        let snap = crate::agent::usage::Snapshot::take();
+        for (pgid, h) in self.runpids.iter_mut() {
+            snap.apply(*pgid, &mut h.usage, &mut h.last_jiffies);
+            crate::agent::usage::write_usage(&self.root, "running", &h.base, &h.usage);
         }
     }
 
@@ -302,9 +351,22 @@ impl Daemon {
                 Vec::new()
             }
         };
+        let now = queue::unix_now();
         for next in candidates {
             if self.runpids.len() >= workers as usize {
                 break;
+            }
+            // A rescheduled entry waits out its `retry_after` delay
+            // (§3.9): not yet due -> skip it this cycle. A garbage
+            // sidecar can't wedge the entry — unparseable = due now,
+            // and the file is cleared on the way through.
+            let ra = queue::piece_file(&self.root, "pending", &next, "retry_after");
+            if ra.exists() {
+                let due = std::fs::read_to_string(&ra).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+                if due > now {
+                    continue;
+                }
+                let _ = std::fs::remove_file(&ra);
             }
             // claim by mv; a concurrent cancel winning the race is the
             // recheck, not a prior existence test. Dir entries rename
@@ -335,7 +397,7 @@ impl Daemon {
                 let _ = std::fs::set_permissions(queue::task_file(&self.root, "running", &next), std::fs::Permissions::from_mode(0o755));
             }
             match exec::spawn_task(&self.root, &next) {
-                Ok((child, timeout_s)) => {
+                Ok((child, dirs)) => {
                     let pid = child.id();
                     // Record the leader's /proc start_time beside the
                     // pgid: kill_task verifies it before signaling so
@@ -355,7 +417,7 @@ impl Daemon {
                                "warning": "task running with no pid file; kill cannot reach it"})),
                         );
                     }
-                    let deadline = timeout_s.map(|s| std::time::Instant::now() + Duration::from_secs(s));
+                    let deadline = dirs.timeout_s.map(|s| std::time::Instant::now() + Duration::from_secs(s));
                     // Pid-reuse guard (§3.9): a reaped leader's handle
                     // can sit in runpids for up to pgid_drain_grace
                     // while its pid is already free for the OS to
@@ -385,7 +447,8 @@ impl Daemon {
                             let _ = exec::quarantine(&self.root, "running", &stale.base, &format!("finalize failed after pid reuse (rc {rc}): {e:#}"));
                         }
                     }
-                    self.runpids.insert(pid, RunHandle { base: next.clone(), child, timeout_s, deadline, timed_out: None, kill_at: None, gone: false, unenforceable_warned: 0, exited: None });
+                    let timeout_s = dirs.timeout_s;
+                    self.runpids.insert(pid, RunHandle { base: next.clone(), child, dirs, deadline, usage: Default::default(), last_jiffies: 0, timed_out: None, kill_at: None, gone: false, unenforceable_warned: 0, exited: None });
                     dlog(
                         &self.root,
                         "start",
@@ -544,6 +607,7 @@ fn run_registered(root: &Path) -> Result<()> {
         // stamped timed_out and land in failed/ (§3.7).
         d.reap();
         d.enforce_timeouts();
+        d.sample_usage();
         if d.root.join("STOP").exists() {
             if d.runpids.is_empty() {
                 let _ = std::fs::remove_file(d.root.join("STOP"));
@@ -619,6 +683,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A rescheduled entry must not be claimed until `retry_after`
+    /// passes (§3.9): a future timestamp skips it this cycle, an
+    /// expired or corrupt one claims it and clears the file.
+    #[test]
+    fn dispatch_skips_not_due_rescheduled_entry() {
+        let root = std::env::temp_dir().join(format!("shunt-retrydue-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        crate::agent::queue::init(&root).unwrap();
+        let entry = root.join("pending/0100_t");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(entry.join("task.sh"), "#!/usr/bin/env bash\nexec true\n").unwrap();
+        let mut d = super::Daemon { root: root.clone(), runpids: Default::default(), last_workers: None, got_signal: Default::default() };
+        // Not yet due: entry stays pending, nothing spawns.
+        std::fs::write(entry.join("retry_after"), format!("{}\n", crate::agent::queue::unix_now() + 3600)).unwrap();
+        d.dispatch();
+        assert!(d.runpids.is_empty() && entry.is_dir(), "not-due entry must wait in pending/");
+        // Due now: claimed and the marker cleared.
+        std::fs::write(entry.join("retry_after"), format!("{}\n", crate::agent::queue::unix_now() - 1)).unwrap();
+        d.dispatch();
+        assert_eq!(d.runpids.len(), 1, "due entry must claim");
+        assert!(!root.join("running/0100_t/retry_after").exists(), "retry_after must be cleared on claim");
+        for (_, mut h) in d.runpids.drain() {
+            let _ = h.child.kill();
+            let _ = h.child.wait();
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// §3.7/§3.9 timeout marker honesty: when the deadline has passed
     /// but no TERM can be delivered (here: no pid file — the
     /// pid_write_failed blind spot), `timed_out`/`kill_at` must stay
@@ -632,7 +723,7 @@ mod tests {
         std::fs::create_dir_all(root.join("running")).unwrap();
         let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
         let pid = child.id();
-        let h = super::RunHandle { base: "t-timeout".into(), child, timeout_s: Some(1), deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)), timed_out: None, kill_at: None, gone: false, unenforceable_warned: 0, exited: None };
+        let h = super::RunHandle { base: "t-timeout".into(), child, dirs: exec::TaskDirectives { timeout_s: Some(1), ..Default::default() }, deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)), usage: Default::default(), last_jiffies: 0, timed_out: None, kill_at: None, gone: false, unenforceable_warned: 0, exited: None };
         let mut d = super::Daemon { root: root.clone(), runpids: [(pid, h)].into_iter().collect(), last_workers: None, got_signal: Default::default() };
         d.enforce_timeouts();
         let h = &d.runpids[&pid];
@@ -678,7 +769,7 @@ mod tests {
         // remnant clause of the §3.9a gate can pass.
         std::fs::write(entry.join("pid"), format!("{pgid}\n")).unwrap();
         let now = std::time::Instant::now();
-        let h = super::RunHandle { base: "t-remnant".into(), child, timeout_s: Some(1), deadline: Some(now - std::time::Duration::from_secs(20)), timed_out: Some(1), kill_at: Some(now - std::time::Duration::from_secs(1)), gone: false, unenforceable_warned: 0, exited: Some(super::Exited { rc: 143, deadline: now + std::time::Duration::from_secs(60) }) };
+        let h = super::RunHandle { base: "t-remnant".into(), child, dirs: exec::TaskDirectives { timeout_s: Some(1), ..Default::default() }, deadline: Some(now - std::time::Duration::from_secs(20)), usage: Default::default(), last_jiffies: 0, timed_out: Some(1), kill_at: Some(now - std::time::Duration::from_secs(1)), gone: false, unenforceable_warned: 0, exited: Some(super::Exited { rc: 143, deadline: now + std::time::Duration::from_secs(60) }) };
         let mut d = super::Daemon { root: root.clone(), runpids: [(pgid, h)].into_iter().collect(), last_workers: None, got_signal: Default::default() };
         d.enforce_timeouts();
         let h = &d.runpids[&pgid];

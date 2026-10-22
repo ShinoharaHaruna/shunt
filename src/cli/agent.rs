@@ -107,7 +107,7 @@ fn new_impl(a: &NewArgs) -> Result<()> {
         if a.cmd.is_empty() {
             anyhow::bail!("missing command after --");
         }
-        let meta = crate::proto::task::TaskMeta { id: None, slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard.clone(), workdir: None, env: Default::default(), cmd: a.cmd.clone(), timeout_s: a.timeout };
+        let meta = crate::proto::task::TaskMeta { id: None, slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard.clone(), workdir: None, env: crate::proto::task::parse_env_pairs(&a.env)?, cmd: a.cmd.clone(), timeout_s: a.timeout, retry: a.retry, retry_delay_s: a.retry_delay_s, gpu_mem_mb: a.gpu_mem_mb, ram_mb: a.ram_mb, cpu_cores: a.cpu_cores };
         if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
             anyhow::bail!("bad slug '{}': {p}", a.slug);
         }
@@ -347,10 +347,14 @@ pub(crate) fn agent_status(a: &StatusArgs) -> Result<()> {
 }
 
 fn status_impl(a: &StatusArgs) -> Result<()> {
-    use crate::proto::wire::{DaemonState, ExitRecord};
+    use crate::proto::wire::{DaemonState, EntryDetail, ExitRecord};
     let root = agent_root(&a.root)?;
     let alive = crate::agent::daemon::alive(&root)?;
-    let report = crate::proto::wire::StatusReport { protocol: crate::proto::wire::PROTOCOL_VERSION, daemon: DaemonState { alive: alive.is_some(), pid: alive }, workers: crate::agent::daemon::resolve_workers(&root), running: crate::agent::queue::running_list(&root)?, pending: crate::agent::queue::pending_list(&root)?, done_recent: crate::agent::queue::recent_exits(&root, "done", 5).into_iter().map(|(name, rc)| ExitRecord { name, rc }).collect(), failed_recent: crate::agent::queue::recent_exits(&root, "failed", 5).into_iter().map(|(name, rc)| ExitRecord { name, rc }).collect(), stop: root.join("STOP").exists(), shutdown: crate::agent::shutdown::status(&root)? };
+    let detail = |track: &str, name: &str| -> EntryDetail { EntryDetail { name: name.to_string(), declared: crate::agent::usage::declared(&root, track, name).unwrap_or_default(), usage: crate::agent::usage::read_usage(&root, track, name) } };
+    let pending_names = crate::agent::queue::pending_list(&root)?;
+    let running_names = crate::agent::queue::running_list(&root)?;
+    let exit_recs = |track: &'static str| -> Vec<ExitRecord> { crate::agent::queue::recent_exits(&root, track, 5).into_iter().map(|(name, rc)| ExitRecord { usage: crate::agent::usage::read_usage(&root, track, &name), declared: crate::agent::usage::declared(&root, track, &name).unwrap_or_default(), name, rc }).collect() };
+    let report = crate::proto::wire::StatusReport { protocol: crate::proto::wire::PROTOCOL_VERSION, daemon: DaemonState { alive: alive.is_some(), pid: alive }, workers: crate::agent::daemon::resolve_workers(&root), running: running_names.clone(), pending: pending_names.clone(), done_recent: exit_recs("done"), failed_recent: exit_recs("failed"), stop: root.join("STOP").exists(), shutdown: crate::agent::shutdown::status(&root)?, resources: Some(crate::agent::usage::system_resources()), pending_detail: pending_names.iter().map(|n| detail("pending", n)).collect(), running_detail: running_names.iter().map(|n| detail("running", n)).collect() };
     if a.json {
         jprint(&report);
         return Ok(());
@@ -364,26 +368,66 @@ fn status_impl(a: &StatusArgs) -> Result<()> {
     if report.stop {
         println!("  STOP sentinel present (draining)");
     }
+    if let Some(r) = &report.resources {
+        println!("== resources ==");
+        for g in &r.gpus {
+            let free = g.mem_free_mb.map(|m| format!("{:.1}", m as f64 / 1024.0)).unwrap_or_else(|| "?".into());
+            let total = g.mem_total_mb.map(|m| format!("{:.1}", m as f64 / 1024.0)).unwrap_or_else(|| "?".into());
+            let util = g.util_pct.map(|u| format!("{u}%")).unwrap_or_else(|| "?".into());
+            println!("  gpu{} {}: {free}/{total} GiB free, {util} util", g.index, g.name);
+        }
+        if r.ram_total_mb.is_some() || r.ram_free_mb.is_some() || r.load1.is_some() {
+            let free = r.ram_free_mb.map(|m| format!("{:.1}", m as f64 / 1024.0)).unwrap_or_else(|| "?".into());
+            let total = r.ram_total_mb.map(|m| format!("{:.1}", m as f64 / 1024.0)).unwrap_or_else(|| "?".into());
+            let load = r.load1.map(|l| format!("{l:.2}")).unwrap_or_else(|| "?".into());
+            println!("  ram: {free}/{total} GiB free   load1 {load}");
+        }
+    }
+    let annotate = |d: &EntryDetail| -> String {
+        let mut bits = Vec::new();
+        if let Some(m) = d.declared.gpu_mem_mb {
+            bits.push(format!("declared vram {m} MiB"));
+        }
+        if let Some(u) = &d.usage {
+            if let Some(v) = u.peak_vram_mb.values().max() {
+                bits.push(format!("peak vram {v} MiB"));
+            }
+            if u.peak_ram_mb > 0 {
+                bits.push(format!("peak ram {} MiB", u.peak_ram_mb));
+            }
+        }
+        if bits.is_empty() {
+            String::new()
+        } else {
+            format!("  ({})", bits.join(", "))
+        }
+    };
     println!("== running ==");
     if report.running.is_empty() {
         println!("  (idle)");
     } else {
-        for t in &report.running {
-            println!("  {t}");
+        for d in &report.running_detail {
+            println!("  {}{}", d.name, annotate(d));
         }
     }
     println!("== pending (execution order) ==");
     if report.pending.is_empty() {
         println!("  (empty)");
     } else {
-        for t in &report.pending {
-            println!("  {t}");
+        for d in &report.pending_detail {
+            println!("  {}{}", d.name, annotate(d));
         }
     }
     for (label, recs) in [("done", &report.done_recent), ("failed", &report.failed_recent)] {
         println!("== {label} (recent) ==");
         for r in recs {
-            println!("  {:<48} rc={}", r.name, r.rc);
+            let mut line = format!("  {:<48} rc={}", r.name, r.rc);
+            if let Some(u) = &r.usage {
+                if let Some(v) = u.peak_vram_mb.values().max() {
+                    line.push_str(&format!("  peak vram {v} MiB"));
+                }
+            }
+            println!("{line}");
         }
     }
     println!("logs: tail -f {0}/running/<task>/log   (daemon: {0}/daemon.log)", root.display());

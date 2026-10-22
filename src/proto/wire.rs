@@ -97,6 +97,92 @@ pub struct StatusReport {
     pub failed_recent: Vec<ExitRecord>,
     pub stop: bool,
     pub shutdown: ShutdownState,
+    /// Box-level resource view — absent on remotes predating §3.16.
+    #[serde(default)]
+    pub resources: Option<Resources>,
+    /// Declared estimates + measured usage per pending/running
+    /// entry; the `running`/`pending` name lists stay for consumers
+    /// that only need order (§3.16).
+    #[serde(default)]
+    pub pending_detail: Vec<EntryDetail>,
+    #[serde(default)]
+    pub running_detail: Vec<EntryDetail>,
+}
+
+/// One queue entry's declared-vs-observed pair. `usage` is `None`
+/// for pending entries and for running/terminal entries that
+/// predate the telemetry sidecar.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct EntryDetail {
+    pub name: String,
+    #[serde(default)]
+    pub declared: Declared,
+    #[serde(default)]
+    pub usage: Option<TaskUsage>,
+}
+
+/// Accumulated usage for one task (design.md §3.16) — in-memory
+/// peak accumulator in the daemon, on disk as `<entry>/usage`,
+/// on the wire inside `status` detail fields.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct TaskUsage {
+    /// Peak VRAM per GPU index in MiB (compute-apps attribution
+    /// by process group).
+    #[serde(default)]
+    pub peak_vram_mb: BTreeMap<u32, u64>,
+    /// Peak summed RSS over the process group in MiB.
+    #[serde(default)]
+    pub peak_ram_mb: u64,
+    /// Cumulative core-seconds (Σ utime+stime deltas).
+    #[serde(default)]
+    pub cpu_seconds: f64,
+    #[serde(default)]
+    pub samples: u32,
+}
+
+/// Declared estimates parsed from a task head — annotation only,
+/// never gated on (§3.16).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct Declared {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_mem_mb: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_mb: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_cores: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<u32>,
+}
+
+/// One GPU for the status `resources` block.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct GpuState {
+    pub index: u32,
+    #[serde(default)]
+    pub uuid: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub mem_total_mb: Option<u64>,
+    #[serde(default)]
+    pub mem_free_mb: Option<u64>,
+    #[serde(default)]
+    pub util_pct: Option<u32>,
+}
+
+/// Box-level resource view (`status --json` `resources` field).
+/// Field-level Option, same philosophy as §8 suspect markers: an
+/// absent value means "couldn't read it", never a fabricated 0.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct Resources {
+    #[serde(default)]
+    pub gpus: Vec<GpuState>,
+    #[serde(default)]
+    pub ram_total_mb: Option<u64>,
+    #[serde(default)]
+    pub ram_free_mb: Option<u64>,
+    #[serde(default)]
+    pub load1: Option<f64>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -119,6 +205,12 @@ pub struct ExitRecord {
     /// Task entry name, e.g. `0103_train-v2`.
     pub name: String,
     pub rc: i32,
+    /// Measured peaks carried inside the entry's `usage` sidecar
+    /// (design.md §3.16); `None` on entries that predate telemetry.
+    #[serde(default)]
+    pub usage: Option<TaskUsage>,
+    #[serde(default)]
+    pub declared: Declared,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

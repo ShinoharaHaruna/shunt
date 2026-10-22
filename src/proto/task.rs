@@ -3,6 +3,7 @@
 //! generator (`shunt new`/`mktask`) and the spool carry, not a file
 //! format of its own.
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -35,6 +36,53 @@ pub struct TaskMeta {
     /// old runners (design.md §3.13) — backward compatible both ways.
     #[serde(default)]
     pub timeout_s: Option<u64>,
+    /// Reschedule budget: a task exiting rc 75 (EX_TEMPFAIL — its
+    /// own "resource was busy" signal) is requeued instead of
+    /// finalized, up to N extra runs (design.md §3.9). `None`/0 =
+    /// never reschedule; every other nonzero rc finalizes normally.
+    #[serde(default)]
+    pub retry: Option<u32>,
+    /// Seconds a rescheduled entry waits in pending/ before it can
+    /// be claimed again (`retry_after` sidecar, design.md §3.7).
+    /// `None` = daemon default (60 s).
+    #[serde(default)]
+    pub retry_delay_s: Option<u64>,
+    /// Declared resource estimates — ANNOTATION ONLY, nothing is
+    /// ever gated on them (design.md §3.16): the daemon measures
+    /// actual peaks into the entry's `usage` sidecar and the agent
+    /// refines its next estimate against the observed diff.
+    #[serde(default)]
+    pub gpu_mem_mb: Option<u32>,
+    #[serde(default)]
+    pub ram_mb: Option<u32>,
+    #[serde(default)]
+    pub cpu_cores: Option<u32>,
+}
+
+/// CLI knobs that map 1:1 onto `TaskMeta` (`submit`/`new` flags).
+/// Bundled so `submit` doesn't grow a parameter per directive.
+#[derive(Debug, Default, Clone)]
+pub struct TaskFlags {
+    pub timeout_s: Option<u64>,
+    pub retry: Option<u32>,
+    pub retry_delay_s: Option<u64>,
+    pub gpu_mem_mb: Option<u32>,
+    pub ram_mb: Option<u32>,
+    pub cpu_cores: Option<u32>,
+    pub env: BTreeMap<String, String>,
+}
+
+/// Parse repeated `--env KEY=value` flags into an overlay map. A
+/// bare `--env X` is an error, not a silent empty value — the caller
+/// meant a key and mistyped it.
+pub fn parse_env_pairs(pairs: &[String]) -> anyhow::Result<BTreeMap<String, String>> {
+    let mut env = BTreeMap::new();
+    for p in pairs {
+        let (k, v) = p.split_once('=').with_context(|| format!("--env expects KEY=value, got {p:?}"))?;
+        anyhow::ensure!(!k.is_empty(), "--env expects a non-empty key, got {p:?}");
+        env.insert(k.to_string(), v.to_string());
+    }
+    Ok(env)
 }
 
 /// A staged server-side spool entry: metadata plus the rendered body.
@@ -154,7 +202,7 @@ mod tests {
     #[test]
     fn meta_rejects_embedded_newlines() {
         use super::{validate_meta, TaskMeta};
-        let base = TaskMeta { id: None, slug: "t".into(), guard: None, workdir: None, env: Default::default(), cmd: vec!["true".into()], timeout_s: None };
+        let base = TaskMeta { id: None, slug: "t".into(), guard: None, workdir: None, env: Default::default(), cmd: vec!["true".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None };
         assert!(validate_meta(&base).is_ok());
 
         let mut m = base.clone();
