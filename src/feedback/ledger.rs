@@ -10,7 +10,10 @@ use crate::server::registry::shunt_home;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Header-only projection for `ls` and the rate cap: report bodies
 /// can be tens of KB, and metadata scans must not retain them all.
@@ -61,15 +64,37 @@ pub fn save_new(art: &Artifact) -> Result<PathBuf> {
             s
         }
     };
-    for n in 0..100 {
-        let name = if n == 0 { format!("{}_{slug}.json", art.created_at) } else { format!("{}_{slug}_{n}.json", art.created_at) };
-        let p = d.join(&name);
-        if !p.exists() {
-            write_private(&p, serde_json::to_string_pretty(art)?)?;
-            return Ok(p);
+    let contents = serde_json::to_vec_pretty(art)?;
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let (temp, mut file) = loop {
+        let p = d.join(format!(".pending-{}-{}", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&p) {
+            Ok(f) => break (p, f),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
         }
+    };
+    let result = (|| {
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(&contents)?;
+        file.sync_all()?;
+        // Scans ignore the staging name. A hard link publishes complete JSON
+        // atomically and, unlike rename, cannot replace another writer's report.
+        for n in 0..100 {
+            let name = if n == 0 { format!("{}_{slug}.json", art.created_at) } else { format!("{}_{slug}_{n}.json", art.created_at) };
+            let p = d.join(&name);
+            match fs::hard_link(&temp, &p) {
+                Ok(()) => return Ok(p),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        anyhow::bail!("cannot find a free feedback artifact name under {} (100 candidates occupied); wait a second and re-run `shunt feedback`", d.display())
+    })();
+    if let Err(e) = fs::remove_file(&temp) {
+        eprintln!("warning: cannot remove feedback staging file {} ({e})", temp.display());
     }
-    anyhow::bail!("cannot find a free feedback artifact name under {}", d.display())
+    result
 }
 
 /// Rewrite an existing artifact in place (delivery outcome update).
@@ -127,4 +152,47 @@ pub fn find_dup(art: &Artifact, within: u64) -> Result<Option<Artifact>> {
 pub fn delivered_count(within: u64) -> Result<u64> {
     let cutoff = now().saturating_sub(within);
     Ok(list_meta()?.iter().filter(|(_, a)| a.delivered_at.is_some_and(|t| t >= cutoff) && a.attempts > 0).count() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn save_new_exclusively_installs_complete_private_json() {
+        let _guard = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-ledger-exclusive-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        std::env::set_var("SHUNT_HOME", &home);
+        let d = dir().unwrap();
+        let occupied = d.join("123_same-title.json");
+        let target = home.join("must-not-be-created");
+        // A dangling symlink is an occupied name even though exists() is false.
+        // This deterministically exercises the exclusive no-clobber contract.
+        symlink(&target, &occupied).unwrap();
+        let mut art = Artifact { kind: "bug".into(), title: "same title".into(), body: "body 1".into(), created_at: 123, delivered_at: None, issue_url: None, issue_number: None, attempts: 0 };
+        let first = save_new(&art).unwrap();
+        assert_ne!(first, occupied, "an occupied name must never be followed or overwritten");
+        assert!(!target.exists());
+        assert!(fs::symlink_metadata(&occupied).unwrap().file_type().is_symlink());
+        fs::remove_file(&occupied).unwrap();
+        for i in 0..99 {
+            art.body = format!("distinct body {i}");
+            let p = save_new(&art).unwrap();
+            assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+            let saved: Artifact = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+            assert_eq!(saved.body, art.body);
+        }
+        assert_eq!(list().unwrap().len(), 100);
+        assert_eq!(fs::read_dir(&d).unwrap().count(), 100, "temporary files must be cleaned up");
+        assert_eq!(serde_json::from_slice::<Artifact>(&fs::read(first).unwrap()).unwrap().body, "body 1");
+        let err = save_new(&art).unwrap_err().to_string();
+        assert!(err.contains("100 candidates occupied"), "{err}");
+        assert!(err.contains("re-run `shunt feedback`"), "{err}");
+        assert_eq!(list().unwrap().len(), 100);
+        assert_eq!(fs::read_dir(&d).unwrap().count(), 100, "exhaustion must also clean up staging");
+        std::env::remove_var("SHUNT_HOME");
+        fs::remove_dir_all(home).unwrap();
+    }
 }

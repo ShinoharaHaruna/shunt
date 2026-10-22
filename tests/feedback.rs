@@ -226,3 +226,46 @@ fn sanitized_title_matches_initial_delivery_retry_and_dedup() {
         assert_eq!(art["issue_number"], 7);
     }
 }
+
+#[test]
+fn concurrent_reports_preserve_every_distinct_body() {
+    use std::collections::HashSet;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+
+    let home = tmpdir("concurrent");
+    let mut children = Vec::new();
+    // Each process blocks on its own pipe until all 64 have been spawned.
+    for i in 0..64 {
+        let body = format!("unique concurrent report {i}");
+        let child = Command::new("/bin/sh").args(["-c", "read gate; exec \"$@\"", "feedback-gate"]).arg(bin()).args(["feedback", "same concurrent title", "--body", &body, "--json"]).env("SHUNT_HOME", &home).env("SHUNT_FEEDBACK_REPO", "").env("SHUNT_FEEDBACK_MAX_PER_HOUR", "100").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        children.push((body, child));
+    }
+    for (_, child) in &mut children {
+        child.stdin.take().unwrap().write_all(b"go\n").unwrap();
+    }
+    let mut paths = HashSet::new();
+    for (body, child) in children {
+        let o = child.wait_with_output().unwrap();
+        assert!(!o.status.success());
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("delivery disabled"), "{err}");
+        assert!(!err.contains("warning:"), "{err}");
+        let result: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+        let path = PathBuf::from(result["artifact"].as_str().expect("report must persist"));
+        assert!(paths.insert(path.clone()), "artifact name reused: {}", path.display());
+        let art: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(art["title"], "same concurrent title");
+        assert!(art["body"].as_str().unwrap().starts_with(&format!("{body}\n\n---\n")));
+        assert!(art["delivered_at"].is_null());
+        assert_eq!(art["attempts"], 0);
+        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    assert_eq!(artifacts(&home).len(), 64, "no leftover staging files");
+    let o = run(&home, &["feedback", "ls", "--json"], &[("SHUNT_FEEDBACK_REPO", "")]);
+    assert!(o.status.success());
+    assert!(o.stderr.is_empty(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(String::from_utf8_lossy(&o.stdout).lines().count(), 64);
+    std::fs::remove_dir_all(home).unwrap();
+}
