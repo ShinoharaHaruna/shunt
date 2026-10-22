@@ -61,7 +61,13 @@ pub(crate) fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bo
         // not be powered off mid-flight. The flag stays armed; the
         // poll loop re-arms the countdown and retries once the box
         // drains (design.md §3.11).
-        let peers = shutdown::busy_peers(root);
+        let peers = match shutdown::checked_busy_peers(root) {
+            Ok(peers) => peers,
+            Err(error) => {
+                shutdown::registry_warning(root, &error);
+                return;
+            }
+        };
         if !peers.is_empty() {
             dlog(root, "idle_shutdown_blocked", ev(json!({"peers": peers.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()})));
             return;
@@ -79,7 +85,13 @@ pub(crate) fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bo
         }
     }
     // final re-check immediately before firing
-    let peers = shutdown::busy_peers(root);
+    let peers = match shutdown::checked_busy_peers(root) {
+        Ok(peers) => peers,
+        Err(error) => {
+            shutdown::registry_warning(root, &error);
+            return;
+        }
+    };
     if flag.exists() && !shutdown::pending_nonempty(root) && running_empty && peers.is_empty() {
         let cmd = shutdown::resolve_cmd(root);
         dlog(root, "idle_shutdown_exec", ev(json!({"cmd": cmd})));

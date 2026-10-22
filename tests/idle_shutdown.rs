@@ -307,3 +307,114 @@ fn exit_on_idle_waits_for_running_task() {
     wait_until(|| d.try_wait().unwrap().is_some(), 15, "daemon exits after drain");
     assert!(q.dlog().contains("daemon_exit_idle"), "{}", q.dlog());
 }
+
+#[test]
+fn idle_shutdown_blocks_unknown_registry_state() {
+    for fault in ["directory", "missing", "unreadable-entry", "malformed-entry", "permissions"] {
+        let qa = Q::new(&format!("unknown-{fault}-a"));
+        let qb = Q::new(&format!("unknown-{fault}-b"));
+        let state = qa.root.join("shared-state");
+        let reg = state.join("qroots");
+        let saved = state.join("saved-qroots");
+        let release = qb.root.join("release");
+        qb.enqueue_script("held", &format!("#!/bin/sh\nwhile [ ! -f {} ]; do sleep 0.1; done\n", release.display()));
+        let mut db = qb.daemon_state(&state);
+        wait_until(|| !qb.tasks("running").is_empty(), 10, "peer running");
+        let mut da = qa.daemon_state(&state);
+        wait_until(|| qa.dlog().contains("daemon_start"), 10, "idle daemon registered");
+        let bad_entry = reg.join("bad-peer");
+        match fault {
+            "directory" | "missing" => {
+                std::fs::rename(&reg, &saved).unwrap();
+                if fault == "directory" {
+                    std::fs::write(&reg, "not a directory").unwrap();
+                }
+            }
+            "unreadable-entry" => std::fs::create_dir(&bad_entry).unwrap(),
+            "malformed-entry" => std::fs::write(&bad_entry, "\n").unwrap(),
+            "permissions" => {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&reg, std::fs::Permissions::from_mode(0o000)).unwrap();
+                // Privileged test runners can still read mode 000; other faults
+                // exercise the same gate without relying on Unix credentials.
+                if std::fs::read_dir(&reg).is_ok() {
+                    std::fs::set_permissions(&reg, std::fs::Permissions::from_mode(0o700)).unwrap();
+                    std::fs::write(&release, b"").unwrap();
+                    qa.stop();
+                    qb.stop();
+                    da.wait().unwrap();
+                    db.wait().unwrap();
+                    continue;
+                }
+            }
+            _ => unreachable!(),
+        }
+        let fired = qa.root.join("FIRED");
+        std::fs::write(qa.root.join("shutdown_cmd"), format!("touch {}", fired.display())).unwrap();
+        qa.run_ok(&["shutdown", "on", "1"]);
+        wait_until(|| fired.exists() || qa.dlog().contains("peer registry unavailable"), 10, "unknown registry blocks shutdown");
+        let still_armed = qa.root.join("shutdown_on_idle").exists();
+        // Disarm before any assertion so a failing test cannot fire on cleanup.
+        qa.run_ok(&["shutdown", "off"]);
+        let log = qa.dlog();
+        let did_fire = fired.exists();
+        match fault {
+            "directory" | "missing" => {
+                if fault == "directory" {
+                    std::fs::remove_file(&reg).unwrap();
+                }
+                std::fs::rename(&saved, &reg).unwrap();
+            }
+            "unreadable-entry" => std::fs::remove_dir(&bad_entry).unwrap(),
+            "malformed-entry" => std::fs::remove_file(&bad_entry).unwrap(),
+            "permissions" => {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&reg, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let peer_still_running = !qb.tasks("running").is_empty();
+        std::fs::write(&release, b"").unwrap();
+        qa.stop();
+        qb.stop();
+        da.wait().unwrap();
+        db.wait().unwrap();
+        assert!(!did_fire, "{fault}: powered off with unknown peer state");
+        assert!(still_armed, "registry errors must not disarm shutdown");
+        assert!(log.contains(reg.to_str().unwrap()), "warning must identify the failing registry: {log}");
+        assert!(log.contains("idle_shutdown_blocked") && log.contains("warning") && log.contains("repair"), "{fault}: {log}");
+        assert!(peer_still_running, "peer task must stay held throughout the blocked shutdown");
+    }
+}
+
+#[test]
+fn daemon_refuses_to_run_without_registry_registration() {
+    for fault in ["directory", "record"] {
+        let q = Q::new(&format!("register-failed-{fault}"));
+        let state = q.root.join("boxstate");
+        std::fs::create_dir_all(&state).unwrap();
+        if fault == "directory" {
+            std::fs::write(state.join("qroots"), "not a directory").unwrap();
+        } else {
+            let mut first = q.daemon_state(&state);
+            wait_until(|| q.dlog().contains("daemon_start"), 10, "initial registration");
+            let entry = std::fs::read_dir(state.join("qroots")).unwrap().next().unwrap().unwrap().path();
+            q.stop();
+            first.wait().unwrap();
+            std::fs::create_dir(entry).unwrap();
+            std::fs::remove_file(q.root.join("daemon.log")).unwrap();
+        }
+        std::fs::write(q.root.join("shutdown_cmd"), "true").unwrap();
+        let mut d = q.daemon_state(&state);
+        wait_until(|| d.try_wait().unwrap().is_some() || q.dlog().contains("daemon_start"), 10, "startup outcome");
+        let exited = d.try_wait().unwrap();
+        if exited.is_none() {
+            q.stop();
+        }
+        let status = d.wait().unwrap();
+        assert!(exited.is_some() && !status.success(), "{fault}: daemon ran invisibly after registration failure");
+        assert!(q.daemon_pid().is_none(), "failed startup must remove pidfile");
+        let log = q.dlog();
+        assert!(log.contains("qroot_registration_failed") && log.contains("repair"), "{log}");
+    }
+}

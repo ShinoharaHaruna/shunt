@@ -107,8 +107,21 @@ pub fn alive(root: &Path) -> Result<Option<u32>> {
 
 /// Read-only liveness for sibling qroots (`busy_peers`): identical
 /// probe, but never removes `daemon.pid` — the peer daemon owns it.
+/// Only a genuinely missing pidfile proves absence; unreadable or malformed
+/// peer state must not be silently swept by the box-level shutdown gate.
 pub fn check_alive(root: &Path) -> Result<Option<u32>> {
-    alive_impl(root, false, |pid| std::fs::read(format!("/proc/{pid}/cmdline")))
+    let pidfile = root.join("daemon.pid");
+    let content = match std::fs::read_to_string(&pidfile) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("cannot read peer pidfile {}", pidfile.display())),
+    };
+    let pid = content.trim().parse::<u32>().with_context(|| format!("invalid peer pidfile {}", pidfile.display()))?;
+    anyhow::ensure!(pid > 0, "invalid peer pidfile {}", pidfile.display());
+    match probe_pid(pid, |pid| std::fs::read(format!("/proc/{pid}/cmdline"))) {
+        Probe::Live | Probe::Unknown => Ok(Some(pid)),
+        Probe::Dead => Ok(None),
+    }
 }
 
 /// Total wait for the daemon's pidfile after spawn. A 5 s ceiling

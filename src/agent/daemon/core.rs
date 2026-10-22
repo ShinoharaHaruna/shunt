@@ -560,7 +560,11 @@ pub fn run(root: &Path) -> Result<()> {
         anyhow::bail!("daemon already running (pid {pid})");
     }
     std::fs::write(root.join("daemon.pid"), format!("{}\n", std::process::id()))?;
-    shutdown::register_qroot(root);
+    if let Err(error) = shutdown::try_register_qroot(root) {
+        shutdown::registration_warning(root, &error);
+        let _ = std::fs::remove_file(root.join("daemon.pid"));
+        return Err(error).context("repair the qroot registry path/permissions and restart the daemon");
+    }
 
     // The registry entry is removed on every exit path (§3.11): an
     // error anywhere after registration must not leave the pidfile

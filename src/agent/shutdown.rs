@@ -3,7 +3,7 @@
 //! last-moment command resolution (`shutdown_cmd` file > `$SHUTDOWN_CMD`
 //! env > `/usr/bin/shutdown`).
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -119,14 +119,32 @@ fn registry_key(root: &Path) -> String {
 
 /// Register this daemon's qroot in the box-level registry. Content is
 /// the canonical qroot path; liveness is read from `<qroot>/daemon.pid`
-/// at check time (same discipline as §3.4).
+/// at check time (same discipline as §3.4). This compatibility wrapper
+/// logs failures; the daemon uses the checked variant and refuses startup.
 pub fn register_qroot(root: &Path) {
-    let dir = registry_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
+    if let Err(error) = try_register_qroot(root) {
+        registration_warning(root, &error);
     }
-    let canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let _ = std::fs::write(dir.join(registry_key(&canon)), format!("{}\n", canon.display()));
+}
+
+pub(crate) fn registration_warning(root: &Path, error: &anyhow::Error) {
+    crate::agent::daemon::dlog(
+        root,
+        "qroot_registration_failed",
+        crate::agent::daemon::ev(serde_json::json!({
+            "warning": "daemon cannot safely run without box-level registration; repair the registry path/permissions and restart the daemon",
+            "error": format!("{error:#}")
+        })),
+    );
+}
+
+pub(crate) fn try_register_qroot(root: &Path) -> Result<()> {
+    let dir = registry_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create qroot registry {}", dir.display()))?;
+    let canon = std::fs::canonicalize(root).context("cannot canonicalize qroot")?;
+    let path = canon.to_str().context("qroot registry requires a UTF-8 path")?;
+    anyhow::ensure!(!path.contains(['\n', '\r']), "qroot registry requires a single-line path");
+    std::fs::write(dir.join(registry_key(&canon)), format!("{path}\n")).with_context(|| format!("cannot write qroot registration in {}", dir.display()))
 }
 
 /// Remove this daemon's registry entry (every exit path calls this).
@@ -140,49 +158,117 @@ pub fn deregister_qroot(root: &Path) {
 /// swept as they are found. Liveness here is strictly read-only
 /// (`check_alive`): the peer daemon owns its `daemon.pid`, and an
 /// unverifiable-but-alive pid must not cost the peer its pidfile or
-/// its registry entry.
+/// its registry entry. Scan failures also block: this compatibility API
+/// logs a warning and returns the registry path as a conservative blocker.
 pub fn busy_peers(root: &Path) -> Vec<PathBuf> {
-    busy_peers_in(&registry_dir(), root)
+    let dir = registry_dir();
+    let allow_missing = matches!(std::fs::symlink_metadata(root.join("daemon.pid")), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+    match busy_peers_in(&dir, root, allow_missing) {
+        Ok(peers) => peers,
+        Err(error) => {
+            registry_warning(root, &error);
+            // Preserve the Vec API: an unknown registry is a blocker, not
+            // evidence of idleness. Callers needing peer identities use the
+            // checked API instead of this conservative registry-path sentinel.
+            vec![dir]
+        }
+    }
 }
 
-/// `busy_peers` over an explicit registry dir (test hook: avoids
-/// mutating process-global `SHUNT_STATE`).
-fn busy_peers_in(dir: &Path, root: &Path) -> Vec<PathBuf> {
-    let self_key = registry_key(root);
-    let mut busy = Vec::new();
+pub(crate) fn registry_warning(root: &Path, error: &anyhow::Error) {
+    crate::agent::daemon::dlog(
+        root,
+        "idle_shutdown_blocked",
+        crate::agent::daemon::ev(serde_json::json!({
+            "why": "peer registry unavailable",
+            "warning": "shutdown remains armed; repair the qroot registry path, permissions, or malformed records before retrying",
+            "error": format!("{error:#}")
+        })),
+    );
+}
+
+pub(crate) fn checked_busy_peers(root: &Path) -> Result<Vec<PathBuf>> {
+    // A running daemon already registered: disappearance is not a pristine
+    // initial registry and cannot prove that the other queues are idle.
+    busy_peers_in(&registry_dir(), root, false)
+}
+
+fn busy_peers_in(dir: &Path, root: &Path, allow_missing: bool) -> Result<Vec<PathBuf>> {
     let rd = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
-        Err(_) => return busy,
+        Err(e) if allow_missing && e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("cannot scan qroot registry {}", dir.display())),
     };
-    for ent in rd.flatten() {
-        let name = ent.file_name().to_string_lossy().into_owned();
-        if name == self_key {
+    scan_peer_entries(dir, root, rd.map(|ent| ent.map(|ent| ent.path())))
+}
+
+fn scan_peer_entries(dir: &Path, root: &Path, entries: impl Iterator<Item = std::io::Result<PathBuf>>) -> Result<Vec<PathBuf>> {
+    let self_key = registry_key(root);
+    let mut busy = Vec::new();
+    for entry in entries {
+        let path = entry.with_context(|| format!("cannot iterate qroot registry {}", dir.display()))?;
+        let record = std::fs::read_to_string(&path).with_context(|| format!("cannot read peer record {}", path.display()))?;
+        let value = record.strip_suffix('\n').unwrap_or(&record);
+        let peer = PathBuf::from(value);
+        anyhow::ensure!(peer.is_absolute() && !value.contains(['\n', '\r', '\0']), "malformed peer record {}: expected one absolute qroot path", path.display());
+        if path.file_name().is_some_and(|name| name == self_key.as_str()) {
             continue;
         }
-        let peer: PathBuf = match std::fs::read_to_string(ent.path()) {
-            Ok(s) => PathBuf::from(s.trim()),
-            Err(_) => continue,
-        };
-        match crate::agent::daemon::check_alive(&peer) {
-            // Queue scans fail closed (§3.11): a live sibling whose
-            // pending/ or running/ cannot be read still counts as
-            // busy — cannot prove empty ⇒ do not power off under it.
-            Ok(Some(_)) if pending_nonempty(&peer) || running_nonempty(&peer) => {
-                busy.push(peer);
-            }
-            Ok(Some(_)) => {}
-            // dead daemon or unverifiable qroot: sweep the entry
-            _ => {
-                let _ = std::fs::remove_file(ent.path());
+        match crate::agent::daemon::check_alive(&peer).with_context(|| format!("cannot verify peer {}", peer.display()))? {
+            Some(_) if pending_nonempty(&peer) || running_nonempty(&peer) => busy.push(peer),
+            Some(_) => {}
+            None => {
+                let _ = std::fs::remove_file(&path);
             }
         }
     }
-    busy
+    Ok(busy)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_registry_scan_fails_closed() {
+        let base = std::env::temp_dir().join(format!("shunt-registry-errors-{}", std::process::id()));
+        let reg = base.join("qroots");
+        let root = base.join("self");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(busy_peers_in(&reg, &root, true).unwrap().is_empty(), "initial absent registry is safe for legacy callers");
+        assert!(busy_peers_in(&reg, &root, false).is_err(), "registered daemon must not accept a vanished registry");
+        std::fs::write(&reg, "not a directory").unwrap();
+        assert!(busy_peers_in(&reg, &root, true).is_err());
+        std::fs::remove_file(&reg).unwrap();
+        std::fs::create_dir(&reg).unwrap();
+        let failure = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "injected directory iteration failure");
+        let error = scan_peer_entries(&reg, &root, std::iter::once(Err(failure))).unwrap_err();
+        assert!(format!("{error:#}").contains("cannot iterate qroot registry"));
+        let entry = reg.join("peer");
+        for record in [b"".as_slice(), b"relative/path\n", b"/absolute\n/another\n", b"/absolute\0", b"\xff"] {
+            std::fs::write(&entry, record).unwrap();
+            assert!(busy_peers_in(&reg, &root, false).is_err(), "invalid record: {record:?}");
+            assert!(entry.exists(), "unknown records must not be swept");
+        }
+        std::fs::remove_file(&entry).unwrap();
+        std::fs::create_dir(&entry).unwrap();
+        assert!(busy_peers_in(&reg, &root, false).is_err(), "unreadable entry cannot be skipped");
+        std::fs::remove_dir(&entry).unwrap();
+        let peer = base.join("peer");
+        std::fs::create_dir_all(&peer).unwrap();
+        std::fs::write(&entry, format!("{}\n", peer.display())).unwrap();
+        let pidfile = peer.join("daemon.pid");
+        std::fs::create_dir(&pidfile).unwrap();
+        assert!(busy_peers_in(&reg, &root, false).is_err(), "unreadable peer pidfile cannot prove death");
+        std::fs::remove_dir(&pidfile).unwrap();
+        std::fs::write(&pidfile, "garbage").unwrap();
+        assert!(busy_peers_in(&reg, &root, false).is_err(), "malformed pidfile cannot prove death");
+        std::fs::remove_file(&pidfile).unwrap();
+        assert!(busy_peers_in(&reg, &root, false).unwrap().is_empty(), "missing pidfile is legitimately stale");
+        assert!(!entry.exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     /// Queue-emptiness fails closed (§3.11): `pending`/`running` that
     /// exist but cannot be listed (here: a file where the dir should
@@ -242,7 +328,7 @@ mod tests {
         let canon = std::fs::canonicalize(&peer).unwrap();
         std::fs::write(reg.join(registry_key(&canon)), format!("{}\n", canon.display())).unwrap();
 
-        let busy = busy_peers_in(&reg, &self_root);
+        let busy = busy_peers_in(&reg, &self_root, false).unwrap();
         assert!(busy.is_empty());
         assert!(pidf.exists(), "busy_peers must not delete the peer's daemon.pid");
         assert!(reg.read_dir().unwrap().next().is_none(), "proven-dead peer entry should be swept");
