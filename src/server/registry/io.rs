@@ -93,6 +93,12 @@ fn save_with_header<T: Serialize>(dir: &str, name: &str, value: &T, header: &str
     Ok(path)
 }
 
+/// Load an existing row with identity validation, including disabled rows.
+/// Lifecycle removal must not require a usable client or materialize defaults.
+pub(crate) fn load_client_row(name: &str) -> Result<ClientEntry> {
+    load("clients", name)
+}
+
 pub fn load_client(name: &str) -> Result<ClientEntry> {
     // `localhost` is a peer client (design.md §4.1): the first access
     // materializes clients/localhost.toml with the defaults
@@ -107,11 +113,11 @@ pub fn load_client(name: &str) -> Result<ClientEntry> {
             let _ = save_client(&entry); // materialize; best-effort
             return Ok(entry);
         }
-        let mut entry: ClientEntry = load("clients", name)?;
+        let mut entry = load_client_row(name)?;
         entry.local = true;
         return usable(entry);
     }
-    usable(load("clients", name)?)
+    usable(load_client_row(name)?)
 }
 
 /// Disabled rows are visible on disk but unusable as clients — and

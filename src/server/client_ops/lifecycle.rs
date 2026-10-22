@@ -116,10 +116,11 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
 /// An unreachable box warns but never wedges the deregistration.
 pub fn remove(name: &str, purge: bool) -> Result<()> {
     anyhow::ensure!(name != "localhost", "localhost is the reserved loopback name");
+    // Disabled rows remain removable, but neither the requested name nor
+    // the row's inner identity may redirect teardown to another client.
+    let e = registry::load_client_row(name)?;
     let home = registry::shunt_home()?;
     let row = home.join("clients").join(format!("{name}.toml"));
-    let text = std::fs::read_to_string(&row).with_context(|| format!("no client row {}", row.display()))?;
-    let e: ClientEntry = toml::from_str(&text).with_context(|| format!("bad TOML in {}", row.display()))?;
 
     // `--purge` becomes a remote `rm -rf <qroot>`; validate the path
     // before anything reaches a remote shell. A bad row must stop
