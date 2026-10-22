@@ -159,11 +159,14 @@ pub fn list() -> Result<Vec<String>> {
     for e in std::fs::read_dir(&dir)? {
         let e = e?;
         let name = e.file_name().to_string_lossy().into_owned();
-        if let Some(n) = name.strip_suffix(".pid") {
+        // Either record can survive a partial setup/cleanup; both mean
+        // the box may still carry ALL_PROXY and needs self-heal.
+        if let Some(n) = name.strip_suffix(".pid").or_else(|| name.strip_suffix(".port")) {
             out.push(n.to_string());
         }
     }
     out.sort();
+    out.dedup();
     Ok(out)
 }
 

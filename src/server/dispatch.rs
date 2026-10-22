@@ -110,23 +110,36 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
     let mut clients: BTreeMap<String, registry::ClientEntry> = BTreeMap::new();
     let mut reach: BTreeMap<String, Reach> = BTreeMap::new();
     let mut pushed = 0;
+    let tunnels = match crate::server::tunnel::list() {
+        Ok(names) => names,
+        Err(e) => {
+            eprintln!("dispatch: tunnel discovery failed: {e:#}");
+            Vec::new()
+        }
+    };
+    // Keep spool delivery order; recorded tunnels add liveness work even
+    // after the spool drains, without probing unrelated registry clients.
+    let work = entries.into_iter().map(|entry| (entry.client.clone(), Some(entry))).chain(tunnels.into_iter().map(|name| (name, None)));
 
-    for entry in entries {
-        let client = match clients.entry(entry.client.clone()) {
+    for (name, entry) in work {
+        let client = match clients.entry(name.clone()) {
             std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::btree_map::Entry::Vacant(v) => match registry::load_client(&entry.client) {
+            std::collections::btree_map::Entry::Vacant(v) => match registry::load_client(&name) {
                 Ok(c) => v.insert(c),
                 Err(e) => {
-                    eprintln!("dispatch: {} -> {}: {e:#}", entry.id, entry.client);
+                    eprintln!("dispatch: {name}: {e:#}");
                     continue;
                 }
             },
         };
+        if entry.is_none() && client.local {
+            continue;
+        }
 
         let owned = crate::server::transport::transport_for(client);
         let t: &dyn Transport = forced.unwrap_or_else(|| owned.as_ref());
 
-        if let std::collections::btree_map::Entry::Vacant(v) = reach.entry(entry.client.clone()) {
+        if let std::collections::btree_map::Entry::Vacant(v) = reach.entry(name.clone()) {
             let r = if registry::conn_fail_read(&client.name) >= registry::CONN_FAIL_ESCALATE && !idx.is_multiple_of(PROBE_BACKOFF_EVERY) {
                 // Known-dead box between periodic probes: skip the
                 // connect entirely this sweep.
@@ -158,9 +171,10 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
             }
             v.insert(r);
         }
-        if matches!(reach[&entry.client], Reach::Down) {
+        if matches!(reach[&name], Reach::Down) {
             continue; // box off is normal; leave for next poll
         }
+        let Some(entry) = entry else { continue };
 
         match spool::body(&entry.id).and_then(|b| push(t, client, &entry, &b)) {
             Ok((name, deduped)) => {
