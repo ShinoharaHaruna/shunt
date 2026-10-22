@@ -82,7 +82,22 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, latest: &str) -> Result<()> {
     anyhow::ensure!(t.exec(&c, &["uname".into(), "-m".into()], None).map(|s| s.trim() == "x86_64").unwrap_or(false), "release assets are x86_64-only; {name} is not x86_64 — upgrade it by shipping a locally built binary: `client bootstrap {name} --bin-path <build>`");
     let tb = release::fetch_asset(latest, release::MUSL_TARGET)?;
     verify_release(tb.path(), latest)?;
-    client_ops::bootstrap(t.as_ref(), name, tb.path().to_str())
+    client_ops::bootstrap(t.as_ref(), name, tb.path().to_str())?;
+    // Stage-then-mv replaced the binary FILE; a running daemon keeps
+    // its old in-memory image — `shunt start` on a live daemon is a
+    // no-op by design, so nothing else tells the operator. Restart
+    // is their call (STOP drains in-flight tasks, never kills them),
+    // but staleness must be loud or queue-semantics upgrades (new
+    // directives, reschedule) silently don't apply.
+    if let Ok(out) = t.exec(&c, &transport::wire_argv(&c, &["status", "--json"]), None) {
+        if let Ok(rep) = crate::proto::wire::parse::<crate::proto::wire::StatusReport>(&out) {
+            if rep.daemon.alive {
+                let pid = rep.daemon.pid.map(|p| format!(" (pid {p})")).unwrap_or_default();
+                eprintln!("{name}: daemon{pid} still runs the OLD binary image — `shunt stop -c {name}` drains and exits, then `shunt start -c {name}` brings the new one up");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The downloaded binary must report the tag's version — a stale or
