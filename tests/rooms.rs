@@ -412,3 +412,53 @@ fn read_acknowledgement_excludes_archived_and_unloaded_tail() {
     assert_eq!(last_read(&home, "r", "p2"), 3);
     std::fs::remove_dir_all(home).unwrap();
 }
+
+/// The unit contract rejects an already claimed directory deterministically;
+/// real processes additionally exercise the CLI with distinct competing rosters.
+#[test]
+fn concurrent_create_has_one_owner_and_preserves_existing_paths() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::sync::{Arc, Barrier};
+
+    let home = tmpdir("create-exclusive");
+    let barrier = Arc::new(Barrier::new(8));
+    let kids: Vec<_> = (0..8)
+        .map(|i| {
+            let home = home.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let member = format!("project-{i}");
+                barrier.wait();
+                let output = run(&home, &["room", "create", "shared", "--members", &member], &[]);
+                (member, output)
+            })
+        })
+        .collect();
+    let results: Vec<_> = kids.into_iter().map(|k| k.join().unwrap()).collect();
+    let winners: Vec<_> = results.iter().filter(|(_, o)| o.status.success()).collect();
+    assert_eq!(winners.len(), 1, "{results:?}");
+    let dir = home.join("rooms/shared");
+    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("meta.json")).unwrap()).unwrap();
+    assert_eq!(meta["members"], serde_json::json!([winners[0].0]));
+    for path in [&dir, &dir.join("msgs"), &dir.join("readers")] {
+        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+    assert_eq!(std::fs::metadata(dir.join("meta.json")).unwrap().permissions().mode() & 0o777, 0o600);
+    let before = std::fs::read(dir.join("meta.json")).unwrap();
+    err(&home, &["room", "create", "shared", "--members", "other"]);
+    assert_eq!(std::fs::read(dir.join("meta.json")).unwrap(), before);
+
+    let empty = home.join("rooms/empty");
+    std::fs::create_dir(&empty).unwrap();
+    std::fs::set_permissions(&empty, std::fs::Permissions::from_mode(0o755)).unwrap();
+    err(&home, &["room", "create", "empty", "--members", "other"]);
+    assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0);
+    assert_eq!(std::fs::metadata(&empty).unwrap().permissions().mode() & 0o777, 0o755);
+    std::fs::write(home.join("rooms/file"), "untouched").unwrap();
+    err(&home, &["room", "create", "file", "--members", "other"]);
+    symlink(home.join("missing-target"), home.join("rooms/link")).unwrap();
+    err(&home, &["room", "create", "link", "--members", "other"]);
+    assert!(!home.join("missing-target").exists());
+    assert_eq!(std::fs::read_to_string(home.join("rooms/file")).unwrap(), "untouched");
+    std::fs::remove_dir_all(home).unwrap();
+}

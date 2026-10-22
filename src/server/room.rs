@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// body_md hard cap (§17.1): a coordination message has no business
@@ -322,6 +322,39 @@ fn mark(dir: &Path, label: &str, through: Option<u32>) -> Result<()> {
     Ok(())
 }
 
+fn initialize_room(dir: &Path, initialize: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    // mkdir is the ownership boundary: even an empty pre-existing directory
+    // belongs to somebody else and must not be initialized or chmodded.
+    fs::DirBuilder::new().mode(0o700).create(dir).with_context(|| format!("cannot create room {} exclusively — if it already exists, use `room members` or `room rm`", dir.display()))?;
+    let owned = fs::symlink_metadata(dir)?;
+    let result = fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(anyhow::Error::from).and_then(|()| initialize(dir));
+    if result.is_err() {
+        // Never recursively delete: a replacement or unexpected content must
+        // survive a failed initializer. Inode identity also protects an empty
+        // replacement, which remove_dir alone would otherwise accept.
+        if fs::symlink_metadata(dir).is_ok_and(|m| m.dev() == owned.dev() && m.ino() == owned.ino()) {
+            let cleanup = || -> std::io::Result<()> {
+                let tmp = dir.join(format!(".meta.{}.tmp", std::process::id()));
+                if tmp.exists() {
+                    fs::remove_file(tmp)?;
+                }
+                for child in ["msgs", "readers"] {
+                    match fs::remove_dir(dir.join(child)) {
+                        Ok(()) => (),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                        Err(e) => return Err(e),
+                    }
+                }
+                fs::remove_dir(dir)
+            };
+            if let Err(error) = cleanup() {
+                return result.with_context(|| format!("partial room {} retained: cleanup failed: {error}; inspect before retrying", dir.display()));
+            }
+        }
+    }
+    result
+}
+
 /// `room create` (§17.2). Members are project names; clients are
 /// annotation context only.
 pub fn create(name: &str, members: &[String], clients: &[String]) -> Result<()> {
@@ -344,11 +377,11 @@ pub fn create(name: &str, members: &[String], clients: &[String]) -> Result<()> 
         }
     }
     let dir = rooms_dir()?.join(name);
-    anyhow::ensure!(!dir.exists(), "room '{name}' already exists — `room members {name}` shows the roster, `room rm {name}` removes it");
-    private_dir(&dir)?;
-    private_dir(&dir.join("msgs"))?;
-    private_dir(&dir.join("readers"))?;
-    save_meta(&dir, &Meta { created_at: iso_utc(unix_now()), members: ms.clone(), clients: cs.clone(), decision: None })?;
+    initialize_room(&dir, |dir| {
+        private_dir(&dir.join("msgs"))?;
+        private_dir(&dir.join("readers"))?;
+        save_meta(dir, &Meta { created_at: iso_utc(unix_now()), members: ms.clone(), clients: cs.clone(), decision: None })
+    })?;
     // Membership is declared data, not gated — but a member that is
     // not a registered project is usually a typo, so say so (the
     // same row names clients use for the same reason).
@@ -574,4 +607,46 @@ pub fn status_rooms(label: Option<&str>) -> Vec<serde_json::Value> {
         out.push(serde_json::json!({"name": name, "members": meta.members, "unread_msgs": label.map(|l| unread_count(&rd, l)), "decision": meta.decision}));
     }
     out
+}
+
+#[cfg(test)]
+mod creation_tests {
+    use super::*;
+
+    #[test]
+    fn initialization_requires_exclusive_directory_ownership() {
+        let dir = std::env::temp_dir().join(format!("shunt-room-exclusive-{}", std::process::id()));
+        let _ = fs::remove_dir(&dir);
+        fs::create_dir(&dir).unwrap();
+        let mut initialized = false;
+        let result = initialize_room(&dir, |_| {
+            initialized = true;
+            Ok(())
+        });
+        fs::remove_dir(&dir).unwrap();
+        assert!(!initialized, "an existing directory must never be initialized");
+        assert!(result.is_err());
+    }
+    #[test]
+    fn failed_initialization_cleans_only_its_own_directory() {
+        let dir = std::env::temp_dir().join(format!("shunt-room-failure-{}", std::process::id()));
+        let moved = dir.with_extension("original");
+        let result = initialize_room(&dir, |dir| {
+            fs::create_dir(dir.join("msgs"))?;
+            fs::create_dir(dir.join("readers"))?;
+            fs::write(dir.join(format!(".meta.{}.tmp", std::process::id())), b"partial")?;
+            anyhow::bail!("injected initialization failure")
+        });
+        assert!(result.is_err());
+        assert!(!dir.exists(), "failed initialization must permit retry");
+        let result = initialize_room(&dir, |dir| {
+            fs::rename(dir, &moved)?;
+            fs::create_dir(dir)?;
+            anyhow::bail!("injected replacement")
+        });
+        assert!(result.is_err());
+        assert!(dir.is_dir(), "another owner's empty directory must survive");
+        fs::remove_dir(dir).unwrap();
+        fs::remove_dir(moved).unwrap();
+    }
 }
