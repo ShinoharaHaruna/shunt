@@ -476,6 +476,7 @@ Facts are advisory registry data for agent-side matching, not enforced constrain
 | `shunt cancel` / `prio` / `kill`                                                                  | client | pending/running ops                                                                                 |
 | `shunt workers [N]` (wire: `workers get`\|`set N`)                                                | client | pool size get/set                                                                                   |
 | `shunt shutdown on\|off\|status`                                                                  | client | idle poweroff                                                                                       |
+| `shunt room create\|ls\|say\|read\|decide\|members\|rm`                                           | server | project-membership coordination rooms (§17)                                                         |
 | `shunt logs [-n N] [-f] [pat]` / `shunt dlog`                                                     | client | task/daemon logs                                                                                    |
 | `shunt probe`                                                                                     | client | machine facts JSON                                                                                  |
 | `shunt completions <shell>`                                                                       | local  | shell completion script                                                                             |
@@ -505,6 +506,7 @@ Integration tests spawn a real daemon against a tmp `SHUNT_ROOT`; the poll inter
 - usage telemetry: `usage` sidecar written per cycle, travels to terminal tracks; `status` reports resources + declared-vs-observed detail
 - bootstrap compat (§15): GLIBC byte-scan (no refs → ship unconditionally); ldd parse over `2>&1`; refuse on older-glibc/musl/undeterminable box with musl-build remediation; release rescue verifies checksum + embedded sha; smoke `--version 2>&1` surfaces loader stderr
 - feedback: sanitize redacts registry secrets (host/port/user/password/key/$HOME) and skips the common-name allowlist; persist-before-deliver leaves a pending artifact when delivery is disabled (`SHUNT_FEEDBACK_REPO=` empty); dedup returns the existing URL within 24 h; the hourly cap refuses but still persists; `retry` delivers pending entries; delivery itself runs against a stub `gh` on PATH (never the real API)
+- rooms: concurrent `say` mints unique message numbers under `.seq.lock`; `read` prints only messages past the reader's `last_read_n` and marks it (`--all` shows the stream, still marks); `say`/`decide` mark their own message read; `ls`/`status` report `unread_msgs` without marking; a non-member `say` posts with `member:false` and names the roster on stderr; `decide` overwrites `meta.decision`; the 500-message cap archives oldest-first to `msgs/.archive/`; `room ls` suggestions group projects sharing an ssh endpoint; a >16 KiB body is rejected
 
 ## 12. Skill deliverable
 
@@ -522,7 +524,7 @@ shunt/
     server/          # registry/ (types, paths, state, io),
                      # fsutil (0700/0600 privacy), spool, dispatcher,
                      # tasks (ledger), tunnel, transport/ (ssh + local),
-                     # status,
+                     # status, room (coordination rooms — §17),
                      # client_ops/ (keys, lifecycle, update, hygiene, env,
                      # probe, bootstrap, compat + release fetch — §15)
     agent/           # FS queue ops, exec, shutdown flags, probe;
@@ -600,3 +602,67 @@ The `libc` probe fact shares the ldd parser and lands in the row's `facts` for a
 - **Remote** (`-c <client>`): upgrades the BOX's binary to the latest release. The box always gets the musl asset (static — runs on any libc, so §15 compat can't fail) delivered through `client bootstrap --bin-path` — owner claim, stage-then-mv, `--version 2>&1` smoke, init/start/probe all apply for free. A remote already reporting the target version is skipped (`--force` overrides); non-x86_64 boxes (checked via `uname -m`) are refused with the build-and-`--bin-path` recipe. Stage-then-mv replaces the binary file only — a live daemon keeps its old in-memory image (`start` on it is a no-op by design), so the upgrade ends by warning that the daemon is stale until `shunt stop` (graceful drain, never a kill) plus `shunt start`; the timing is the operator's call because queue-semantics changes don't apply until then.
 
 `rescue_musl` (§15) and `upgrade` share one `fetch_asset(ver, target)` path — download, checksum gate, extract — with caller-specific identity verification on top.
+
+## 17. Coordination rooms (server-side)
+
+Several projects can share one box — separate qroots, separate daemons, all pointed at the same GPUs (the §3.11 registry exists precisely because that topology is real). The queue deliberately gives those tenants no way to talk to each other, so resource coordination today happens by trial and error: one agent raises `workers`, the other's task OOMs into the reschedule path, and the negotiation is conducted entirely through failures. `shunt room` is the missing side channel: a long-lived named group chat whose members are the PROJECTS sharing compute, where agents propose and settle agreements (VRAM budgets, worker caps, card assignment) before burning GPU time on them. A room decides nothing by itself — a settled agreement takes effect only when the participants act on it (`workers set`, `# shunt-env:CUDA_VISIBLE_DEVICES=`); the queue never reads it.
+
+Rooms live on the SERVER, in the registry — the headquarter view. Three reasons over a box-side board: (a) membership is derivable data, because the registry is the one place that knows every project↔client binding — "which projects share my box" is a query, not configuration; (b) a room can span boxes ("my peak overlaps yours — I'll shift tasks to box-2"), which a per-box board structurally cannot express; (c) the record survives the rented box it coordinates — a box-side board dies with the box's rebuild, and rooms get the registry's 0700/0600 discipline for free. Rooms are deliberately NOT wire ops: nothing here reaches the box, no remote binary version gates the feature, and no `--as` injection machinery is needed.
+
+Non-goals, stated up front:
+
+- One dev machine, one venue — agents on DIFFERENT dev machines run separate registries and cannot meet in one room (the earlier box-side design handled that topology; rooms trade it for the global view). The observed deployment — several agent sessions on one dev machine sharing one registry — is the supported case.
+- No push, no notification — agents discover room activity through `room ls` / `status --as` polling (§17.5).
+- Pure side channel — zero interaction with scheduling, dispatch, or the idle-shutdown gate; room traffic never counts as queue activity, and a full room never blocks a task.
+- No authentication — `author`/`--as` is a self-declared label, consistent with the queue's own trust model. Rooms serve cooperating agents, not adversarial ones.
+
+### 17.1 Storage and layout
+
+`$SHUNT_HOME/rooms/` — inside the registry, so `fsutil` keeps it 0700 / files 0600 like every sibling dir:
+
+```text
+rooms/
+  <name>/
+    meta.json               # {created_at, members: [project...], clients: [client...], decision?}
+    .seq + .seq.lock        # message counter under flock (§3.2 discipline)
+    msgs/
+      NNNN.json             # {author, ts, body_md, member: bool}
+      .archive/             # overflow past the §17.4 cap
+    readers/
+      <label>.json          # {last_read_n} — high-water mark per identity (§17.5)
+```
+
+- A room is a LINEAR stream, not threads: one `msgs/` sequence, `NNNN` minted under `.seq.lock` with the §3.2 rules (flock, bounded wait, missing counter rebuilt from high-water, corrupt counter an error with remediation), message dir created temp-then-rename. The topic/reply two-level structure was rejected for rigidity — a coordination stream does not know its topics in advance, and a single ordered log is what a group chat is.
+- `meta.json.members` names projects, not client rows: row names are private dev-side bookkeeping — two registries can name the same box `riboworld-7032` and `pytorch-7032` — while the project name is the shared vocabulary a counterpart actually needs to read. `clients` is annotation context (which boxes this room coordinates), never a gate.
+- Message bodies are markdown (`body_md`) hard-capped at 16 KiB — oversize rejected before anything is written; a coordination message has no business carrying logs.
+
+### 17.2 Command surface
+
+```text
+shunt room create <name> --members p1,p2 [--clients c1,c2]
+shunt room ls [--as L] [--all]            # rooms + unread counts + suggested groups (§17.4)
+shunt room say <room> (--body T | --body-file F | -) [--as L]
+shunt room read <room> [--as L] [--all]   # unread messages (default) or full stream; marks read
+shunt room decide <room> --note T [--as L]  # record the current agreed state in meta.decision
+shunt room members <room>                 # roster
+shunt room rm <room>
+```
+
+All server-local — no `-c` forwarding exists because there is nothing to forward to. Body source precedence `--body` > `--body-file` > `-` (stdin), the §14.1 rule. `<room>` resolves by exact name or unique prefix. `read` without `--all` prints only messages past the reader's mark (§17.5); `say`, `read`, and `decide` all mark. `decide` writes `meta.decision = {ts, author, note}` — latest wins, replacing the topic-close mechanism: what coordination needs is "the current agreement", not a closed thread; the stream retains how it was reached.
+
+### 17.3 Identity: one `--as` label for author and reader
+
+`--as <label>` (sanitized like a §3.3 slug) is both the `author` on messages and the key of the caller's `readers/` cursor — you read under the same name you speak under. Agents SHOULD use their project name (`riboworld`, `gerna`). Resolution: explicit `--as` > `$USER`. A `say`/`decide` whose `--as` is not in `meta.members` still posts — open-trust model — but the message is recorded `member: false` and stderr names the roster, so an agent that typed the wrong room learns where it went instead of leaking into a foreign channel silently.
+
+### 17.4 Membership, discovery, lifecycle
+
+- `room create --members` is explicit; `room ls` additionally prints _suggested_ rooms: groups of projects whose bindings land on the same box (client rows sharing an `ssh.host:port`, plus `local` rows grouped together) with ≥2 distinct projects and no room yet. Suggestions are computed live from bindings — zero stored state, always accurate — and materialize only via `create`.
+- Membership tracks reality loosely on purpose: `project bind`/`unbind` does NOT rewrite room rosters (a room may span boxes, may predate the binding, may outlive it); `room ls` flags members whose projects no longer share any suggested group as `stale` so drift is loud, not hidden.
+- A room's stream is capped at 500 live messages; past that, oldest `NNNN.json` move to `msgs/.archive/` — the §3.9 track-cap discipline, dot-prefixed and invisible to `read`/`ls`.
+- Rooms themselves never auto-expire — the registry is cheap disk and the coordination record is the asset; cleanup is `room rm`. `readers/` is capped at 64 label files, oldest-mtime evicted — a label gone quiet loses only its read positions, never data.
+
+### 17.5 Read state: per-label high-water marks
+
+`readers/<label>.json` holds `{last_read_n}` — a single high-water counter, made trivial by the linear stream: `unread_msgs = count(NNNN > last_read_n)`, finer than the per-topic binary flag of the earlier board design and computable in one pass. Only real engagement marks: `say`, `read`, `decide` set the caller label's `last_read_n` to the current max message number AFTER the op (a `say` marks its own message read — you obviously saw what you posted). `room ls` and `status` report without marking — polling is awareness, not reading.
+
+`shunt status --json [--as L]` gains a top-level `rooms: [{name, members, unread_msgs, decision}]` for the `--as` label (default `$USER`) — the aggregate view an agent polls anyway now carries its coordination inbox. Reader files are written temp-then-rename; a label shared by two callers shares one read set (intended: one identity, one read position).

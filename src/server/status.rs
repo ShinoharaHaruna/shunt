@@ -90,12 +90,18 @@ pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
 /// Aggregate every registered client plus the built-in `localhost`.
 /// Transport resolves per client (ssh / loopback). `--json` emits one
 /// object; otherwise a table — the server status a human asked for.
+/// `as_label` is the §17.5 identity for the `rooms` block: unread
+/// counts are computed for it (default $USER); reporting only —
+/// status never marks a reader position (polling is awareness).
 ///
 /// Probes run in parallel (std::thread, one per client): a dead box
 /// costs its own ssh timeout, not a serial slot ahead of every live
 /// client behind it. Output order stays the registry's sorted order
 /// regardless of join timing.
-pub fn run_all(json: bool) -> Result<()> {
+pub fn run_all(json: bool, as_label: Option<&str>) -> Result<()> {
+    // Resolve once up front: a malformed --as is an error worth
+    // surfacing before any probing, not a silently-empty rooms block.
+    let room_label = crate::server::room::resolve_label(as_label)?;
     let names = registry::list_clients()?;
     // list_clients keeps rows it cannot parse; a failed load must
     // not kill the whole aggregate — it degrades to an error row,
@@ -150,7 +156,8 @@ pub fn run_all(json: bool) -> Result<()> {
             Ok(v) => (serde_json::json!(v.len()), serde_json::Value::Null),
             Err(e) => (serde_json::Value::Null, serde_json::json!(format!("{e:#}"))),
         };
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "protocol": crate::proto::wire::PROTOCOL_VERSION, "clients": out, "spool_pending": pending, "spool_error": err }))?);
+        let rooms = crate::server::room::status_rooms(room_label.as_deref());
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "protocol": crate::proto::wire::PROTOCOL_VERSION, "clients": out, "spool_pending": pending, "spool_error": err, "rooms": rooms }))?);
         return Ok(());
     }
 
@@ -182,6 +189,22 @@ pub fn run_all(json: bool) -> Result<()> {
             for e in staged {
                 println!("  {}  {} -> {}  {} ({})", e.id, e.project, e.client, e.meta.slug, e.submitted_at);
             }
+        }
+    }
+    // §17.5: the aggregate carries the coordination inbox too —
+    // report-only, and only when rooms exist (zero noise otherwise).
+    let rooms = crate::server::room::status_rooms(room_label.as_deref());
+    if !rooms.is_empty() {
+        println!();
+        match &room_label {
+            Some(l) => println!("== rooms ==  unread for '{l}'"),
+            None => println!("== rooms =="),
+        }
+        for r in &rooms {
+            let unread = r["unread_msgs"].as_u64().map(|n| n.to_string()).unwrap_or_else(|| "-".into());
+            let members = r["members"].as_array().map(|a| a.iter().filter_map(|m| m.as_str()).collect::<Vec<_>>().join(",")).unwrap_or_default();
+            let dec = r["decision"]["note"].as_str().unwrap_or("-");
+            println!("  {}  unread {}  {}  {}", r["name"].as_str().unwrap_or("?"), unread, members, dec);
         }
     }
     Ok(())

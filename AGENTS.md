@@ -25,9 +25,9 @@ Raw cargo equivalents work too (`cargo build/test/clippy`).
 
 ## Repository structure
 
-- `src/cli.rs` — full clap command tree; server vs client subcommands
+- `src/cli/` — full clap command tree (`args.rs`); server vs client subcommand dispatch (`mod.rs`, `server.rs`, `agent.rs`)
 - `src/agent/` — client side: daemon loop, FS queue ops, exec, probe, shutdown
-- `src/server/` — server side: registry CRUD (real), spool, dispatcher, ssh transport, SOCKS5 tunnel manager
+- `src/server/` — server side: registry CRUD (real), spool, dispatcher, ssh transport, SOCKS5 tunnel manager, `room.rs` coordination rooms (design.md §17)
 - `src/feedback/` — GitHub-issue feedback channel: compose + sanitize, persist-first ledger, gh/curl delivery (design.md §14)
 - `src/proto/` — shared types: task format, wire JSON (protocol version 1)
 - `docs/design.md` — **authoritative behavioral spec**; when ambiguous, this file wins

@@ -145,6 +145,24 @@ Notes:
 - Raising `workers` dispatches immediately; lowering only stops new dispatches. Running tasks drain naturally. To free a slot now, `kill`.
 - `cancel` matches pending (or running) by unique substring; 0 or >1 match is an error.
 
+### room (coordinate with other projects)
+
+When several projects share a box — check `room ls` suggestions, they appear whenever ≥2 projects' bindings land on the same ssh endpoint — negotiate budgets BEFORE burning GPU time on trial-and-error OOMs. Rooms are server-local group chats; nothing reaches the box.
+
+```bash
+shunt room ls --as riboworld                      # your rooms + unread counts + suggested groups
+shunt status --all --json --as riboworld          # poll this — top-level rooms[] carries unread
+shunt room create gpu-vram --members riboworld,gerna --clients rw-a
+shunt room say gpu-vram --as riboworld --body "I need 20G VRAM for 2h starting 14:00Z"
+shunt room read gpu-vram --as riboworld           # unread only; --all for the full stream
+shunt room decide gpu-vram --as gerna --note "riboworld gets GPU0, gerna GPU1, workers cap 2 each"
+shunt room members gpu-vram                       # roster; (stale) marks unbound projects
+```
+
+- Always pass `--as <your project name>` — it is both the author label and your read cursor. `say`/`read`/`decide` mark your position; `ls`/`status` never do.
+- A `decide` is only a record: the agreement takes effect when participants act on it (`workers -c <box> N`, `# shunt-env:CUDA_VISIBLE_DEVICES=`). Nothing enforces it — the queue never reads rooms.
+- Posting from a label outside the roster still lands (`member:false`, stderr names the roster) — if your say warns, you typed the wrong room.
+
 ## Reading state
 
 The client queue is a directory of tracks under `qroot`:

@@ -5,6 +5,7 @@
 use anyhow::{Context as _, Result};
 
 use super::args::Cli;
+use super::print_cols;
 
 /// outcome live from the box when none is recorded yet (lazy
 /// write-back, design.md §4.5). A unique id prefix is accepted.
@@ -154,6 +155,160 @@ pub(crate) fn print_subhelp(sub: &str) -> Result<()> {
     use clap::CommandFactory;
     Cli::command().find_subcommand_mut(sub).expect(sub).print_help()?;
     Ok(())
+}
+
+/// `shunt room` (design.md §17): all server-local, so dispatch is a
+/// thin shell over crate::server::room — body-source resolution is
+/// the only CLI concern here (the §14.1 precedence rule).
+pub(crate) fn cmd_room(c: &super::args::RoomCmd) -> Result<()> {
+    use super::args::RoomAction as A;
+    use crate::server::room;
+    match &c.action {
+        A::Create { name, members, clients, json } => {
+            room::create(name, members, clients)?;
+            if *json {
+                println!("{}", serde_json::json!({"ok": true, "name": name, "members": members, "clients": clients}));
+            } else {
+                println!("room '{name}' created — members: {}", members.join(", "));
+            }
+            Ok(())
+        }
+        A::Ls { as_label, all, json } => {
+            let (label, views, suggested) = room::list(as_label.as_deref(), *all)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({"ok": true, "as": label, "rooms": views, "suggested": suggested}))?);
+            } else {
+                print_room_ls(label.as_deref(), &views, &suggested);
+            }
+            Ok(())
+        }
+        A::Say { room, body, body_file, source, as_label, json } => {
+            let label = room_required_label(as_label.as_deref())?;
+            let body = room_body(body.as_deref(), body_file.as_deref(), source.as_deref())?;
+            let (n, member) = room::say(room, &label, &body)?;
+            if *json {
+                println!("{}", serde_json::json!({"ok": true, "room": room, "n": n, "member": member}));
+            } else {
+                println!("posted {n:04} to '{room}'{}", if member { "" } else { " (non-member)" });
+            }
+            Ok(())
+        }
+        A::Read { room, as_label, all, json } => {
+            let label = room_required_label(as_label.as_deref())?;
+            let msgs = room::read(room, &label, *all)?;
+            if *json {
+                let msgs: Vec<_> = msgs.iter().map(|(n, m)| serde_json::json!({"n": n, "author": m.author, "ts": m.ts, "body_md": m.body_md, "member": m.member})).collect();
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({"ok": true, "room": room, "messages": msgs}))?);
+            } else {
+                for (n, m) in &msgs {
+                    println!("[{n:04}] {} {}{}", m.ts, m.author, if m.member { "" } else { " (non-member)" });
+                    println!("{}\n", m.body_md);
+                }
+                if msgs.is_empty() {
+                    println!("(no new messages)");
+                }
+            }
+            Ok(())
+        }
+        A::Decide { room, note, as_label, json } => {
+            let label = room_required_label(as_label.as_deref())?;
+            let d = room::decide(room, &label, note)?;
+            if *json {
+                println!("{}", serde_json::json!({"ok": true, "room": room, "decision": d}));
+            } else {
+                println!("decision recorded in '{room}': {} ({})", d.note, d.author);
+            }
+            Ok(())
+        }
+        A::Members { room, json } => {
+            let v = room::roster(room, None)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({"ok": true, "room": v}))?);
+            } else {
+                println!("room:    {}", v.name);
+                println!("created: {}", v.created_at);
+                print_members(&v);
+                println!("clients: {}", if v.clients.is_empty() { "-".into() } else { v.clients.join(", ") });
+                match &v.decision {
+                    Some(d) => println!("decision: {} ({} {})", d.note, d.author, d.ts),
+                    None => println!("decision: none yet"),
+                }
+            }
+            Ok(())
+        }
+        A::Rm { room, json } => {
+            let name = room::remove(room)?;
+            if *json {
+                println!("{}", serde_json::json!({"ok": true, "removed": name}));
+            } else {
+                println!("room '{name}' removed");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Mark-capable room ops need an identity; --as > $USER, else the
+/// error says how to supply one (§17.3).
+fn room_required_label(as_flag: Option<&str>) -> Result<String> {
+    crate::server::room::required_label(as_flag)
+}
+
+/// say body: `--body` > `--body-file` > `-`/stdin, the §14.1
+/// precedence rule. A bare interactive call errors naming its
+/// options rather than hanging on stdin.
+fn room_body(body: Option<&str>, body_file: Option<&str>, source: Option<&str>) -> Result<String> {
+    use std::io::{IsTerminal, Read};
+    if let Some(b) = body {
+        return Ok(b.to_string());
+    }
+    if let Some(f) = body_file {
+        return std::fs::read_to_string(f).with_context(|| format!("cannot read body file {f}"));
+    }
+    if let Some(s) = source {
+        anyhow::ensure!(s == "-", "say takes `-` for stdin, or --body/--body-file — got {s:?}");
+    }
+    if std::io::stdin().is_terminal() {
+        anyhow::bail!("say needs a body: --body TEXT, --body-file F, or `-`/stdin");
+    }
+    let mut s = String::new();
+    std::io::stdin().read_to_string(&mut s).context("cannot read body from stdin")?;
+    anyhow::ensure!(!s.trim().is_empty(), "say body is empty");
+    Ok(s)
+}
+
+/// Member list for human output, stale members marked (§17.4).
+fn print_members(v: &crate::server::room::RoomView) {
+    let members = v.members.iter().map(|m| if v.stale.contains(m) { format!("{m}(stale)") } else { m.clone() }).collect::<Vec<_>>().join(", ");
+    println!("members: {}", if members.is_empty() { "-".into() } else { members });
+}
+
+fn print_room_ls(label: Option<&str>, views: &[crate::server::room::RoomView], suggested: &[crate::server::room::Suggested]) {
+    if views.is_empty() {
+        match label {
+            Some(l) => println!("no rooms for '{l}' (--all lists every room)"),
+            None => println!("no rooms yet"),
+        }
+    } else {
+        let rows: Vec<Vec<String>> = views
+            .iter()
+            .map(|v| {
+                let members = v.members.iter().map(|m| if v.stale.contains(m) { format!("{m}(stale)") } else { m.clone() }).collect::<Vec<_>>().join(",");
+                let unread = v.unread_msgs.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
+                let dec = v.decision.as_ref().map(|d| format!("{} ({}, {})", d.note, d.author, d.ts)).unwrap_or_else(|| "-".into());
+                vec![v.name.clone(), unread, members, dec]
+            })
+            .collect();
+        let mut all_rows = vec![vec!["room".into(), "unread".into(), "members".into(), "decision".into()]];
+        all_rows.extend(rows);
+        print_cols(&all_rows);
+    }
+    if !suggested.is_empty() {
+        println!("\nsuggested (projects sharing a box, no room yet):");
+        for s in suggested {
+            println!("  {}: {}  ->  shunt room create <name> --members {} --clients {}", s.endpoint, s.projects.join(","), s.projects.join(","), s.clients.join(","));
+        }
+    }
 }
 
 /// `shunt client add`: seeds the row from a vendor template when given,

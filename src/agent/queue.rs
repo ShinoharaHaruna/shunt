@@ -99,8 +99,9 @@ pub fn init(root: &Path) -> Result<()> {
 /// 30 s (matching `flock -w 30`). The returned File owns the hold —
 /// dropping it releases the lock. `enqueue` holds it across
 /// dedup-scan + mint + install so two same-key pushes serialize and
-/// the second sees the first's entry.
-fn seq_lock(root: &Path) -> Result<std::fs::File> {
+/// the second sees the first's entry. Rooms (design.md §17) reuse
+/// the same `<dir>/.seq.lock` hold for their message counter.
+pub fn seq_lock(root: &Path) -> Result<std::fs::File> {
     let lock_path = root.join(".seq.lock");
     let lock = std::fs::OpenOptions::new().create(true).append(true).open(&lock_path).with_context(|| format!("cannot open {}", lock_path.display()))?;
     let deadline = Instant::now() + Duration::from_secs(30);

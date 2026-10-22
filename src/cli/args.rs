@@ -48,6 +48,10 @@ pub enum Command {
     /// Box-side SOCKS5 tunnel over ssh -R (server)
     #[command(arg_required_else_help = true)]
     Tunnel(TunnelArgs),
+    /// Coordination rooms for projects sharing compute —
+    /// server-local group chats (design.md §17)
+    #[command(arg_required_else_help = true)]
+    Room(RoomCmd),
 
     /// Create queue dirs under --root (client)
     Init(RootArgs),
@@ -198,6 +202,12 @@ pub struct StatusArgs {
     /// Local queue root (client side)
     #[arg(long, conflicts_with = "all")]
     pub root: Option<String>,
+    /// Identity for the rooms block (server aggregate only, §17.5):
+    /// unread counts are computed for this label; default $USER.
+    /// Implies the aggregate — rooms are server-local, so a -c wire
+    /// op or a local --root has none to report.
+    #[arg(long = "as", conflicts_with_all = ["client", "root"])]
+    pub as_label: Option<String>,
     /// Emit a single JSON object (wire protocol)
     #[arg(long)]
     pub json: bool,
@@ -455,6 +465,109 @@ pub enum TunnelAction {
     Down,
     /// Report liveness and port
     Status,
+}
+
+#[derive(Args)]
+pub struct RoomCmd {
+    #[command(subcommand)]
+    pub action: RoomAction,
+}
+
+/// `shunt room` (design.md §17): server-local coordination rooms
+/// for the projects sharing compute. `--as <label>` is one identity
+/// for author and read cursor — agents use their project name.
+#[derive(Subcommand)]
+pub enum RoomAction {
+    /// Create a room. --members are PROJECT names (the shared
+    /// vocabulary); --clients annotates which boxes the room
+    /// coordinates and is never a gate
+    Create {
+        /// Room name (registry-name charset)
+        name: String,
+        /// Member projects (comma-separated or repeatable)
+        #[arg(long, value_delimiter = ',', required = true)]
+        members: Vec<String>,
+        /// Boxes this room coordinates (annotation only)
+        #[arg(long, value_delimiter = ',')]
+        clients: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rooms the --as label belongs to, with unread counts, plus
+    /// suggested groups (projects sharing a box with no room yet);
+    /// --all lists every room. Never marks.
+    Ls {
+        /// Identity for unread counts (default $USER)
+        #[arg(long = "as")]
+        as_label: Option<String>,
+        /// List every room, not just ones the label belongs to
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Post a message (markdown body, 16 KiB cap) and mark it read
+    /// for --as. Body source: --body > --body-file > `-`/stdin
+    Say {
+        /// Room name or unique prefix
+        room: String,
+        /// Message body inline
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read the body from a file
+        #[arg(long)]
+        body_file: Option<String>,
+        /// `-` reads the body from stdin
+        source: Option<String>,
+        /// Author + read-cursor label (default $USER); a non-member
+        /// label still posts — recorded member:false
+        #[arg(long = "as")]
+        as_label: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print messages past the caller's mark, or the full stream
+    /// with --all; either way marks them read for --as
+    Read {
+        /// Room name or unique prefix
+        room: String,
+        /// Reader label (default $USER)
+        #[arg(long = "as")]
+        as_label: Option<String>,
+        /// Full stream instead of unread-only
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record the current agreement in meta.decision — latest wins;
+    /// the stream retains how it was reached
+    Decide {
+        /// Room name or unique prefix
+        room: String,
+        /// The agreement text
+        #[arg(long)]
+        note: String,
+        #[arg(long = "as")]
+        as_label: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the roster (members, clients, decision, stale marks)
+    Members {
+        /// Room name or unique prefix
+        room: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a room and its whole record — the only cleanup; rooms
+    /// never auto-expire
+    Rm {
+        /// Room name or unique prefix
+        room: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args)]
@@ -789,6 +902,46 @@ mod tests {
     fn status_root_conflicts_with_all() {
         assert!(Cli::try_parse_from(["shunt", "status", "--all", "--root", "/tmp/q"]).is_err());
         assert!(Cli::try_parse_from(["shunt", "status", "--root", "/tmp/q"]).is_ok());
+    }
+
+    /// `room` command surface (§17.2): `say r -` reads stdin,
+    /// `--as` is the identity flag, `rm` is the only cleanup.
+    #[test]
+    fn room_forms() {
+        let cli = parse(&["shunt", "room", "create", "gpu", "--members", "p1,p2", "--clients", "b1"]);
+        let Command::Room(r) = cli.command else { panic!() };
+        let RoomAction::Create { name, members, clients, .. } = r.action else { panic!() };
+        assert_eq!(name, "gpu");
+        assert_eq!(members, ["p1", "p2"]);
+        assert_eq!(clients, ["b1"]);
+
+        let cli = parse(&["shunt", "room", "say", "gpu", "-", "--as", "p1"]);
+        let Command::Room(r) = cli.command else { panic!() };
+        let RoomAction::Say { source, as_label, .. } = r.action else { panic!() };
+        assert_eq!(source.as_deref(), Some("-"));
+        assert_eq!(as_label.as_deref(), Some("p1"));
+
+        let cli = parse(&["shunt", "room", "decide", "gpu", "--note", "cap 12G", "--json"]);
+        let Command::Room(r) = cli.command else { panic!() };
+        assert!(matches!(r.action, RoomAction::Decide { .. }));
+
+        let cli = parse(&["shunt", "room", "rm", "gpu"]);
+        let Command::Room(r) = cli.command else { panic!() };
+        assert!(matches!(r.action, RoomAction::Rm { .. }));
+
+        assert!(Cli::try_parse_from(["shunt", "room", "create", "x"]).is_err());
+    }
+
+    /// `status --as` carries the rooms block (§17.5) and only makes
+    /// sense on the server aggregate — a -c wire op or a local
+    /// --root has no rooms to report.
+    #[test]
+    fn status_as_conflicts_with_client_and_root() {
+        let cli = parse(&["shunt", "status", "--json", "--as", "p1"]);
+        let Command::Status(s) = cli.command else { panic!() };
+        assert_eq!(s.as_label.as_deref(), Some("p1"));
+        assert!(Cli::try_parse_from(["shunt", "status", "--as", "p1", "-c", "x"]).is_err());
+        assert!(Cli::try_parse_from(["shunt", "status", "--as", "p1", "--root", "/tmp/q"]).is_err());
     }
 
     #[test]

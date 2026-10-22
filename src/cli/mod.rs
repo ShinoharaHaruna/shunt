@@ -80,8 +80,11 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Status(a) => {
-            if a.all {
-                return crate::server::status::run_all(a.json);
+            // --as only makes sense on the server aggregate (§17.5:
+            // the rooms block); its presence implies --all. clap
+            // already rejects combining it with -c/--root.
+            if a.all || a.as_label.is_some() {
+                return crate::server::status::run_all(a.json, a.as_label.as_deref());
             }
             dual_mode(&a.client, &a.root, "status", |name| remote(name, &["status", "--json"], None, true), || agent_status(&a))
         }
@@ -111,6 +114,7 @@ pub fn run(cli: Cli) -> Result<()> {
             agent_dlog(&a, None)
         }
         Command::Dispatch(a) => crate::server::dispatch::run(a.once),
+        Command::Room(c) => cmd_room(&c),
         Command::Tunnel(a) => {
             use crate::server::tunnel;
             let name = required_client(&a.client)?;

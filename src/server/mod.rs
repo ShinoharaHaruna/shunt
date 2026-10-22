@@ -4,6 +4,7 @@ pub mod client_ops;
 pub mod dispatch;
 pub mod fsutil;
 pub mod registry;
+pub mod room;
 pub mod spool;
 pub mod status;
 pub mod tasks;
