@@ -163,15 +163,16 @@ impl super::Transport for SshTransport {
         // (scp sources are paths; a bare user@host reads as a local file).
         // base_args is flags-only now: drop its leading `-p PORT`
         // (scp spells it -P), then local source + user@host:path.
-        let mut args = vec!["-P".into(), client.ssh.port.to_string()];
+        let mut args = vec!["-O".into(), "-P".into(), client.ssh.port.to_string()];
         args.extend(Self::base_args(client)?.into_iter().skip(2));
         // Same double bound as exec (design.md §5): half-open TCP
         // dies in ~30s instead of riding the full hard deadline.
         args.extend(["-o".into(), "ServerAliveInterval=15".into(), "-o".into(), "ServerAliveCountMax=2".into()]);
         args.push(local.display().to_string());
-        // The remote side of scp runs through the remote login
-        // shell — the qroot-derived path must be quoted or spaces /
-        // `$()` / backticks break (or inject) the remote command.
+        // Explicit legacy SCP (-O) keeps older remote scp peers usable
+        // and makes shell quoting correct regardless of the local
+        // default: SFTP would preserve these quotes literally. The
+        // legacy remote shell needs them to prevent splitting/injection.
         args.push(format!("{}@{}:{}", client.ssh.user, client.ssh.host, shell_quote(remote_path)));
         // Same contract as exec: retry rc-255 flaps, bounded by the
         // hard deadline (a hang is not a flap — bail without retry or
@@ -383,25 +384,41 @@ mod tests {
     }
 
     #[test]
-    fn scp_remote_path_is_shell_quoted() {
+    fn scp_uses_legacy_protocol_with_shell_quoted_paths() {
         let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
         let _g = ENV_LOCK.lock().unwrap();
         let home = std::env::temp_dir().join(format!("shunt-scp-home3-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &home);
         let dir = std::env::temp_dir().join(format!("shunt-fakescp-out3-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let argfile = dir.join("lastarg");
+        let argfile = dir.join("argv");
+        let marker = dir.join("injected");
         std::env::set_var("FAKE_ARGV", &argfile);
-        fake_scp("for a in \"$@\"; do last=$a; done; printf %s \"$last\" > \"$FAKE_ARGV\"; exit 0");
+        fake_scp("printf '%s\\n' \"$@\" > \"$FAKE_ARGV\"; exit 0");
         let local = dir.join("bin");
         std::fs::write(&local, "x").unwrap();
-        // A qroot-derived path with spaces and `$` must reach scp
-        // quoted — the remote shell would otherwise split/expand it.
-        SshTransport.copy_to(&ssh_client(), &local, "/root/my dir/$(id)").unwrap();
-        assert_eq!(std::fs::read_to_string(&argfile).unwrap(), "u@127.0.0.1:'/root/my dir/$(id)'");
+        let paths = ["/queue with space/bin/shunt".to_string(), format!("/queue $(touch {})/bin/shunt", marker.display()), "/queue's/bin/shunt".to_string()];
+        let mut captured = Vec::new();
+        for path in &paths {
+            SshTransport.copy_to(&ssh_client(), &local, path).unwrap();
+            captured.push(std::fs::read_to_string(&argfile).unwrap());
+        }
         std::env::remove_var("FAKE_ARGV");
         std::env::remove_var("SHUNT_HOME");
         restore_path();
+
+        for (path, argv) in paths.iter().zip(captured) {
+            // Quoting alone is wrong under SFTP, which preserves the
+            // quotes literally. Pin the protocol as well as the path.
+            assert!(argv.lines().any(|arg| arg == "-O"), "shell-quoted paths require explicit legacy SCP: {argv}");
+            let remote = argv.lines().last().unwrap().strip_prefix("u@127.0.0.1:").unwrap();
+            // Exercise remote shell parsing, not just our quote helper:
+            // the sink must receive exactly one unchanged path argument.
+            let out = std::process::Command::new("sh").arg("-c").arg(format!("printf '%s\\0' {remote}")).output().unwrap();
+            assert!(out.status.success(), "{out:?}");
+            assert_eq!(out.stdout, format!("{path}\0").as_bytes());
+            assert!(!marker.exists(), "remote path executed a shell substitution");
+        }
     }
 
     #[test]
