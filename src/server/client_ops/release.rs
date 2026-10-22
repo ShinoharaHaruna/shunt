@@ -70,6 +70,23 @@ pub(crate) fn local_version(bin: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Parse records without letting manifest-controlled paths reach the checksum tool.
+/// Duplicate target records are ambiguous even when their digests agree.
+fn expected_checksum<'a>(manifest: &'a str, asset: &str) -> Result<&'a str> {
+    let mut expected = None;
+    for line in manifest.lines() {
+        let (digest, rest) = line.split_once(' ').context("malformed checksum entry")?;
+        let file = rest.strip_prefix(' ').or_else(|| rest.strip_prefix('*')).context("malformed checksum entry mode")?;
+        anyhow::ensure!(digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()), "malformed checksum digest");
+        anyhow::ensure!(!file.is_empty() && file != "." && file != ".." && !file.contains(['/', '\\']), "checksum entry must name a plain filename");
+        if file == asset {
+            anyhow::ensure!(expected.is_none(), "ambiguous checksum entries for {asset}");
+            expected = Some(digest);
+        }
+    }
+    expected.with_context(|| format!("checksum manifest lacks {asset}"))
+}
+
 /// Download + checksum-verify + extract version `ver`'s asset for
 /// `target`. Integrity is proven (SHA256SUMS-<target>); identity is
 /// the CALLER's job — rescue checks same-sha, upgrade checks the
@@ -90,9 +107,15 @@ pub fn fetch_asset(ver: &str, target: &str) -> Result<TempBin> {
     download(&repo, ver, &asset, &dir)?;
     download(&repo, ver, &sums, &dir)?;
 
-    // Checksum gate: a truncated or substituted tarball must not ship.
-    let sum = Command::new("sha256sum").args(["--check", "--strict", &sums]).current_dir(&dir).output().context("run sha256sum")?;
-    anyhow::ensure!(sum.status.success(), "checksum mismatch for {asset}: {}", String::from_utf8_lossy(&sum.stdout).trim());
+    let manifest = std::fs::read_to_string(dir.join(&sums)).context("read checksum manifest")?;
+    let expected = expected_checksum(&manifest, &asset)?;
+    // A successful manifest-wide check can verify an unrelated file and leave
+    // this archive unchecked. Hash only the archive we are about to extract.
+    let sum = Command::new("sha256sum").arg("--").arg(&asset).current_dir(&dir).output().context("run sha256sum")?;
+    anyhow::ensure!(sum.status.success(), "checksum failed for {asset}: {}", String::from_utf8_lossy(&sum.stderr).trim());
+    let output = String::from_utf8_lossy(&sum.stdout);
+    let actual = output.split_whitespace().next().context("checksum tool returned no digest")?;
+    anyhow::ensure!(actual.eq_ignore_ascii_case(expected), "checksum mismatch for {asset}");
 
     let tar = Command::new("tar").arg("-xzf").arg(dir.join(&asset)).arg("-C").arg(&dir).output().context("run tar")?;
     anyhow::ensure!(tar.status.success(), "tar failed: {}", String::from_utf8_lossy(&tar.stderr).trim());
