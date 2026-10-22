@@ -3,6 +3,36 @@
 
 use crate::server::registry::{self, ClientEntry};
 use anyhow::{Context, Result};
+use std::fs;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct HostkeyStage(PathBuf);
+
+impl HostkeyStage {
+    fn new(parent: &Path) -> Result<Self> {
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        loop {
+            // Leading '-' cannot be a client name. Exclusive creation also
+            // isolates concurrent edits and never reuses a stale work directory.
+            let dir = parent.join(format!("-hostkey-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+            match fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => return Ok(Self(dir)),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err).context("create private host-key staging directory"),
+            }
+        }
+    }
+}
+
+impl Drop for HostkeyStage {
+    fn drop(&mut self) {
+        if let Err(err) = fs::remove_dir_all(&self.0) {
+            eprintln!("warn: could not clean host-key staging directory {} ({err}); remove it manually", self.0.display());
+        }
+    }
+}
 
 /// `ssh-keygen -R <spec>` scoped to one client's own known_hosts
 /// file. The spec is `host` on port 22 else `[host]:port` —
@@ -13,13 +43,21 @@ pub(crate) fn drop_hostkey(client: &str, host: &str, port: u16) -> Result<()> {
         return Ok(());
     }
     let spec = if port == 22 { host.to_string() } else { format!("[{host}]:{port}") };
-    let st = std::process::Command::new("ssh-keygen").args(["-R", &spec, "-f", &kh.display().to_string()]).stdin(std::process::Stdio::null()).status().context("spawn ssh-keygen -R")?;
+    // OpenSSH writes <file>.old (and temporary siblings) before returning.
+    // Even that backup name can be another client's store, so it must never
+    // edit the live path. A same-filesystem private stage permits atomic publish.
+    let stage = HostkeyStage::new(kh.parent().context("known_hosts path has no parent")?)?;
+    let work = stage.0.join("known_hosts");
+    let permissions = fs::metadata(&kh)?.permissions();
+    fs::copy(&kh, &work).context("stage known_hosts")?;
+    fs::set_permissions(&work, fs::Permissions::from_mode(0o600))?;
+    let st = std::process::Command::new("ssh-keygen").args(["-R", &spec, "-f"]).arg(&work).stdin(std::process::Stdio::null()).status().context("spawn ssh-keygen -R")?;
     if !st.success() {
         anyhow::bail!("ssh-keygen -R {spec} failed");
     }
-    // ssh-keygen -R renames the pre-edit file to <kh>.old; left in
-    // place it accumulates stale key material under umask perms.
-    let _ = std::fs::remove_file(kh.with_extension("old"));
+    // OpenSSH may replace the staged inode with umask-derived permissions.
+    fs::set_permissions(&work, permissions)?;
+    fs::rename(&work, &kh).context("replace known_hosts after ssh-keygen -R")?;
     Ok(())
 }
 
