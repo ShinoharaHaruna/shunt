@@ -87,14 +87,35 @@ fn expected_checksum<'a>(manifest: &'a str, asset: &str) -> Result<&'a str> {
     expected.with_context(|| format!("checksum manifest lacks {asset}"))
 }
 
+/// Release identity keeps the comparison version separate from artifact naming.
+pub(crate) struct Release {
+    pub version: String,
+    pub tag: String,
+}
+
+impl Release {
+    fn from_tag(tag: &str) -> Result<Self> {
+        let tag = tag.trim();
+        let version = tag.strip_prefix('v').unwrap_or(tag);
+        anyhow::ensure!(!version.is_empty() && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b)), "invalid release tag: {tag}");
+        Ok(Self { version: version.into(), tag: tag.into() })
+    }
+}
+
 /// Download + checksum-verify + extract version `ver`'s asset for
 /// `target`. Integrity is proven (SHA256SUMS-<target>); identity is
 /// the CALLER's job — rescue checks same-sha, upgrade checks the
 /// extracted binary reports `ver`.
+#[allow(dead_code)] // Preserve the shared version-based helper's v-prefixed contract.
 pub fn fetch_asset(ver: &str, target: &str) -> Result<TempBin> {
+    fetch_tag_asset(&format!("v{ver}"), target)
+}
+
+/// Fetch an exact release tag; unlike the legacy version helper, no prefix is added.
+pub(crate) fn fetch_tag_asset(tag: &str, target: &str) -> Result<TempBin> {
     anyhow::ensure!(std::env::consts::ARCH == "x86_64", "release assets are x86_64-only; local arch is {}", std::env::consts::ARCH);
     let repo = resolve_repo()?;
-    let asset = format!("shunt-v{ver}-{target}.tar.gz");
+    let asset = format!("shunt-{tag}-{target}.tar.gz");
     let sums = format!("SHA256SUMS-{target}");
 
     let dir = std::env::temp_dir().join(format!("shunt-release-{}-{}", std::process::id(), target));
@@ -104,8 +125,8 @@ pub fn fetch_asset(ver: &str, target: &str) -> Result<TempBin> {
     // disarms it (the caller's TempBin owns the lifetime instead).
     let guard = TempBin { path: PathBuf::new(), dir: dir.clone() };
 
-    download(&repo, ver, &asset, &dir)?;
-    download(&repo, ver, &sums, &dir)?;
+    download(&repo, tag, &asset, &dir)?;
+    download(&repo, tag, &sums, &dir)?;
 
     let manifest = std::fs::read_to_string(dir.join(&sums)).context("read checksum manifest")?;
     let expected = expected_checksum(&manifest, &asset)?;
@@ -119,7 +140,7 @@ pub fn fetch_asset(ver: &str, target: &str) -> Result<TempBin> {
 
     let tar = Command::new("tar").arg("-xzf").arg(dir.join(&asset)).arg("-C").arg(&dir).output().context("run tar")?;
     anyhow::ensure!(tar.status.success(), "tar failed: {}", String::from_utf8_lossy(&tar.stderr).trim());
-    let shipped = dir.join(format!("shunt-v{ver}-{target}")).join("shunt");
+    let shipped = dir.join(format!("shunt-{tag}-{target}")).join("shunt");
     anyhow::ensure!(shipped.is_file(), "archive lacks the shunt binary");
 
     std::mem::forget(guard); // keep the dir alive for the caller
@@ -131,7 +152,19 @@ pub fn fetch_asset(ver: &str, target: &str) -> Result<TempBin> {
 /// caller's hard fail — rescue is opportunistic, never silent.
 pub fn rescue_musl(local: &Path) -> Result<TempBin> {
     let (ver, sha, dirty) = parse_version(&local_version(local)?).context("cannot parse local --version output")?;
-    let tb = fetch_asset(&ver, MUSL_TARGET)?;
+    let repo = resolve_repo()?;
+    let mut found = None;
+    // Only a confirmed missing tag permits trying the other supported spelling.
+    // Once selected, its integrity/identity failures must never select other code.
+    for tag in [format!("v{ver}"), ver.clone()] {
+        if let Some(release) = query_release(&repo, Some(&tag))? {
+            anyhow::ensure!(release.tag == tag && release.version == ver, "release query returned unexpected tag {} for {tag}", release.tag);
+            found = Some(release);
+            break;
+        }
+    }
+    let release = found.with_context(|| format!("no release found for {ver}"))?;
+    let tb = fetch_tag_asset(&release.tag, MUSL_TARGET)?;
     let shipped = tb.path();
 
     // Same-code proof: the artifact's embedded sha must equal ours —
@@ -149,24 +182,57 @@ pub fn rescue_musl(local: &Path) -> Result<TempBin> {
     Ok(tb)
 }
 
-/// Newest non-prerelease release version (no `v` prefix), gh →
-/// curl against the public releases API.
+/// Newest non-prerelease release version (legacy normalized-version helper).
+#[allow(dead_code)] // Preserve normalized output for existing version-only callers.
 pub fn latest_version() -> Result<String> {
+    Ok(latest_release()?.version)
+}
+
+pub(crate) fn latest_release() -> Result<Release> {
     let repo = resolve_repo()?;
-    let out = Command::new("gh").args(["release", "view", "--repo", &repo, "--json", "tagName", "-q", ".tagName"]).output();
+    query_release(&repo, None)?.context("latest release not found")
+}
+
+/// gh errors are not reliably typed; only an API 404 proves a tag is absent.
+fn query_release(repo: &str, tag: Option<&str>) -> Result<Option<Release>> {
+    let mut cmd = Command::new("gh");
+    cmd.args(["release", "view"]);
+    if let Some(tag) = tag {
+        cmd.arg(tag);
+    }
+    let out = cmd.args(["--repo", repo, "--json", "tagName", "-q", ".tagName"]).output();
     if let Ok(o) = out {
         if o.status.success() {
-            let v = String::from_utf8_lossy(&o.stdout).trim().trim_start_matches('v').to_string();
-            if !v.is_empty() {
-                return Ok(v);
+            let tag = String::from_utf8_lossy(&o.stdout);
+            if !tag.trim().is_empty() {
+                return Release::from_tag(&tag).map(Some);
             }
         }
     }
-    let out = Command::new("curl").args(["-fsSL", "--max-time", "30", &format!("https://api.github.com/repos/{repo}/releases/latest")]).output().context("curl not runnable")?;
-    anyhow::ensure!(out.status.success(), "latest-release query failed for {repo}: {}", String::from_utf8_lossy(&out.stderr).trim());
-    let j: serde_json::Value = serde_json::from_slice(&out.stdout).context("latest-release answer is not JSON")?;
-    let tag = j["tag_name"].as_str().context("latest release carries no tag_name")?;
-    Ok(tag.trim_start_matches('v').to_string())
+    let endpoint = tag.map(|t| format!("tags/{t}")).unwrap_or_else(|| "latest".into());
+    let url = format!("https://api.github.com/repos/{repo}/releases/{endpoint}");
+    let mut cmd = Command::new("curl");
+    if tag.is_some() {
+        cmd.args(["-sSL", "--write-out", "\n%{http_code}"]);
+    } else {
+        cmd.arg("-fsSL");
+    }
+    let out = cmd.args(["--max-time", "30", &url]).output().context("curl not runnable")?;
+    anyhow::ensure!(out.status.success(), "release query failed for {repo}: {}", String::from_utf8_lossy(&out.stderr).trim());
+    let body = String::from_utf8(out.stdout).context("release answer is not UTF-8")?;
+    let body = if tag.is_some() {
+        let (body, status) = body.rsplit_once('\n').context("release query lacks HTTP status")?;
+        if status == "404" {
+            return Ok(None);
+        }
+        anyhow::ensure!(status == "200", "release query failed for {repo}: HTTP {status}");
+        body
+    } else {
+        &body
+    };
+    let j: serde_json::Value = serde_json::from_str(body).context("release answer is not JSON")?;
+    let tag = j["tag_name"].as_str().context("release carries no tag_name")?;
+    Release::from_tag(tag).map(Some)
 }
 
 /// `a` strictly newer than `b`? Numeric triples; a bare release
@@ -190,14 +256,14 @@ pub fn semver_newer(a: &str, b: &str) -> bool {
 
 /// gh first (own auth), then `curl -L` — public release assets need
 /// no credentials.
-fn download(repo: &str, ver: &str, file: &str, dir: &Path) -> Result<()> {
-    let out = Command::new("gh").args(["release", "download", &format!("v{ver}"), "--repo", repo, "-p", file, "-D"]).arg(dir).arg("--clobber").stdout(Stdio::null()).stderr(Stdio::piped()).output();
+fn download(repo: &str, tag: &str, file: &str, dir: &Path) -> Result<()> {
+    let out = Command::new("gh").args(["release", "download", tag, "--repo", repo, "-p", file, "-D"]).arg(dir).arg("--clobber").stdout(Stdio::null()).stderr(Stdio::piped()).output();
     if let Ok(o) = out {
         if o.status.success() && dir.join(file).is_file() {
             return Ok(());
         }
     }
-    let url = format!("https://github.com/{repo}/releases/download/v{ver}/{file}");
+    let url = format!("https://github.com/{repo}/releases/download/{tag}/{file}");
     let out = Command::new("curl").args(["-fsSL", "--max-time", "120", "-o"]).arg(dir.join(file)).arg(&url).output().context("curl not runnable")?;
     anyhow::ensure!(out.status.success(), "download failed for {file}: {}", String::from_utf8_lossy(&out.stderr).trim());
     Ok(())
@@ -220,3 +286,7 @@ mod tests {
         assert!(!semver_newer("0.3.0", "garbage"), "unparseable current is never newer");
     }
 }
+
+#[cfg(test)]
+#[path = "release/tests.rs"]
+mod tag_tests;

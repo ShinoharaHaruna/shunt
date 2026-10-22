@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 pub fn cmd_upgrade(a: &UpgradeArgs) -> Result<()> {
-    let latest = release::latest_version()?;
+    let latest = release::latest_release()?;
     match &a.client {
         Some(name) => upgrade_remote(a, name, &latest),
         None => upgrade_local(a, &latest),
@@ -21,7 +21,8 @@ pub fn cmd_upgrade(a: &UpgradeArgs) -> Result<()> {
 /// Local self-upgrade: pick the asset matching THIS binary's linkage
 /// (glibc-linked → gnu asset, static → musl), verify, stage-then-mv
 /// over `current_exe`.
-fn upgrade_local(a: &UpgradeArgs, latest: &str) -> Result<()> {
+fn upgrade_local(a: &UpgradeArgs, release: &release::Release) -> Result<()> {
+    let latest = release.version.as_str();
     let current = env!("CARGO_PKG_VERSION");
     let newer = release::semver_newer(latest, current);
     if a.check || a.json {
@@ -42,7 +43,7 @@ fn upgrade_local(a: &UpgradeArgs, latest: &str) -> Result<()> {
 
     let exe = std::env::current_exe().context("current_exe")?;
     let target = if compat::required_glibc(&exe)?.is_some() { release::GNU_TARGET } else { release::MUSL_TARGET };
-    let tb = release::fetch_asset(latest, target)?;
+    let tb = release::fetch_tag_asset(&release.tag, target)?;
     verify_release(tb.path(), latest)?;
     install_over(tb.path(), &exe)?;
     if a.json {
@@ -57,7 +58,8 @@ fn upgrade_local(a: &UpgradeArgs, latest: &str) -> Result<()> {
 /// rescue's pick is simply the default here) through `bootstrap`,
 /// which keeps the owner-claim, stage-then-mv and smoke checks.
 /// Skips when the box already reports the target version.
-fn upgrade_remote(a: &UpgradeArgs, name: &str, latest: &str) -> Result<()> {
+fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Result<()> {
+    let latest = release.version.as_str();
     let c = registry::load_client(name)?;
     let t = transport::transport_for(&c);
     let bin = shunt_bin(&c);
@@ -80,7 +82,7 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, latest: &str) -> Result<()> {
         return Ok(());
     }
     anyhow::ensure!(t.exec(&c, &["uname".into(), "-m".into()], None).map(|s| s.trim() == "x86_64").unwrap_or(false), "release assets are x86_64-only; {name} is not x86_64 — upgrade it by shipping a locally built binary: `client bootstrap {name} --bin-path <build>`");
-    let tb = release::fetch_asset(latest, release::MUSL_TARGET)?;
+    let tb = release::fetch_tag_asset(&release.tag, release::MUSL_TARGET)?;
     verify_release(tb.path(), latest)?;
     client_ops::bootstrap(t.as_ref(), name, tb.path().to_str())?;
     // Stage-then-mv replaced the binary FILE; a running daemon keeps

@@ -13,6 +13,7 @@ const EMPTY_SHA: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991
 
 struct Release {
     root: PathBuf,
+    tag: String,
 }
 
 fn script(path: &Path, body: &str) {
@@ -22,21 +23,51 @@ fn script(path: &Path, body: &str) {
 
 impl Release {
     fn new(binary_version: &str) -> Self {
+        Self::with_tag(binary_version, &format!("v{VERSION}"))
+    }
+
+    fn with_tag(binary_version: &str, tag: &str) -> Self {
         let n = common::SEQ.fetch_add(1, Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!("shunt-release-checksum-{}-{n}", std::process::id()));
-        let fixture = Self { root };
+        let fixture = Self { root, tag: tag.into() };
         for dir in ["bin", "assets", "tmp", "home", "queue", "state"] {
             std::fs::create_dir_all(fixture.root.join(dir)).unwrap();
         }
         std::fs::copy(common::bin(), fixture.root.join("shunt")).unwrap();
-        script(&fixture.root.join("bin/gh"), "#!/bin/sh\nif [ \"$1 $2\" = 'release view' ]; then printf 'v99.0.0\\n'; exit 0; fi\n[ \"$MOCK_TRANSPORT\" = gh ] || exit 1\nwhile [ $# -gt 0 ]; do\ncase \"$1\" in -p) file=$2; shift;; -D) dir=$2; shift;; esac\nshift\ndone\n/bin/cp \"$MOCK_ASSETS/$file\" \"$dir/$file\"\n");
-        script(&fixture.root.join("bin/curl"), "#!/bin/sh\n[ \"$MOCK_TRANSPORT\" = curl ] || exit 1\nwhile [ $# -gt 0 ]; do\ncase \"$1\" in -o) dest=$2; shift;; https://*) file=${1##*/};; esac\nshift\ndone\n/bin/cp \"$MOCK_ASSETS/$file\" \"$dest\"\n");
+        script(
+            &fixture.root.join("bin/gh"),
+            r#"#!/bin/sh
+[ "$MOCK_TRANSPORT" = gh ] || exit 1
+if [ "$1 $2" = 'release view' ]; then printf '%s\n' "$MOCK_TAG"; exit 0; fi
+[ "$1 $2 $3" = "release download $MOCK_TAG" ] || exit 1
+while [ $# -gt 0 ]; do
+case "$1" in -p) file=$2; shift;; -D) dir=$2; shift;; esac
+shift
+done
+/bin/cp "$MOCK_ASSETS/$file" "$dir/$file"
+"#,
+        );
+        script(
+            &fixture.root.join("bin/curl"),
+            r#"#!/bin/sh
+[ "$MOCK_TRANSPORT" = curl ] || exit 1
+while [ $# -gt 0 ]; do
+case "$1" in -o) dest=$2; shift;; https://*) url=$1;; esac
+shift
+done
+case "$url" in
+https://api.github.com/repos/fixture/offline/releases/latest) printf '{"tag_name":"%s"}\n' "$MOCK_TAG";;
+https://github.com/fixture/offline/releases/download/"$MOCK_TAG"/*) /bin/cp "$MOCK_ASSETS/${url##*/}" "$dest";;
+*) exit 1;;
+esac
+"#,
+        );
         script(&fixture.root.join("bin/tar"), "#!/bin/sh\nprintf 'extract\\n' >> \"$TAR_MARKER\"\nexec /usr/bin/tar \"$@\"\n");
         for tool in ["sha256sum", "gzip"] {
             std::os::unix::fs::symlink(format!("/usr/bin/{tool}"), fixture.root.join("bin").join(tool)).unwrap();
         }
         for target in TARGETS {
-            let name = format!("shunt-v{VERSION}-{target}");
+            let name = format!("shunt-{tag}-{target}");
             let payload = fixture.root.join(&name);
             std::fs::create_dir(&payload).unwrap();
             script(&payload.join("shunt"), &format!("#!/bin/sh\nprintf 'execute\\n' >> \"$EXEC_MARKER\"\nprintf 'shunt {binary_version} (abcdef0 2026-01-01)\\n'\n"));
@@ -48,7 +79,7 @@ impl Release {
 
     fn manifests(&self, make: impl Fn(&str, &str) -> String) {
         for target in TARGETS {
-            let asset = format!("shunt-v{VERSION}-{target}.tar.gz");
+            let asset = format!("shunt-{}-{target}.tar.gz", self.tag);
             let out = Command::new("/usr/bin/sha256sum").arg(&asset).current_dir(self.root.join("assets")).output().unwrap();
             assert!(out.status.success());
             let generated = String::from_utf8(out.stdout).unwrap();
@@ -58,7 +89,7 @@ impl Release {
     }
 
     fn upgrade(&self, transport: &str) -> Output {
-        Command::new(self.root.join("shunt")).arg("upgrade").env("PATH", self.root.join("bin")).env("TMPDIR", self.root.join("tmp")).env("SHUNT_HOME", self.root.join("home")).env("SHUNT_ROOT", self.root.join("queue")).env("SHUNT_STATE", self.root.join("state")).env("SHUNT_RELEASE_REPO", "fixture/offline").env("MOCK_ASSETS", self.root.join("assets")).env("MOCK_TRANSPORT", transport).env("TAR_MARKER", self.root.join("extracted")).env("EXEC_MARKER", self.root.join("executed")).output().unwrap()
+        Command::new(self.root.join("shunt")).arg("upgrade").env("PATH", self.root.join("bin")).env("TMPDIR", self.root.join("tmp")).env("SHUNT_HOME", self.root.join("home")).env("SHUNT_ROOT", self.root.join("queue")).env("SHUNT_STATE", self.root.join("state")).env("SHUNT_RELEASE_REPO", "fixture/offline").env("MOCK_ASSETS", self.root.join("assets")).env("MOCK_TRANSPORT", transport).env("MOCK_TAG", &self.tag).env("TAR_MARKER", self.root.join("extracted")).env("EXEC_MARKER", self.root.join("executed")).output().unwrap()
     }
 
     fn rejected(&self, transport: &str) {
@@ -164,4 +195,51 @@ fn release_checksum_preserves_upgrade_identity_check() {
     assert!(fixture.root.join("executed").exists());
     assert!(String::from_utf8_lossy(&out.stderr).contains("expected 99.0.0"), "{out:?}");
     assert_eq!(std::fs::read(fixture.root.join("shunt")).unwrap(), std::fs::read(common::bin()).unwrap());
+}
+
+#[test]
+fn release_latest_upgrade_preserves_prefixed_tag_gh() {
+    latest_upgrade("v99.0.0", "gh");
+}
+
+#[test]
+fn release_latest_upgrade_preserves_bare_tag_gh() {
+    latest_upgrade("99.0.0", "gh");
+}
+
+#[test]
+fn release_latest_upgrade_preserves_prefixed_tag_curl() {
+    latest_upgrade("v99.0.0", "curl");
+}
+
+#[test]
+fn release_latest_upgrade_preserves_bare_tag_curl() {
+    latest_upgrade("99.0.0", "curl");
+}
+
+fn latest_upgrade(tag: &str, transport: &str) {
+    let fixture = Release::with_tag(VERSION, tag);
+    fixture.manifests(|digest, asset| format!("{digest}  {asset}\n"));
+    let out = fixture.upgrade(transport);
+    assert!(out.status.success(), "{out:?}");
+    assert!(fixture.root.join("extracted").exists());
+    assert!(fixture.root.join("executed").exists());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("upgraded"));
+    let out = Command::new(fixture.root.join("shunt")).arg("--version").output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains(VERSION));
+}
+
+#[test]
+fn release_bare_tag_still_rejects_integrity_and_identity_failures() {
+    for transport in ["gh", "curl"] {
+        let fixture = Release::with_tag(VERSION, VERSION);
+        fixture.manifests(|_, asset| format!("{}  {asset}\n", "0".repeat(64)));
+        fixture.rejected(transport);
+        let fixture = Release::with_tag("98.0.0", VERSION);
+        fixture.manifests(|digest, asset| format!("{digest}  {asset}\n"));
+        let out = fixture.upgrade(transport);
+        assert!(!out.status.success(), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("expected 99.0.0"), "{out:?}");
+        assert_eq!(std::fs::read(fixture.root.join("shunt")).unwrap(), std::fs::read(common::bin()).unwrap());
+    }
 }
