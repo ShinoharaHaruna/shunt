@@ -5,6 +5,14 @@ use super::hygiene::rekey;
 use crate::server::registry::{self, ClientEntry};
 use crate::server::transport::{self, Transport};
 use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
+
+fn public_key_path(private_key: impl AsRef<Path>) -> PathBuf {
+    // OpenSSH appends the suffix; replacing an extension aliases dotted names.
+    let mut path = private_key.as_ref().as_os_str().to_os_string();
+    path.push(".pub");
+    PathBuf::from(path)
+}
 
 /// `shunt client rename <old> <new>`: registry names are
 /// load-bearing — the row file, its `name` field, the dedicated
@@ -30,7 +38,7 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
     if e.ssh.key == old_key.display().to_string() && old_key.exists() {
         let nk = registry::client_key_path(new)?;
         std::fs::rename(&old_key, &nk)?;
-        let (old_pub, new_pub) = (old_key.with_extension("pub"), nk.with_extension("pub"));
+        let (old_pub, new_pub) = (public_key_path(&old_key), public_key_path(&nk));
         if old_pub.exists() {
             std::fs::rename(&old_pub, &new_pub)?;
         }
@@ -149,7 +157,7 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
         // address into garbage — sed then exits 0 having done
         // nothing, leaving our key in place.
         // Local rows carry no ssh.key — nothing to revoke.
-        let pub_path = std::path::PathBuf::from(&e.ssh.key).with_extension("pub");
+        let pub_path = public_key_path(&e.ssh.key);
         if !e.ssh.key.is_empty() {
             if let Ok(pubkey) = std::fs::read_to_string(&pub_path) {
                 if let Some(blob) = pubkey.split_whitespace().nth(1) {
@@ -194,7 +202,7 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
     let default_key = registry::client_key_path(name)?;
     if e.ssh.key == default_key.display().to_string() {
         let _ = std::fs::remove_file(&default_key);
-        let _ = std::fs::remove_file(default_key.with_extension("pub"));
+        let _ = std::fs::remove_file(public_key_path(&default_key));
     }
     for (dir, ext) in [("state", "fail"), ("tunnels", "pid"), ("tunnels", "port"), ("tunnels", "log")] {
         let _ = std::fs::remove_file(home.join(dir).join(format!("{name}.{ext}")));
