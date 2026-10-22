@@ -29,6 +29,7 @@ pub fn send(kind: &str, title: &str, body: &str, client: Option<&str>, dry_run: 
     // a pre-scrub draft.
     let secrets = sanitize::secrets();
     let (issue_title, n1) = sanitize::scrub(&issue_title, &secrets);
+    let (title, _) = sanitize::scrub(title, &secrets);
     let (body, n2) = sanitize::scrub(&body, &secrets);
     if n1 + n2 > 0 {
         eprintln!("redacted {} sensitive value(s)", n1 + n2);
@@ -39,7 +40,7 @@ pub fn send(kind: &str, title: &str, body: &str, client: Option<&str>, dry_run: 
         return Ok(());
     }
 
-    let mut art = ledger::Artifact { kind: kind.into(), title: title.into(), body, created_at: now(), delivered_at: None, issue_url: None, issue_number: None, attempts: 0 };
+    let mut art = ledger::Artifact { kind: kind.into(), title, body, created_at: now(), delivered_at: None, issue_url: None, issue_number: None, attempts: 0 };
     // Persist first: a report is never lost to a delivery failure.
     // Warn-only — delivery may still succeed, and if it also fails
     // the composed body is dumped to stderr as the last resort.

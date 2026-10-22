@@ -143,3 +143,86 @@ fn rate_cap_persists_and_retry_delivers() {
     let o = run(&home, &["feedback", "ls", "--json"], &env);
     assert!(!String::from_utf8_lossy(&o.stdout).contains("\"delivered\":false"));
 }
+
+fn register_synthetic_secret(home: &Path) {
+    std::fs::create_dir_all(home.join("clients")).unwrap();
+    std::fs::write(home.join("clients/synthetic.toml"), "[ssh]\npassword = \"synthetic-secret-9876\"\n").unwrap();
+}
+
+#[test]
+fn sanitized_title_stays_private_when_delivery_disabled() {
+    for json in [false, true] {
+        let home = tmpdir(if json { "title-private-json" } else { "title-private-human" });
+        register_synthetic_secret(&home);
+        let mut args = vec!["feedback", "connection with synthetic-secret-9876", "--body", "boom synthetic-secret-9876"];
+        if json {
+            args.push("--json");
+        }
+        let o = run(&home, &args, &[("SHUNT_FEEDBACK_REPO", "")]);
+        assert!(!o.status.success());
+        let stdout = String::from_utf8_lossy(&o.stdout);
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        assert!(!stdout.contains("synthetic-secret-9876"), "stdout leaks: {stdout}");
+        assert!(!stderr.contains("synthetic-secret-9876"), "stderr leaks: {stderr}");
+        assert!(stderr.contains("redacted 2 sensitive value(s)"), "{stderr}");
+        let files = artifacts(&home);
+        assert_eq!(files.len(), 1);
+        let path = files[0].to_str().unwrap();
+        assert!(!path.contains("synthetic-secret-9876"), "path leaks: {path}");
+        let stored = std::fs::read_to_string(&files[0]).unwrap();
+        assert!(!stored.contains("synthetic-secret-9876"), "artifact leaks: {stored}");
+        let art: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(art["title"], "connection with <redacted>");
+        assert!(art["body"].as_str().unwrap().starts_with("boom <redacted>\n\n---\n"));
+        if json {
+            let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(result["artifact"], path);
+        }
+        for args in [vec!["feedback", "ls"], vec!["feedback", "ls", "--json"]] {
+            let o = run(&home, &args, &[("SHUNT_FEEDBACK_REPO", "")]);
+            assert!(o.status.success());
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            assert!(!stdout.contains("synthetic-secret-9876"), "ls leaks: {stdout}");
+            assert!(!stderr.contains("synthetic-secret-9876"), "ls stderr leaks: {stderr}");
+            assert!(stdout.contains("connection with <redacted>"), "{stdout}");
+        }
+    }
+}
+
+#[test]
+fn sanitized_title_matches_initial_delivery_retry_and_dedup() {
+    let home = tmpdir("title-dedup");
+    register_synthetic_secret(&home);
+    let args = ["feedback", "connection with synthetic-secret-9876", "--body", "boom", "--json"];
+    let o = run(&home, &args, &[("SHUNT_FEEDBACK_REPO", "")]);
+    assert!(!o.status.success());
+    let pending = artifacts(&home).pop().unwrap();
+
+    let stub = stub_gh(&home);
+    let path = format!("{}:{}", stub.display(), std::env::var("PATH").unwrap());
+    let env = [("PATH", path.as_str()), ("FBSTUB", home.to_str().unwrap()), ("SHUNT_FEEDBACK_REPO", "stub/repo")];
+    let o = run(&home, &args, &env);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let result: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(result["deduped"], false);
+    let delivered_args = std::fs::read_to_string(home.join("args.log")).unwrap();
+    assert!(delivered_args.contains("--title [feedback/bug] connection with <redacted> --body-file -"), "{delivered_args}");
+    assert!(!delivered_args.contains("synthetic-secret-9876"));
+
+    // Retry must compare the same scrubbed title as the initial send.
+    let o = run(&home, &["feedback", "retry", pending.file_stem().unwrap().to_str().unwrap(), "--json"], &env);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let result: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(result["deduped"], true);
+    let o = run(&home, &["feedback", "connection with <redacted>", "--body", "boom", "--json"], &env);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let result: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(result["deduped"], true);
+    assert_eq!(std::fs::read_to_string(home.join("args.log")).unwrap().lines().count(), 1);
+    for file in artifacts(&home) {
+        let art: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+        assert_eq!(art["title"], "connection with <redacted>");
+        assert_eq!(art["issue_number"], 7);
+    }
+}

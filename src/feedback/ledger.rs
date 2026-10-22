@@ -28,8 +28,8 @@ pub struct Meta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Artifact {
     pub kind: String,
-    /// Raw title — the `[feedback/<kind>]` prefix is re-added at
-    /// delivery time, never stored.
+    /// Sanitized title without the `[feedback/<kind>]` prefix,
+    /// which is re-added at delivery time, never stored.
     pub title: String,
     /// Composed issue body, already sanitized.
     pub body: String,
