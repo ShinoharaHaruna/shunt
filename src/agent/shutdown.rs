@@ -33,8 +33,12 @@ pub fn arm(root: &Path, grace_s: Option<u64>) -> Result<()> {
 
 /// Disarm: remove the flag. A countdown in progress cancels within 1 s.
 pub fn disarm(root: &Path) -> Result<()> {
-    let _ = std::fs::remove_file(root.join("shutdown_on_idle"));
-    Ok(())
+    let flag = root.join("shutdown_on_idle");
+    match std::fs::remove_file(&flag) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("cannot disarm idle shutdown: cannot remove {}; check the flag path and parent directory permissions, then retry `shunt shutdown off` with the same --root", flag.display())),
+    }
 }
 
 /// Grace seconds: file > default 60 (`''|0` → default, as the bash).
