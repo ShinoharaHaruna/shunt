@@ -95,11 +95,19 @@ pub fn init(root: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+std::thread_local! {
+    // A one-shot observer makes lock contention testable without timing guesses.
+    static ON_SEQ_LOCK_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Acquire the exclusive `.seq.lock` flock, retrying for up to
 /// 30 s (matching `flock -w 30`). The returned File owns the hold —
 /// dropping it releases the lock. `enqueue` holds it across
 /// dedup-scan + mint + install so two same-key pushes serialize and
-/// the second sees the first's entry. Rooms (design.md §17) reuse
+/// the second sees the first's entry. Rescheduling shares this hold
+/// across its backward running → pending mutation so dedup cannot
+/// miss an entry moving behind its scan. Rooms (design.md §17) reuse
 /// the same `<dir>/.seq.lock` hold for their message counter.
 pub fn seq_lock(root: &Path) -> Result<std::fs::File> {
     let lock_path = root.join(".seq.lock");
@@ -109,6 +117,12 @@ pub fn seq_lock(root: &Path) -> Result<std::fs::File> {
         match lock.try_lock_exclusive() {
             Ok(()) => return Ok(lock),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                #[cfg(test)]
+                ON_SEQ_LOCK_WAIT.with(|observer| {
+                    if let Some(observer) = observer.borrow_mut().take() {
+                        observer();
+                    }
+                });
                 if Instant::now() >= deadline {
                     anyhow::bail!("timed out waiting for .seq.lock");
                 }
@@ -369,10 +383,11 @@ impl EnqueueOutcome {
 
 /// Scan the four live tracks for an entry whose task.sh head
 /// carries `# shunt:id=<key>`; first hit wins. Scan order follows
-/// the state machine's forward direction (pending → running →
-/// done → failed): an entry claimed or finalized mid-scan moves
-/// only into a track not yet scanned, so it cannot slip through
-/// between scans. `.archive/` is out of scope — an entry delivered,
+/// forward transitions (pending → running → done → failed), so a
+/// claim or finalize moves into a not-yet-scanned track. Reschedule
+/// moves backward (running → pending) and must share `.seq.lock`
+/// with this scan to prevent an entry slipping behind it.
+/// `.archive/` is out of scope — an entry delivered,
 /// finished AND archived inside one retry window is pathological,
 /// and a missed dedup there degrades to a guard-absorbed rerun.
 /// Runs under `.seq.lock` (callers), so no same-key push can
@@ -632,6 +647,83 @@ mod tests {
         assert_eq!(names.len(), 1, "threads disagreed on the entry: {names:?}");
         assert_eq!(pending_list(&root).unwrap().len(), 1);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The actual reschedule path must not move behind an enqueue's
+    /// pending snapshot. FIFO EOF and observed flock contention order
+    /// the race; neither the mutation nor its timing is simulated.
+    #[test]
+    fn enqueue_dedup_cannot_miss_concurrent_reschedule() {
+        use crate::agent::exec;
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::sync::mpsc;
+
+        enum Progress {
+            Waiting,
+            Finished,
+        }
+
+        let root = tmp_root("dedup-reschedule");
+        let body = "#!/usr/bin/env bash\n# shunt:id=repeat-delivery\n# shunt:retry=1\nexec true\n";
+        let original = root.join("running/0100_original");
+        std::fs::create_dir(&original).unwrap();
+        std::fs::write(original.join("task.sh"), body).unwrap();
+        std::fs::write(original.join("log"), "busy\n").unwrap();
+        let td = exec::task_directives(&original.join("task.sh"));
+
+        let blocker = root.join("pending/0001_block");
+        std::fs::create_dir(&blocker).unwrap();
+        let fifo = blocker.join("task.sh");
+        let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+        let (enqueue_tx, enqueue_rx) = mpsc::channel();
+        let r = root.clone();
+        let enqueue_thread = std::thread::spawn(move || enqueue_tx.send(enqueue(&r, "copy", body)).unwrap());
+
+        // Opening the writer proves enqueue reached this FIFO after
+        // snapshotting pending/ and while holding .seq.lock. Keep it
+        // open so the scan cannot advance until reschedule is observed.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut writer = loop {
+            match std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&fifo) {
+                Ok(writer) => break writer,
+                Err(e) if e.raw_os_error() == Some(libc::ENXIO) && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(1)),
+                Err(e) => panic!("enqueue did not reach FIFO: {e}"),
+            }
+        };
+        writer.write_all(b"#!/usr/bin/env bash\nexec true\n").unwrap();
+
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let (reschedule_tx, reschedule_rx) = mpsc::channel();
+        let r = root.clone();
+        let reschedule_thread = std::thread::spawn(move || {
+            let waiting_tx = progress_tx.clone();
+            ON_SEQ_LOCK_WAIT.with(|observer| *observer.borrow_mut() = Some(Box::new(move || waiting_tx.send(Progress::Waiting).unwrap())));
+            let result = exec::maybe_reschedule(&r, "0100_original", 75, &td);
+            progress_tx.send(Progress::Finished).unwrap();
+            reschedule_tx.send(result).unwrap();
+        });
+        let progress = progress_rx.recv_timeout(Duration::from_secs(5));
+        let stayed_running = original.is_dir();
+        drop(writer);
+        let replay = enqueue_rx.recv_timeout(Duration::from_secs(5)).expect("enqueue deadlocked").unwrap();
+        let rescheduled = reschedule_rx.recv_timeout(Duration::from_secs(5)).expect("reschedule deadlocked").unwrap();
+        enqueue_thread.join().unwrap();
+        reschedule_thread.join().unwrap();
+        std::fs::remove_dir_all(&blocker).unwrap();
+        let pending = pending_list(&root).unwrap();
+        let counter = std::fs::read_to_string(root.join(".seq")).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert!(replay.deduped(), "enqueue missed rescheduling original: deduped=false name={} pending={pending:?}", replay.name());
+        assert_eq!(replay.name(), "0100_original");
+        assert!(matches!(progress, Ok(Progress::Waiting)), "reschedule did not wait for enqueue's lock");
+        assert!(stayed_running, "reschedule moved while enqueue held .seq.lock");
+        assert!(matches!(rescheduled, exec::Resched::Queued { attempt: 1, .. }));
+        assert_eq!(pending, vec!["0100_original"]);
+        assert_eq!(counter, "99\n", "a deduped replay must not mint a number");
     }
 
     /// A corrupt `.seq` fails loudly (§3.2) — garbage, negative,

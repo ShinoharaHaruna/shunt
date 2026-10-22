@@ -596,6 +596,10 @@ pub fn maybe_reschedule(root: &Path, base: &str, rc: i32, td: &TaskDirectives) -
     } else {
         return Ok(Resched::No);
     };
+    // A backward move can evade enqueue's pending -> running scan.
+    // Serialize the collision check and mutation with that scan; this
+    // local guard drops on every return, before finalize or another spawn.
+    let _lock = queue::seq_lock(root)?;
     let pending = root.join("pending");
     if pending.join(base).exists() || pending.join(format!("{base}.sh")).exists() {
         // Same-numbered pending entry already exists — requeueing
@@ -1074,6 +1078,49 @@ mod tests {
         let td = super::task_directives(&root.join("running/0300_v/task.sh"));
         assert!(matches!(super::maybe_reschedule(&root, "0300_v", 1, &td).unwrap(), super::Resched::No));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Lock acquisition and sidecar failures must leave the entry
+    /// finalizable, and an acquired lock must not escape the error path.
+    #[test]
+    fn reschedule_errors_release_lock_and_allow_finalize() {
+        use fs2::FileExt;
+
+        for fault in ["lock", "sidecar"] {
+            let root = std::env::temp_dir().join(format!("shunt-rsfail-{fault}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            crate::agent::queue::init(&root).unwrap();
+            let head = "#!/usr/bin/env bash\n# shunt:id=reschedule-error\n# shunt:retry=1\nexec false\n";
+            running_entry(&root, "0100_t", head, "busy\n");
+            let entry = root.join("running/0100_t");
+            if fault == "lock" {
+                std::fs::create_dir(root.join(".seq.lock")).unwrap();
+            } else {
+                std::fs::create_dir(entry.join("attempts")).unwrap();
+            }
+            let td = super::task_directives(&entry.join("task.sh"));
+            assert!(super::maybe_reschedule(&root, "0100_t", 75, &td).is_err());
+            assert!(entry.join("task.sh").exists());
+            assert!(entry.join("pid").exists());
+            assert_eq!(std::fs::read_to_string(entry.join("log")).unwrap(), "busy\n");
+            assert!(!entry.join("retry_after").exists());
+            assert!(crate::agent::queue::pending_list(&root).unwrap().is_empty());
+            if fault == "lock" {
+                std::fs::remove_dir(root.join(".seq.lock")).unwrap();
+                assert!(!entry.join("attempts").exists());
+            }
+            let lock = std::fs::OpenOptions::new().create(true).append(true).open(root.join(".seq.lock")).unwrap();
+            lock.try_lock_exclusive().expect("reschedule leaked .seq.lock on error");
+            drop(lock);
+            // The daemon takes this fallback after maybe_reschedule
+            // returns Err; it must preserve the failure and delivery id.
+            super::finalize(&root, "0100_t", 75, None).unwrap();
+            assert_eq!(std::fs::read_to_string(root.join("failed/0100_t/exit")).unwrap(), "75\n");
+            assert!(!entry.exists());
+            let replay = crate::agent::queue::enqueue(&root, "copy", head).unwrap();
+            assert!(replay.deduped());
+            assert_eq!(replay.name(), "0100_t");
+            std::fs::remove_dir_all(&root).unwrap();
+        }
     }
 
     /// `attempts` reaching the declared budget finalizes instead of
