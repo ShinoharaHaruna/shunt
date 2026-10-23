@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::agent::queue;
+use crate::proto::proc::{self, ProcProbe};
 
 /// True when argv[0]'s basename is a shunt-family binary name:
 /// `shunt`, `shuntd`, or `shunt-<anything>` (versioned installs like
@@ -21,49 +22,24 @@ fn is_shunt_family(base: &[u8]) -> bool {
     base == b"shunt" || base == b"shuntd" || base.starts_with(b"shunt-")
 }
 
-/// NUL-separated `/proc/<pid>/cmdline` → this is a shunt daemon when
-/// argv[0]'s basename is shunt-family (`is_shunt_family`) AND argv[1] —
-/// the subcommand slot; this CLI has no pre-subcommand global flags —
-/// is exactly `queue::DAEMON_IDENTITY`. Anchoring at argv[1] keeps a
-/// recycled pid running `shunt logs daemon`/`kill daemon` (pattern
-/// positional) from false-identifying as the daemon. Basename-family +
-/// whole-element beats both a substring test and an exact-name match:
-/// an unrelated `foo-shunt daemon` cannot false-match, while a
-/// differently-named sibling daemon still does (design.md §3.4, §3.11).
-fn is_daemon_cmdline(cmdline: &[u8]) -> bool {
-    let mut argv = cmdline.split(|&b| b == 0).filter(|a| !a.is_empty());
-    let Some(argv0) = argv.next() else {
+/// The daemon needle for `proto::proc::probe`: split argv → this is
+/// a shunt daemon when argv[0]'s basename is shunt-family
+/// (`is_shunt_family`) AND argv[1] — the subcommand slot; this CLI has
+/// no pre-subcommand global flags — is exactly `queue::DAEMON_IDENTITY`.
+/// Anchoring at argv[1] keeps a recycled pid running `shunt logs
+/// daemon`/`kill daemon` (pattern positional) from false-identifying
+/// as the daemon. Basename-family + whole-element beats both a
+/// substring test and an exact-name match: an unrelated `foo-shunt
+/// daemon` cannot false-match, while a differently-named sibling
+/// daemon still does (design.md §3.4, §3.11).
+fn is_daemon_cmdline(argv: &[&[u8]]) -> bool {
+    let Some(argv0) = argv.first() else {
         return false;
     };
-    let base = argv0.rsplit(|&b| b == b'/').next().unwrap_or(argv0);
-    if !is_shunt_family(base) {
+    if !is_shunt_family(proc::argv0_base(argv0)) {
         return false;
     }
-    argv.next().is_some_and(|a| a == queue::DAEMON_IDENTITY.as_bytes())
-}
-
-/// Probe outcome for one pid (design.md §3.4). `Dead` is PROOF of
-/// death only: the process is gone (`/proc/<pid>` absent) or its
-/// cmdline was read and does not match (pid recycled — our daemon is
-/// provably gone). A cmdline READ FAILURE (EACCES on a different-uid
-/// process, transient proc pressure) is `Unknown` — inconclusive, so
-/// the fail-safe is to report the daemon alive and touch nothing.
-#[derive(Debug, PartialEq, Eq)]
-enum Probe {
-    Dead,
-    Live,
-    Unknown,
-}
-
-fn probe_pid(pid: u32, read_cmdline: impl Fn(u32) -> std::io::Result<Vec<u8>>) -> Probe {
-    if !Path::new(&format!("/proc/{pid}")).exists() {
-        return Probe::Dead;
-    }
-    match read_cmdline(pid) {
-        Ok(c) if is_daemon_cmdline(&c) => Probe::Live,
-        Ok(_) => Probe::Dead, // read succeeded, identity mismatch: pid recycled
-        Err(_) => Probe::Unknown,
-    }
+    argv.get(1).is_some_and(|a| *a == queue::DAEMON_IDENTITY.as_bytes())
 }
 
 /// Shared liveness core. `evict_stale`: remove `daemon.pid` on PROOF
@@ -77,9 +53,9 @@ fn alive_impl(root: &Path, evict_stale: bool, read_cmdline: impl Fn(u32) -> std:
         Some(p) => p,
         None => return Ok(None),
     };
-    match probe_pid(pid, read_cmdline) {
-        Probe::Live | Probe::Unknown => Ok(Some(pid)),
-        Probe::Dead => {
+    match proc::probe(pid, read_cmdline, is_daemon_cmdline) {
+        ProcProbe::Live | ProcProbe::Unknown => Ok(Some(pid)),
+        ProcProbe::Dead => {
             if evict_stale {
                 // TOCTOU: `run()` writes its pidfile after taking
                 // daemon.lock while alive() callers hold no lock, so a
@@ -102,7 +78,7 @@ fn alive_impl(root: &Path, evict_stale: bool, read_cmdline: impl Fn(u32) -> std:
 /// pidfile only on proof of death; a cmdline read failure reports the
 /// daemon alive and leaves the file.
 pub fn alive(root: &Path) -> Result<Option<u32>> {
-    alive_impl(root, true, |pid| std::fs::read(format!("/proc/{pid}/cmdline")))
+    alive_impl(root, true, proc::read_cmdline)
 }
 
 /// Read-only liveness for sibling qroots (`busy_peers`): identical
@@ -118,9 +94,9 @@ pub fn check_alive(root: &Path) -> Result<Option<u32>> {
     };
     let pid = content.trim().parse::<u32>().with_context(|| format!("invalid peer pidfile {}", pidfile.display()))?;
     anyhow::ensure!(pid > 0, "invalid peer pidfile {}", pidfile.display());
-    match probe_pid(pid, |pid| std::fs::read(format!("/proc/{pid}/cmdline"))) {
-        Probe::Live | Probe::Unknown => Ok(Some(pid)),
-        Probe::Dead => Ok(None),
+    match proc::probe(pid, proc::read_cmdline, is_daemon_cmdline) {
+        ProcProbe::Live | ProcProbe::Unknown => Ok(Some(pid)),
+        ProcProbe::Dead => Ok(None),
     }
 }
 
@@ -177,9 +153,15 @@ pub fn stop(root: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{alive_impl, is_daemon_cmdline, Probe};
+    use super::{alive_impl, is_daemon_cmdline};
 
-    fn argv(parts: &[&str]) -> Vec<u8> {
+    fn argv<'a>(parts: &[&'a str]) -> Vec<&'a [u8]> {
+        parts.iter().map(|p| p.as_bytes()).collect()
+    }
+
+    /// A NUL-separated cmdline as `/proc` serves it — for readers
+    /// injected into `alive_impl`.
+    fn cmdline(parts: &[&str]) -> Vec<u8> {
         let mut v = Vec::new();
         for p in parts {
             v.extend_from_slice(p.as_bytes());
@@ -241,7 +223,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let pidf = root.join("daemon.pid");
         std::fs::write(&pidf, format!("{}", std::process::id())).unwrap();
-        let foreign = |_| -> std::io::Result<Vec<u8>> { Ok(argv(&["sleep", "30"])) };
+        let foreign = |_| -> std::io::Result<Vec<u8>> { Ok(cmdline(&["sleep", "30"])) };
         let got = alive_impl(&root, true, foreign).unwrap();
         assert_eq!(got, None);
         assert!(!pidf.exists(), "proven-dead pidfile must be removed");
@@ -269,23 +251,12 @@ mod tests {
         let pidf2 = pidf.clone();
         let race = move |_| -> std::io::Result<Vec<u8>> {
             std::fs::write(&pidf2, format!("{}", std::process::id() + 1)).unwrap();
-            Ok(argv(&["sleep", "30"]))
+            Ok(cmdline(&["sleep", "30"]))
         };
         let got = alive_impl(&root, true, race).unwrap();
         assert_eq!(got, None);
         assert!(pidf.exists(), "pidfile rewritten by a live daemon must not be removed");
         assert_eq!(std::fs::read_to_string(&pidf).unwrap().trim().parse::<u32>().unwrap(), std::process::id() + 1);
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn probe_dead_when_proc_absent() {
-        // pid 2^22-ish: pick a pid guaranteed absent by scanning
-        let mut pid = 4_000_000u32;
-        while std::path::Path::new(&format!("/proc/{pid}")).exists() {
-            pid += 1;
-        }
-        let probe = super::probe_pid(pid, |_| Ok(vec![]));
-        assert_eq!(probe, Probe::Dead);
     }
 }

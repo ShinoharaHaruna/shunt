@@ -13,6 +13,7 @@
 //! `<name>.log`, plus a stable private `.<name>.lock`. Liveness is pidfile + `/proc` — same discipline as
 //! the client daemon.
 
+use crate::proto::proc::{self, ProcProbe};
 use crate::server::registry::{self, ClientEntry};
 use crate::server::transport::{ssh_conn_args, Transport};
 use anyhow::{Context, Result};
@@ -129,19 +130,17 @@ fn client_target(client: &ClientEntry) -> Option<String> {
     }
 }
 
-/// NUL-separated `/proc/<pid>/cmdline` → our tunnel when argv[0]'s
-/// basename is `ssh` AND the recorded needles are present: `-R`
-/// followed by the recorded port (when a port file exists) and the
-/// `user@host` target (when the caller knows the client row). A bare
-/// `ssh -R` match accepted ANY reverse forward — a stranger's tunnel
-/// recycling our recorded pid would then pass liveness and `down`
-/// would TERM it. Whole-element matching, same discipline as the
-/// daemon's `is_daemon_cmdline` (design.md §3.4).
-fn is_tunnel_cmdline(cmdline: &[u8], port: Option<u16>, target: Option<&str>) -> bool {
-    let argv: Vec<&[u8]> = cmdline.split(|&b| b == 0).filter(|a| !a.is_empty()).collect();
+/// The tunnel needle for `proto::proc::probe`: split argv → our
+/// tunnel when argv[0]'s basename is `ssh` AND the recorded needles
+/// are present: `-R` followed by the recorded port (when a port file
+/// exists) and the `user@host` target (when the caller knows the
+/// client row). A bare `ssh -R` match accepted ANY reverse forward —
+/// a stranger's tunnel recycling our recorded pid would then pass
+/// liveness and `down` would TERM it. Whole-element matching, same
+/// discipline as the daemon's `is_daemon_cmdline` (design.md §3.4).
+fn is_tunnel_cmdline(argv: &[&[u8]], port: Option<u16>, target: Option<&str>) -> bool {
     let Some(argv0) = argv.first() else { return false };
-    let base = argv0.rsplit(|&b| b == b'/').next().unwrap_or(argv0);
-    if base != b"ssh" {
+    if proc::argv0_base(argv0) != b"ssh" {
         return false;
     }
     let r_ok = match port {
@@ -164,8 +163,10 @@ fn is_tunnel_cmdline(cmdline: &[u8], port: Option<u16>, target: Option<&str>) ->
 fn pid_alive(pid: u32, port: Option<u16>, target: Option<&str>) -> bool {
     // Cmdline identity, not bare /proc existence: a recycled pid must
     // not pass for a live tunnel (status lies, `up` early-bails, and
-    // `down` would signal a foreign process).
-    std::fs::read(format!("/proc/{pid}/cmdline")).ok().is_some_and(|c| is_tunnel_cmdline(&c, port, target))
+    // `down` would signal a foreign process). Tunnel polarity maps
+    // `Unknown` to dead — opposite of the daemon's fail-safe: a tunnel
+    // that cannot be verified is restarted/healed, never trusted.
+    matches!(proc::probe(pid, proc::read_cmdline, |argv| is_tunnel_cmdline(argv, port, target)), ProcProbe::Live)
 }
 
 /// A tunnel was set up for `name` at some point: a pid or port
@@ -741,8 +742,10 @@ mod tests {
     /// by `tunnel down`.
     #[test]
     fn cmdline_needs_port_and_target_needles() {
-        // Build /proc-style NUL-separated cmdlines without escape soup.
-        let cl = |args: &[&str]| args.join("\0").into_bytes();
+        // Split argv elements as `proto::proc::split_argv` serves them.
+        fn cl<'a>(args: &[&'a str]) -> Vec<&'a [u8]> {
+            args.iter().map(|a| a.as_bytes()).collect()
+        }
         let ours = cl(&["ssh", "-i", "key", "-N", "-R", "1080", "user@host"]);
         assert!(is_tunnel_cmdline(&ours, Some(1080), Some("user@host")));
         // Foreign -R on another port: rejected once the port is known.
