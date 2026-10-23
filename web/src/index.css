@@ -1,0 +1,413 @@
+@import 'tailwindcss';
+
+/* Semantic tokens → tailwind utilities. `inline` keeps the utility
+   emitting var(--x) so [data-theme] swaps resolve at runtime. */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-card-a: var(--card-a);
+  --color-card-b: var(--card-b);
+  --color-edge: var(--edge);
+  --color-edge-soft: var(--edge-soft);
+  --color-hover: var(--hover);
+  --color-hover-2: var(--hover-2);
+  --color-track: var(--track);
+  --color-ink-1: var(--ink-1);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-ink-4: var(--ink-4);
+  --color-signal: var(--signal);
+  --color-signal-fg: var(--signal-fg);
+  --color-signal-bg: var(--signal-bg);
+  --color-signal-bd: var(--signal-bd);
+  --color-c-em: var(--c-emerald);
+  --color-c-amb: var(--c-amber);
+  --color-c-rse: var(--c-rose);
+  --color-c-zn: var(--c-zinc);
+}
+
+/* ---- dark (default) ---- */
+:root,
+:root[data-theme='dark'],
+:root[data-theme='system'] {
+  color-scheme: dark;
+  --canvas: #08080a;
+  --card-a: rgb(255 255 255 / 0.045);
+  --card-b: rgb(255 255 255 / 0.02);
+  --card-shadow: inset 0 1px 0 0 rgb(255 255 255 / 0.03);
+  --edge: rgb(255 255 255 / 0.07);
+  --edge-soft: rgb(255 255 255 / 0.05);
+  --edge-hover: rgb(255 255 255 / 0.13);
+  --hover: rgb(255 255 255 / 0.03);
+  --hover-2: rgb(255 255 255 / 0.055);
+  --track: rgb(255 255 255 / 0.07);
+  --ink-1: #fafafa;
+  --ink-2: #d4d4d8;
+  --ink-3: #a1a1aa;
+  --ink-4: #6d6d76;
+  --signal: #30d158;
+  --signal-fg: #30d158;
+  --signal-bg: rgb(48 209 88 / 0.1);
+  --signal-bd: rgb(48 209 88 / 0.25);
+  --c-emerald: #34d399;
+  --c-amber: #fbbf24;
+  --c-rose: #fb7185;
+  --c-zinc: #71717a;
+  --glow: rgb(48 209 88 / 0.055);
+  --pulse: rgb(48 209 88 / 0.45);
+  --select: rgb(48 209 88 / 0.24);
+  --hairline: 255 255 255;
+  --author: hsl(0 55% 62%);
+  --author-sat: 55%;
+  --author-lig: 62%;
+  --header-bg: rgb(8 8 10 / 0.8);
+  --mask-fade: black;
+  --seg-active: rgb(255 255 255 / 0.1);
+}
+
+/* ---- light ---- */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --canvas: #f5f5f7;
+  --card-a: #ffffff;
+  --card-b: #ffffff;
+  --card-shadow: 0 1px 2px rgb(0 0 0 / 0.04), inset 0 1px 0 0 rgb(255 255 255 / 0.6);
+  --edge: rgb(0 0 0 / 0.08);
+  --edge-soft: rgb(0 0 0 / 0.05);
+  --edge-hover: rgb(0 0 0 / 0.14);
+  --hover: rgb(0 0 0 / 0.035);
+  --hover-2: rgb(0 0 0 / 0.06);
+  --track: rgb(0 0 0 / 0.08);
+  --ink-1: #1d1d1f;
+  --ink-2: #3a3a3c;
+  --ink-3: #6e6e73;
+  --ink-4: #aeaeb2;
+  --signal: #28a745;
+  --signal-fg: #1c7f38;
+  --signal-bg: rgb(40 167 69 / 0.1);
+  --signal-bd: rgb(40 167 69 / 0.25);
+  --c-emerald: #059669;
+  --c-amber: #d97706;
+  --c-rose: #e11d48;
+  --c-zinc: #9ca3af;
+  --glow: rgb(40 167 69 / 0.05);
+  --pulse: rgb(40 167 69 / 0.4);
+  --select: rgb(40 167 69 / 0.2);
+  --hairline: 0 0 0;
+  --author-sat: 45%;
+  --author-lig: 40%;
+  --header-bg: rgb(245 245 247 / 0.8);
+  --seg-active: #ffffff;
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme='system'] {
+    color-scheme: light;
+    --canvas: #f5f5f7;
+    --card-a: #ffffff;
+    --card-b: #ffffff;
+    --card-shadow: 0 1px 2px rgb(0 0 0 / 0.04), inset 0 1px 0 0 rgb(255 255 255 / 0.6);
+    --edge: rgb(0 0 0 / 0.08);
+    --edge-soft: rgb(0 0 0 / 0.05);
+    --edge-hover: rgb(0 0 0 / 0.14);
+    --hover: rgb(0 0 0 / 0.035);
+    --hover-2: rgb(0 0 0 / 0.06);
+    --track: rgb(0 0 0 / 0.08);
+    --ink-1: #1d1d1f;
+    --ink-2: #3a3a3c;
+    --ink-3: #6e6e73;
+    --ink-4: #aeaeb2;
+    --signal: #28a745;
+    --signal-fg: #1c7f38;
+    --signal-bg: rgb(40 167 69 / 0.1);
+    --signal-bd: rgb(40 167 69 / 0.25);
+    --c-emerald: #059669;
+    --c-amber: #d97706;
+    --c-rose: #e11d48;
+    --c-zinc: #9ca3af;
+    --glow: rgb(40 167 69 / 0.05);
+    --pulse: rgb(40 167 69 / 0.4);
+    --select: rgb(40 167 69 / 0.2);
+    --hairline: 0 0 0;
+    --author-sat: 45%;
+    --author-lig: 40%;
+    --header-bg: rgb(245 245 247 / 0.8);
+    --seg-active: #ffffff;
+  }
+}
+
+html,
+body {
+  background-color: var(--canvas);
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'cv11', 'ss01';
+  color: var(--ink-2);
+  transition: background-color 0.25s ease;
+}
+
+::selection {
+  background: var(--select);
+}
+
+.font-num {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.num-display {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-weight: 200;
+  letter-spacing: -0.04em;
+}
+
+.eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* card surface — gradient + inner hairline in dark, flat white +
+   soft shadow in light; both through the same vars */
+.card {
+  border-radius: 1rem;
+  border: 1px solid var(--edge);
+  background: linear-gradient(to bottom, var(--card-a), var(--card-b));
+  box-shadow: var(--card-shadow);
+  padding: 1.25rem;
+  transition:
+    border-color 0.3s,
+    transform 0.3s,
+    background-color 0.25s ease;
+}
+.card.interactive:hover {
+  border-color: var(--edge-hover);
+  transform: translateY(-1px);
+}
+
+/* pills — tone palettes tuned per theme below */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-radius: 9999px;
+  border: 1px solid;
+  padding: 0.125rem 0.5rem;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1rem;
+  transition:
+    color 0.2s,
+    background-color 0.2s,
+    border-color 0.2s;
+}
+.pill-emerald {
+  background: rgb(52 211 153 / 0.1);
+  color: #6ee7b7;
+  border-color: rgb(52 211 153 / 0.2);
+}
+.pill-amber {
+  background: rgb(251 191 36 / 0.1);
+  color: #fcd34d;
+  border-color: rgb(251 191 36 / 0.2);
+}
+.pill-rose {
+  background: rgb(251 113 133 / 0.1);
+  color: #fda4af;
+  border-color: rgb(251 113 133 / 0.2);
+}
+.pill-zinc {
+  background: var(--hover-2);
+  color: var(--ink-3);
+  border-color: var(--edge);
+}
+.pill-signal {
+  background: var(--signal-bg);
+  color: var(--signal-fg);
+  border-color: var(--signal-bd);
+}
+[data-theme='light'] .pill-emerald {
+  background: rgb(5 150 105 / 0.1);
+  color: #047857;
+  border-color: rgb(5 150 105 / 0.22);
+}
+[data-theme='light'] .pill-amber {
+  background: rgb(217 119 6 / 0.1);
+  color: #b45309;
+  border-color: rgb(217 119 6 / 0.25);
+}
+[data-theme='light'] .pill-rose {
+  background: rgb(225 29 72 / 0.08);
+  color: #be123c;
+  border-color: rgb(225 29 72 / 0.22);
+}
+@media (prefers-color-scheme: light) {
+  [data-theme='system'] .pill-emerald {
+    background: rgb(5 150 105 / 0.1);
+    color: #047857;
+    border-color: rgb(5 150 105 / 0.22);
+  }
+  [data-theme='system'] .pill-amber {
+    background: rgb(217 119 6 / 0.1);
+    color: #b45309;
+    border-color: rgb(217 119 6 / 0.25);
+  }
+  [data-theme='system'] .pill-rose {
+    background: rgb(225 29 72 / 0.08);
+    color: #be123c;
+    border-color: rgb(225 29 72 / 0.22);
+  }
+}
+
+/* room author identity hue — sat/lig tuned per theme */
+.author {
+  color: var(--author);
+  color: hsl(var(--author-h, 0) var(--author-sat) var(--author-lig));
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.rise {
+  animation: rise 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* route change — gentler than .rise, keyed by page so every nav
+   re-enters without re-animating within-page state */
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.page-in {
+  animation: page-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* the heartbeat: a hairline that sweeps once per snapshot tick —
+   liveness as brand, not furniture */
+@keyframes heartbeat {
+  0% {
+    transform: scaleX(0);
+    opacity: 0.9;
+  }
+  40% {
+    transform: scaleX(1);
+    opacity: 0.45;
+  }
+  100% {
+    transform: scaleX(1);
+    opacity: 0;
+  }
+}
+.heartbeat {
+  height: 1px;
+  transform-origin: left;
+  background: linear-gradient(to right, var(--signal), transparent 85%);
+  animation: heartbeat 1.8s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* nav badge value-change pop */
+@keyframes badge-pop {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.28);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+.badge-pop {
+  animation: badge-pop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 var(--pulse);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+.pulse {
+  animation: pulse-ring 2.4s ease-out infinite;
+}
+
+details > .detail-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+details[open] > .detail-body {
+  grid-template-rows: 1fr;
+}
+.detail-body > div {
+  overflow: hidden;
+}
+details > summary {
+  list-style: none;
+}
+details > summary::-webkit-details-marker {
+  display: none;
+}
+details > summary .caret {
+  display: inline-block;
+  transition: transform 0.25s ease;
+}
+details[open] > summary .caret {
+  transform: rotate(90deg);
+}
+
+.hairline-x {
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    rgb(var(--hairline) / 0.1) 18%,
+    rgb(var(--hairline) / 0.1) 82%,
+    transparent
+  );
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgb(var(--hairline) / 0.14);
+  border-radius: 3px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--hairline) / 0.22);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+  border-radius: 4px;
+}

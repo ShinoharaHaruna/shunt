@@ -10,7 +10,8 @@
   "excludes": [
     "target/",
     "reference/",
-    "node_modules/",
+    "**/node_modules/",
+    "web/", // prettier owns the whole frontend tree (ts/tsx/css/html/json)
     ".pi/",
     "**/Cargo.lock"
   ],

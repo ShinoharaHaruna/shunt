@@ -16,7 +16,7 @@ mod tests;
 
 pub use misc::{CompletionsArgs, FeedbackAction, FeedbackArgs, ProbeArgs, UpgradeArgs, VersionArgs};
 pub use room::{RoomAction, RoomCmd};
-pub use server::{ClientAction, ClientCmd, DispatchArgs, ProjectAction, ProjectCmd, QueueAction, QueueCmd, SpoolAction, SpoolCmd, TaskAction, TaskCmd, TunnelAction, TunnelArgs};
+pub use server::{ClientAction, ClientCmd, DispatchArgs, ProjectAction, ProjectCmd, QueueAction, QueueCmd, ServeAction, ServeArgs, SpoolAction, SpoolCmd, TaskAction, TaskCmd, TunnelAction, TunnelArgs};
 pub use tasks::{EnqueueArgs, LogsArgs, NewArgs, PatternArgs, PrioArgs, RootArgs, ShutdownAction, ShutdownArgs, StatusArgs, SubmitArgs, WorkerAction, WorkersArgs};
 
 #[derive(Parser)]
@@ -64,6 +64,10 @@ pub enum Command {
     Queue(QueueCmd),
     /// Run the spool dispatcher loop (server)
     Dispatch(DispatchArgs),
+    /// Serve the read-only ops dashboard: embedded web UI plus
+    /// websocket snapshots of clients, spool, tasks, and rooms
+    /// (design.md §18)
+    Serve(ServeArgs),
     /// Box-side SOCKS5 tunnel over ssh -R (server)
     #[command(arg_required_else_help = true)]
     Tunnel(TunnelArgs),

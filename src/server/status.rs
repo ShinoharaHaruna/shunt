@@ -180,25 +180,22 @@ pub fn run_client(name: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Aggregate every registered client plus the built-in `localhost`.
-/// Transport resolves per client (ssh / loopback). `--json` emits one
-/// object; otherwise a table — the server status a human asked for.
-/// `as_label` is the §17.5 identity for the `rooms` block: unread
-/// counts are computed for it (default `admin`); reporting only —
-/// status never marks a reader position (polling is awareness).
-///
-/// Probes run in parallel (std::thread, one per client): a dead box
-/// costs its own ssh timeout, not a serial slot ahead of every live
-/// client behind it. Output order stays the registry's sorted order
-/// regardless of join timing.
-pub fn run_all(json: bool, as_label: Option<&str>) -> Result<()> {
-    // Resolve once up front: a malformed --as is an error worth
-    // surfacing before any probing, not a silently-empty rooms block.
-    let room_label = crate::server::room::resolve_label(as_label)?;
+/// One probed client for the aggregate paths (`status --all`,
+/// `serve` snapshots): the registry name, the row load result, and
+/// the wire query outcome. A failed row load degrades to an
+/// error-carrying status, never an abort of the whole sweep.
+pub struct ProbedClient {
+    pub name: String,
+    pub row: Result<ClientEntry>,
+    pub status: ClientStatus,
+}
+
+/// Probe every registered client in parallel (std::thread, one per
+/// client): a dead box costs its own ssh timeout, not a serial slot
+/// ahead of every live client behind it. Order stays the registry's
+/// sorted order regardless of join timing.
+pub fn probe_all() -> Result<Vec<ProbedClient>> {
     let names = registry::list_clients()?;
-    // list_clients keeps rows it cannot parse; a failed load must
-    // not kill the whole aggregate — it degrades to an error row,
-    // same discipline as an unreachable box.
     let clients: Vec<Result<ClientEntry>> = names.iter().map(|n| registry::load_client(n)).collect();
     // Scoped threads borrow `clients`; each builds its own transport
     // (`Box<dyn Transport>` is not Sync, and transports are cheap).
@@ -225,18 +222,34 @@ pub fn run_all(json: bool, as_label: Option<&str>) -> Result<()> {
             })
             .collect()
     });
+    Ok(names.into_iter().zip(clients).zip(statuses).map(|((name, row), status)| ProbedClient { name, row, status }).collect())
+}
+
+/// Aggregate every registered client plus the built-in `localhost`.
+/// Transport resolves per client (ssh / loopback). `--json` emits one
+/// object; otherwise a table — the server status a human asked for.
+/// `as_label` is the §17.5 identity for the `rooms` block: unread
+/// counts are computed for it (default `admin`); reporting only —
+/// status never marks a reader position (polling is awareness).
+pub fn run_all(json: bool, as_label: Option<&str>) -> Result<()> {
+    // Resolve once up front: a malformed --as is an error worth
+    // surfacing before any probing, not a silently-empty rooms block.
+    let room_label = crate::server::room::resolve_label(as_label)?;
+    let probed = probe_all()?;
     let mut out = serde_json::Map::new();
     let mut rows: Vec<Vec<String>> = Vec::new();
-    for ((name, client), st) in names.iter().zip(&clients).zip(&statuses) {
+    for p in &probed {
+        let (name, st) = (&p.name, &p.status);
         if !json {
             compat_footnotes(name, st);
-            match client {
+            match &p.row {
                 Ok(client) => rows.extend(rows_for(client, st)),
                 Err(_) => rows.push(vec![name.clone(), "?".into(), "-".into(), "-".into(), "-".into(), "-".into(), st.error.as_deref().unwrap_or("unloadable row").lines().next().unwrap_or("unloadable row").chars().take(60).collect()]),
             }
         }
         out.insert(name.clone(), serde_json::to_value(st)?);
     }
+    let names: Vec<String> = probed.iter().map(|p| p.name.clone()).collect();
     // spool::list() quarantines corrupt entries (`*.bad`, §4.4)
     // even on this read path — accepted: fault isolation wins over
     // read purity, and a status run should surface the same clean

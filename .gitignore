@@ -1,3 +1,5 @@
 /target/
 reference/
 .pi/
+web/node_modules/
+web/dist/

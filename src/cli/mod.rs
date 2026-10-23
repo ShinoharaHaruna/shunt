@@ -133,6 +133,14 @@ pub fn run(cli: Cli) -> Result<()> {
             agent_dlog(&a, None)
         }
         Command::Dispatch(a) => crate::server::dispatch::run(a.once),
+        Command::Serve(a) => match a.action {
+            // Bare `shunt serve` teaches the subcommands — same
+            // lost-user affordance as `dlog`/`init`.
+            None => print_subhelp("serve"),
+            Some(ServeAction::Run(f)) => crate::server::web::run(f.into_opts()),
+            Some(ServeAction::Up(f)) => crate::server::web::up(&f.into_opts()),
+            Some(ServeAction::Down) => crate::server::web::down(),
+        },
         Command::Room(c) => cmd_room(&c),
         Command::Tunnel(a) => {
             use crate::server::tunnel;

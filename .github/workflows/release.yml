@@ -88,6 +88,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
 
+      # `serve` embeds web/dist at compile time (design.md §18) —
+      # build.rs ships a placeholder when dist is absent, so this
+      # step is what decides whether released binaries carry the UI.
+      - name: Set up pnpm and Node
+        uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Build dashboard frontend
+        run: |
+          pnpm -C web install --frozen-lockfile
+          pnpm -C web build
+
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 

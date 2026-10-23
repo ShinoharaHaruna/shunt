@@ -12,3 +12,4 @@ pub mod status;
 pub mod tasks;
 pub mod transport;
 pub mod tunnel;
+pub mod web;
