@@ -149,6 +149,23 @@ fn non_member_say_is_flagged() {
     std::fs::remove_dir_all(&home).ok();
 }
 
+/// A `read` by a label off the roster still returns the stream and
+/// advances the cursor — open trust — but names the roster on
+/// stderr, the same warning style as `say`/`decide` (§17.2/§17.3).
+#[test]
+fn non_member_read_warns_but_returns() {
+    let home = tmpdir("read-nonmember");
+    ok(&home, &["room", "create", "r", "--members", "p1"]);
+    ok(&home, &["room", "say", "r", "--body", "secret-results", "--as", "p1"]);
+    let o = run(&home, &["room", "read", "r", "--as", "intruder"], &[]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let e = String::from_utf8_lossy(&o.stderr);
+    assert!(e.contains("not a member") && e.contains("roster: p1"), "{e}");
+    assert!(String::from_utf8_lossy(&o.stdout).contains("secret-results"));
+    assert_eq!(last_read(&home, "r", "intruder"), 1, "a warned read still marks");
+    std::fs::remove_dir_all(&home).ok();
+}
+
 /// `decide` overwrites meta.decision (latest wins) and marks the
 /// caller's cursor (§17.2/§17.5).
 #[test]

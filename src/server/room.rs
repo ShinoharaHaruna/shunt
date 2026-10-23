@@ -459,10 +459,18 @@ fn load_msgs(dir: &Path) -> Vec<(u32, Msg)> {
 }
 
 /// `room read` (§17.2/§17.5): returns messages past the caller's
-/// mark (or the full live stream when `all`). Only successfully loaded,
-/// returned messages advance the cursor; concurrent arrivals stay unread.
+/// mark (or the full live stream when `all`). A label off the
+/// roster still gets the stream — open trust — but the roster is
+/// named on stderr, the same warning `say`/`decide` give, so a
+/// wrong-room or mis-cased label is loud instead of silently
+/// reading a foreign channel. Only successfully loaded, returned
+/// messages advance the cursor; concurrent arrivals stay unread.
 pub fn read(room: &str, label: &str, all: bool) -> Result<Vec<(u32, Msg)>> {
-    let (_, dir) = resolve(room)?;
+    let (name, dir) = resolve(room)?;
+    let meta = load_meta(&dir)?;
+    if !meta.members.iter().any(|m| m == label) {
+        eprintln!("warning: '{label}' is not a member of room '{name}' (roster: {}) — returning the stream anyway", meta.members.join(", "));
+    }
     let msgs = load_msgs(&dir);
     let mark0 = last_read(&dir, label);
     let returned: Vec<_> = if all { msgs } else { msgs.into_iter().filter(|(n, _)| *n > mark0).collect() };

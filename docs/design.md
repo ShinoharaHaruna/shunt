@@ -672,7 +672,7 @@ shunt room members <room>                 # roster
 shunt room rm <room>
 ```
 
-All server-local — no `-c` forwarding exists because there is nothing to forward to. Body source precedence `--body` > `--body-file` > `-` (stdin), the §14.1 rule. `<room>` resolves by exact name or unique prefix. `read` without `--all` prints only messages past the reader's mark (§17.5); `say`, `read`, and `decide` all mark. `decide` writes `meta.decision = {ts, author, note}` — latest wins, replacing the topic-close mechanism: what coordination needs is "the current agreement", not a closed thread; the stream retains how it was reached.
+All server-local — no `-c` forwarding exists because there is nothing to forward to. Body source precedence `--body` > `--body-file` > `-` (stdin), the §14.1 rule. `<room>` resolves by exact name or unique prefix. `read` without `--all` prints only messages past the reader's mark (§17.5); `say`, `read`, and `decide` all mark. A `read` by a label off the roster still returns the stream and marks — the same open trust as `say`/`decide` — but stderr names the roster, so a wrong-room or mis-cased label is loud instead of silently reading a foreign channel (§17.3). `decide` writes `meta.decision = {ts, author, note}` — latest wins, replacing the topic-close mechanism: what coordination needs is "the current agreement", not a closed thread; the stream retains how it was reached.
 
 ### 17.3 Identity: one `--as` label for author and reader
 
