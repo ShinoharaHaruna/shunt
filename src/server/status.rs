@@ -17,6 +17,11 @@ pub struct QueueStatus {
     pub report: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// §15 binary/libc verdict — `warn:`/`error:` prefixed detail,
+    /// present only when not ok (a binary that answered can only be
+    /// ok or warn; error is reserved for impossible reported state).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compat: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -101,11 +106,14 @@ pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
                     // `raw`, not a re-serialized report: remote
                     // fields this build doesn't model pass through
                     // to `status -c` verbatim.
-                    remote::StatusAnswer::Report { raw, .. } => QueueStatus { qroot: queue.client.qroot, reachable: true, report: Some(raw), error: None },
+                    remote::StatusAnswer::Report { raw, report } => {
+                        let compat = compat_of(&report, client);
+                        QueueStatus { qroot: queue.client.qroot, reachable: true, report: Some(raw), error: None, compat }
+                    }
                     // Drift means the box DID answer — reachable
                     // stays true; only the payload was bad.
-                    remote::StatusAnswer::Drift(e) => QueueStatus { qroot: queue.client.qroot, reachable: true, report: None, error: Some(format!("bad status JSON: {e:#}")) },
-                    remote::StatusAnswer::Transport(e) | remote::StatusAnswer::ConnDown(e) => QueueStatus { qroot: queue.client.qroot, reachable: false, report: None, error: Some(format!("{e:#}")) },
+                    remote::StatusAnswer::Drift(e) => QueueStatus { qroot: queue.client.qroot, reachable: true, report: None, error: Some(format!("bad status JSON: {e:#}")), compat: None },
+                    remote::StatusAnswer::Transport(e) | remote::StatusAnswer::ConnDown(e) => QueueStatus { qroot: queue.client.qroot, reachable: false, report: None, error: Some(format!("{e:#}")), compat: None },
                 };
                 if let Some(error) = &status.error {
                     errors.push(format!("{}: {error}", queue.name));
@@ -119,11 +127,39 @@ pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
     ClientStatus { reachable: queues.values().any(|q| q.reachable), queues, report, error: (!errors.is_empty()).then(|| errors.join("; ")), billing: client.billing.clone(), expire, expires_in_s, connect_failures, endpoint_rotates, facts: (!client.facts.is_empty()).then(|| client.facts.clone()) }
 }
 
+/// §15 three-state verdict for a binary that answered: the wire
+/// `needs_glibc` self-report vs the registry `libc` fact. Running
+/// ⟹ weak-miss ⟹ warn — a hard miss could never have reported.
+/// Ok yields None: silence is the ok state.
+fn compat_of(report: &crate::proto::wire::StatusReport, client: &ClientEntry) -> Option<String> {
+    use crate::proto::libc;
+    use crate::server::client_ops::compat::{reported_verdict, Compat};
+    let needs = report.needs_glibc.as_deref().and_then(libc::parse_ver);
+    let remote = client.facts.get("libc").and_then(|v| v.as_str()).and_then(libc::parse_libc);
+    match reported_verdict(needs, remote.as_ref()) {
+        Compat::Ok => None,
+        Compat::Warn(w) => Some(format!("warn: {w}")),
+        Compat::Error(e) => Some(format!("error: {e}")),
+    }
+}
+
+/// The compat footnotes for a queried client: one remediation line
+/// per queue not in the ok state. `upgrade -c` always ships musl —
+/// the ok tier — and relinks even at equal version (§16).
+fn compat_footnotes(name: &str, status: &ClientStatus) {
+    for (q, s) in &status.queues {
+        if let Some(c) = &s.compat {
+            eprintln!("note: {name}/{q}: {c} — fix: `shunt upgrade -c {name} --queue {q}`");
+        }
+    }
+}
+
 /// Preserve the single-queue wire surface, but never hide sibling queues
 /// behind a configured execution default when an instance status is requested.
 pub fn run_client(name: &str, json: bool) -> Result<()> {
     let (client, transport) = client_transport(name)?;
     let status = query(transport.as_ref(), &client);
+    compat_footnotes(name, &status);
     if status.queues.len() == 1 {
         let queue = status.queues.values().next().unwrap();
         if let Some(report) = &queue.report {
@@ -191,14 +227,15 @@ pub fn run_all(json: bool, as_label: Option<&str>) -> Result<()> {
     });
     let mut out = serde_json::Map::new();
     let mut rows: Vec<Vec<String>> = Vec::new();
-    for ((name, client), st) in names.iter().zip(&clients).zip(statuses) {
+    for ((name, client), st) in names.iter().zip(&clients).zip(&statuses) {
         if !json {
+            compat_footnotes(name, st);
             match client {
-                Ok(client) => rows.extend(rows_for(client, &st)),
+                Ok(client) => rows.extend(rows_for(client, st)),
                 Err(_) => rows.push(vec![name.clone(), "?".into(), "-".into(), "-".into(), "-".into(), "-".into(), st.error.as_deref().unwrap_or("unloadable row").lines().next().unwrap_or("unloadable row").chars().take(60).collect()]),
             }
         }
-        out.insert(name.clone(), serde_json::to_value(&st)?);
+        out.insert(name.clone(), serde_json::to_value(st)?);
     }
     // spool::list() quarantines corrupt entries (`*.bad`, §4.4)
     // even on this read path — accepted: fault isolation wins over
@@ -319,6 +356,11 @@ fn row_for(client: &ClientEntry, st: &ClientStatus, queue: Option<&QueueStatus>)
             let mut note = client.billing.as_ref().map(|b| format!("{:.2} {}/h", b.hourly, b.currency)).unwrap_or_default();
             if let Some(f) = st.connect_failures {
                 note = format!("{note} conn_fail={f}").trim().into();
+            }
+            if let Some(c) = queue.and_then(|q| q.compat.as_deref()) {
+                // The detail prints in the footnote; the cell carries
+                // the state tag only.
+                note = format!("{note} bin:{}", c.split(':').next().unwrap_or(c)).trim().into();
             }
             vec![client.name.clone(), transport, daemon, pending, running, expire, note]
         }

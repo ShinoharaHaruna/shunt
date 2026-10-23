@@ -210,8 +210,9 @@ pub enum ClientAction {
     /// Re-collect machine facts over SSH and merge into the row
     Probe { name: String },
     /// Probe raw SSH, scp the binary, remote init + start. Binary
-    /// source: --bin-path > row bin_path > current_exe; a glibc/musl
-    /// mismatch is checked before the copy (design.md §15).
+    /// source: --bin-path > row bin_path > current_exe; the staged
+    /// candidate is smoke-classified ok/warn/error before install
+    /// (design.md §15).
     Bootstrap {
         name: String,
         /// Ship this local binary instead of the running one

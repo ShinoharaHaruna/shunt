@@ -1,14 +1,16 @@
 //! `client bootstrap` (design.md §7): key + binary ship + remote
 //! init/start + facts merge. Doubles as the binary upgrade path.
 
+use super::compat::Compat;
 use super::env::push_resolved_env;
 use super::keys::{deploy_key, ensure_key};
 use super::probe::probe_facts;
 use super::{compat, release};
 use crate::server::registry::{self, ClientEntry, ResolvedQueue};
+use crate::server::remote;
 use crate::server::transport::{shell_quote, shunt_bin, Transport};
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The musl build recipe named in every incompatibility error.
 const MUSL_RECIPE: &str = "rustup target add x86_64-unknown-linux-musl && cargo build --release --target x86_64-unknown-linux-musl";
@@ -92,8 +94,11 @@ fn bootstrap_resolved(t: &dyn Transport, queue: &ResolvedQueue, bin_path: Option
     let bindir = bin.rsplit_once('/').map(|(d, _)| d).unwrap_or("").to_string();
     t.exec(entry, &["mkdir".into(), "-p".into(), bindir.clone()], None).context("mkdir remote bin dir")?;
 
-    // §15: pick the binary, verify the box's loader can serve it,
-    // rescue via the matching musl release when it can't.
+    // §15: pick the binary, then let the box say what it does —
+    // stage → `<staged> --version 2>&1` → three-state classify →
+    // install by the ladder ok > warn > refuse. Observed behavior
+    // covers every failure class (version refs, arch, interpreter),
+    // not just the glibc mismatch it was built for.
     let explicit = bin_path.map(PathBuf::from).or_else(|| entry.bin_path.as_deref().map(PathBuf::from));
     let local = match &explicit {
         Some(p) => {
@@ -102,21 +107,106 @@ fn bootstrap_resolved(t: &dyn Transport, queue: &ResolvedQueue, bin_path: Option
         }
         None => std::env::current_exe().context("current_exe")?,
     };
+    // Diagnostics only: the byte-scan names the glibc need in
+    // reports and gates the musl rescue (a static binary has no
+    // release to swap for). It never decides.
     let needs = compat::required_glibc(&local)?;
+
+    // Pre-install liveness: bootstrap is the manual redeploy path —
+    // a live daemon must hand off to the new image (§3.5a restart),
+    // not be left running the stale one after a silent `start` no-op.
+    let was_live = matches!(remote::remote_status(t, queue), remote::StatusAnswer::Report { report, .. } if report.daemon.alive);
+
+    let staged = format!("{bin}.new");
+    // Stage one candidate and smoke it. The staged path — never the
+    // install path — is what runs, so a bad binary cannot land.
+    let try_binary = |path: &Path| -> Result<Compat> {
+        t.copy_to(entry, path, &staged).context("copy shunt binary")?;
+        t.exec(entry, &["chmod".into(), "+x".into(), staged.clone()], None)?;
+        Ok(match t.exec(entry, &["sh".into(), "-c".into(), format!("{} --version 2>&1", shell_quote(&staged))], None) {
+            Ok(out) => compat::classify_smoke(&out),
+            Err(e) => Compat::Error(format!("{e:#}")),
+        })
+    };
+    let drop_staged = || {
+        let _ = t.exec(entry, &["rm".into(), "-f".into(), staged.clone()], None);
+    };
+    // "needs GLIBC 2.39; box has glibc 2.35" — context for reports.
+    let diag = |t: &dyn Transport| -> String {
+        let mut d = needs.map(|(a, b)| format!("needs GLIBC {a}.{b}")).unwrap_or_else(|| "libc-independent".into());
+        if let Some(l) = compat::remote_libc(t, entry) {
+            d.push_str(&format!("; box has {l}"));
+        }
+        d
+    };
+
     let mut ship = local.clone();
     let mut _rescue = None; // keeps the downloaded TempBin alive until copy_to ran
-    if needs.is_some() {
-        if let compat::Verdict::Incompatible(why) = compat::check(needs, compat::remote_libc(t, entry).as_ref()) {
-            if explicit.is_some() {
-                anyhow::bail!("{why} — {} cannot run on {name}; ship a libc-independent build: {MUSL_RECIPE}", local.display());
-            }
-            match release::rescue_musl(&local) {
-                Ok(tb) => {
-                    eprintln!("note: {why} — shipping the matching musl release build");
-                    ship = tb.path().to_path_buf();
-                    _rescue = Some(tb);
+    match try_binary(&local)? {
+        Compat::Ok => {}
+        Compat::Warn(w) => {
+            // Prefer ok: on the auto source a matching musl release
+            // upgrades warn → ok. Rescue is pointless for a static
+            // binary (needs == None) and never substitutes an
+            // operator-chosen explicit path.
+            let rescued = if explicit.is_none() && needs.is_some() {
+                match release::rescue_musl(&local) {
+                    Ok(tb) => match try_binary(tb.path())? {
+                        Compat::Ok => {
+                            eprintln!("note: {}: {w} — shipping the matching musl release build", diag(t));
+                            ship = tb.path().to_path_buf();
+                            _rescue = Some(tb);
+                            true
+                        }
+                        bad => {
+                            drop_staged();
+                            anyhow::bail!("{w} ({}); the musl release also fails on {name}: {bad:?}", diag(t))
+                        }
+                    },
+                    Err(_) => false, // no same-code release exists — the warn fallback below applies
                 }
-                Err(e2) => anyhow::bail!("{why}; release rescue failed ({e2:#}). Build one: {MUSL_RECIPE} → `client bootstrap {name} --bin-path target/x86_64-unknown-linux-musl/release/shunt`"),
+            } else {
+                false
+            };
+            if !rescued {
+                let who = if explicit.is_some() {
+                    "explicit --bin-path honored"
+                } else if needs.is_none() {
+                    "libc-independent binary — nothing to substitute"
+                } else {
+                    "no matching musl release — shipping anyway"
+                };
+                eprintln!("warning ({name}): {w} ({}); {who} — the noise recurs on every remote call and lands in daemon.log. Fix: {MUSL_RECIPE} → `client bootstrap {name} --bin-path <build>`, or `shunt upgrade -c {name}`", diag(t));
+            }
+        }
+        Compat::Error(e) => {
+            let d = diag(t);
+            if explicit.is_some() {
+                drop_staged();
+                anyhow::bail!("{} cannot run on {name}: {e} ({d}) — ship a libc-independent build: {MUSL_RECIPE} → `client bootstrap {name} --bin-path <build>`", local.display());
+            }
+            match needs.is_some().then(|| release::rescue_musl(&local)) {
+                Some(Ok(tb)) => match try_binary(tb.path())? {
+                    Compat::Ok => {
+                        eprintln!("note: binary cannot run on {name}: {e} ({d}) — shipping the matching musl release build");
+                        ship = tb.path().to_path_buf();
+                        _rescue = Some(tb);
+                    }
+                    bad => {
+                        drop_staged();
+                        anyhow::bail!("{e} ({d}); the musl release also fails on {name}: {bad:?}")
+                    }
+                },
+                Some(Err(e2)) => {
+                    drop_staged();
+                    anyhow::bail!("{e} ({d}); release rescue failed ({e2:#}). Build one: {MUSL_RECIPE} → `client bootstrap {name} --bin-path target/x86_64-unknown-linux-musl/release/shunt`")
+                }
+                // A libc-independent binary that cannot run points at
+                // arch/interp, not libc — rescue could only repeat it.
+                None => {
+                    drop_staged();
+                    anyhow::bail!("{e} — libc-independent binary fails on {name} (arch/interp mismatch?); cannot rescue with another static build")
+                }
             }
         }
     }
@@ -128,12 +218,9 @@ fn bootstrap_resolved(t: &dyn Transport, queue: &ResolvedQueue, bin_path: Option
     }
 
     // Stage-then-mv: scp truncates the destination in place, which
-    // fails ETXTBSY while the daemon runs the old binary. Bootstrap
-    // doubles as the binary upgrade path (init/start are idempotent),
-    // so it must be safe to re-run on a live box.
-    let staged = format!("{bin}.new");
-    t.copy_to(entry, &ship, &staged).context("copy shunt binary")?;
-    t.exec(entry, &["chmod".into(), "+x".into(), staged.clone()], None)?;
+    // fails ETXTBSY while the daemon runs the old binary. `staged`
+    // already holds the classified winner — `try_binary` always
+    // leaves its candidate there and failures bail before this.
     t.exec(entry, &["mv".into(), "-f".into(), staged, bin.clone()], None).context("install shunt binary")?;
 
     // Post-install smoke (§15): `exec` returns stdout only, so the
@@ -155,7 +242,19 @@ fn bootstrap_resolved(t: &dyn Transport, queue: &ResolvedQueue, bin_path: Option
     } else {
         crate::server::tunnel::sync_queue_env(t, &entry.name, &queue.name)?;
     }
-    t.exec(entry, &[bin.clone(), "start".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt start")?;
+    if was_live {
+        // Redeploy on a live box: SIGUSR2 re-execs the daemon onto
+        // the binary just installed — no drain, no task kill (§3.5a).
+        // Refusals (a pre-handoff image has no daemon.ver) surface
+        // named, never silently skipped.
+        match remote::wire_call(t, queue, &["restart", "--json"], None) {
+            remote::WireCall::Reply(_) => eprintln!("daemon handed off to the new binary (SIGUSR2)"),
+            remote::WireCall::RemoteErr(e) => eprintln!("warning: daemon not handed off: {e:#} — `shunt queue restart {} -c {name}`, or `queue stop`+`queue start`", queue.name),
+            remote::WireCall::ConnDown(e) => eprintln!("warning: daemon not handed off: {e:#} — retry `shunt queue restart {} -c {name}`", queue.name),
+        }
+    } else {
+        t.exec(entry, &[bin.clone(), "start".into(), "--root".into(), entry.qroot.clone(), "--json".into()], None).context("remote shunt start")?;
+    }
     eprintln!("bootstrapped {} queue {} ({})", entry.name, queue.name, bin);
     Ok(())
 }
@@ -237,14 +336,33 @@ mod tests {
         assert!(err.to_string().contains("qroot is empty"), "{err}");
     }
 
-    /// Canned answers per argv: `ldd --version` decides the compat
-    /// verdict; `cat .../.shunt-owner` reports the fixture claim;
-    /// copy_to is recorded so tests can assert nothing was shipped
-    /// on refusal.
+    /// What the staged `<bin>.new --version 2>&1` smoke answers —
+    /// the §15 classifier's only input.
+    enum Smoke {
+        /// Bare version line → Compat::Ok.
+        Clean,
+        /// Version line plus loader noise → Compat::Warn. Kept free
+        /// of any `GLIBC_x.y` literal: it would embed in this test
+        /// binary and poison required_glibc(current_exe) — observed
+        /// poisoning in the predecessor test.
+        Warn,
+        /// Exec fails → Compat::Error.
+        Fail,
+    }
+
+    /// Canned answers per argv: `.shunt-owner` reports the fixture
+    /// claim; `status` reports liveness for the handoff branch;
+    /// `shunt.new --version` is the staged smoke (`smoke` field);
+    /// any other `--version` is the post-install confirm or local
+    /// drift print. `copy_to` is recorded so tests can assert what
+    /// staged, and `calls` records argv so tests can check mv/rm.
     struct Stub {
         ldd: &'static str,
         /// Marker the .shunt-owner claim script answers.
         claim: &'static str,
+        smoke: Smoke,
+        /// daemon.alive for the pre-install liveness status.
+        live: bool,
         copied: Mutex<Vec<(PathBuf, String)>>,
         calls: Mutex<Vec<RecordedCall>>,
     }
@@ -261,18 +379,41 @@ mod tests {
             if j.contains(".shunt-owner") {
                 return Ok(format!("{}\n", self.claim));
             }
+            if j.contains("shunt.new") && j.contains("--version") {
+                return match self.smoke {
+                    Smoke::Clean => Ok("shunt 0.2.0 (deadbee 2026-01-01)\n".into()),
+                    Smoke::Warn => Ok("/q/bin/shunt.new: loader noise line\nshunt 0.2.0 (deadbee 2026-01-01)\n".into()),
+                    Smoke::Fail => anyhow::bail!("/q/bin/shunt.new: error while loading shared libraries"),
+                };
+            }
             if j.contains("--version") {
                 return Ok("shunt 0.2.0 (deadbee 2026-01-01)\n".into());
+            }
+            if j.contains("status") {
+                return Ok(format!(r#"{{"protocol":1,"daemon":{{"alive":{live}}},"workers":{{"value":1,"source":"default"}},"running":[],"pending":[],"done_recent":[],"failed_recent":[],"stop":false,"shutdown":{{"armed":false,"grace_s":0,"cmd":""}}}}"#, live = self.live));
+            }
+            if j.contains("restart") {
+                return Ok(r#"{"protocol":1,"ok":true}"#.into());
             }
             if j.contains("probe") {
                 return Ok(r#"{"protocol":1,"cores":4}"#.into());
             }
-            Ok(String::new()) // mkdir/chmod/mv/init/start
+            Ok(String::new()) // mkdir/chmod/mv/rm/init/start
         }
         fn copy_to(&self, _c: &ClientEntry, l: &std::path::Path, r: &str) -> anyhow::Result<()> {
             self.copied.lock().unwrap().push((l.to_path_buf(), r.to_string()));
             Ok(())
         }
+    }
+
+    fn stub(ldd: &'static str, claim: &'static str, smoke: Smoke) -> Stub {
+        Stub { ldd, claim, smoke, live: false, copied: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()) }
+    }
+
+    /// Execs carrying the exact argv element `arg` — "start" and
+    /// "restart" share a substring, so counting needs equality.
+    fn calls_exact(t: &Stub, arg: &str) -> usize {
+        t.calls.lock().unwrap().iter().filter(|(_, argv, _)| argv.iter().any(|a| a == arg)).count()
     }
 
     /// Row fixture with a REAL keypair — the .shunt-owner claim reads
@@ -294,7 +435,7 @@ mod tests {
     fn bootstrap_refuses_foreign_owned_qroot() {
         let _g = HOME_LOCK.lock().unwrap();
         let (tmp, _e) = fixture("foreign");
-        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "FOREIGN", copied: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()) };
+        let t = stub("ldd (GNU libc) 99.0", "FOREIGN", Smoke::Clean);
         let err = bootstrap(&t, "foreign", None).unwrap_err();
         std::env::remove_var("SHUNT_HOME");
         std::fs::remove_dir_all(&tmp).ok();
@@ -326,51 +467,111 @@ mod tests {
     fn bootstrap_reowns_same_pub() {
         let _g = HOME_LOCK.lock().unwrap();
         let (tmp, _e) = fixture("reown");
-        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "OWNED", copied: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()) };
+        let t = stub("ldd (GNU libc) 99.0", "OWNED", Smoke::Clean);
         bootstrap(&t, "reown", None).unwrap();
         std::env::remove_var("SHUNT_HOME");
         assert_eq!(t.copied.lock().unwrap().len(), 1);
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    /// §15 refuse path: an explicit --bin-path needing a newer glibc
-    /// than the box serves is rejected before anything is copied —
-    /// explicit paths never get the release-rescue substitution.
-    /// The fixture is a real glibc-linked binary (`/bin/sh`): a fake
-    /// `GLIBC_x.y` literal embedded in this source would sit inside
-    /// the test binary itself and poison required_glibc(current_exe)
-    /// in the sibling test (observed — string pooling places adjacent
-    /// byte literals contiguously).
+    /// §15 error tier: an explicit --bin-path that cannot run on the
+    /// box is refused — staging it was required to observe the
+    /// refusal, but `mv` must never run and the staged file is
+    /// removed. Explicit paths never get the rescue substitution.
     #[test]
-    fn bootstrap_refuses_incompatible_explicit_bin() {
+    fn bootstrap_refuses_unrunnable_explicit_bin() {
         let _g = HOME_LOCK.lock().unwrap();
         let (tmp, _e) = fixture("stub-old");
-        let probe = PathBuf::from("/bin/sh");
-        let needs = crate::server::client_ops::compat::required_glibc(&probe).unwrap();
-        assert!(needs.is_some(), "/bin/sh must be glibc-linked for this test");
-        let t = Stub { ldd: "ldd (GNU libc) 2.0", claim: "CLAIMED", copied: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()) };
+        let t = stub("ldd (GNU libc) 2.0", "CLAIMED", Smoke::Fail);
         let err = bootstrap(&t, "stub-old", Some("/bin/sh")).unwrap_err();
         std::env::remove_var("SHUNT_HOME");
         std::fs::remove_dir_all(&tmp).ok();
         let msg = format!("{err:#}");
-        assert!(msg.contains("GLIBC"), "{msg}");
+        assert!(msg.contains("cannot run"), "{msg}");
         assert!(msg.contains("musl"), "{msg}");
-        assert!(t.copied.lock().unwrap().is_empty(), "refused bootstrap must not copy");
+        assert_eq!(t.copied.lock().unwrap().len(), 1, "staging precedes classification");
+        assert_eq!(calls_exact(&t, "mv"), 0, "a failed candidate never installs");
+        assert_eq!(calls_exact(&t, "rm"), 1, "the staged file is cleaned up");
     }
 
-    /// §15 happy path: box glibc newer than required → copy happens,
-    /// then the smoke `--version 2>&1` runs and echo prints.
+    /// §15 warn tier, explicit path: the binary runs but prints
+    /// loader noise — the operator's choice ships with a loud
+    /// report; rescue never substitutes an explicit path.
+    #[test]
+    fn bootstrap_warn_explicit_ships() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let (tmp, _e) = fixture("stub-warn");
+        let t = stub("ldd (GNU libc) 2.0", "CLAIMED", Smoke::Warn);
+        bootstrap(&t, "stub-warn", Some("/bin/sh")).unwrap();
+        std::env::remove_var("SHUNT_HOME");
+        assert_eq!(t.copied.lock().unwrap().len(), 1);
+        assert_eq!(calls_exact(&t, "mv"), 1);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// §15 warn tier, auto source: rescue is attempted first (the
+    /// musl release would upgrade warn → ok), but the test binary's
+    /// own --version is unparseable so rescue fails before any
+    /// network — the fallback is shipping the warning binary.
+    #[test]
+    fn bootstrap_warn_auto_falls_back_without_release() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let (tmp, _e) = fixture("stub-warnauto");
+        let t = stub("ldd (GNU libc) 2.0", "CLAIMED", Smoke::Warn);
+        bootstrap(&t, "stub-warnauto", None).unwrap();
+        std::env::remove_var("SHUNT_HOME");
+        assert_eq!(t.copied.lock().unwrap().len(), 1, "rescue died before staging a second binary");
+        assert_eq!(calls_exact(&t, "mv"), 1);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// §15 error tier, auto source: the rescue is the only road to
+    /// ok; when it fails (unparseable local --version, pre-network)
+    /// bootstrap bails without installing.
+    #[test]
+    fn bootstrap_error_auto_bails() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let (tmp, _e) = fixture("stub-errauto");
+        let t = stub("ldd (GNU libc) 2.0", "CLAIMED", Smoke::Fail);
+        let err = bootstrap(&t, "stub-errauto", None).unwrap_err();
+        std::env::remove_var("SHUNT_HOME");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("musl"), "{msg}");
+        assert_eq!(calls_exact(&t, "mv"), 0);
+        assert_eq!(calls_exact(&t, "rm"), 1);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The manual redeploy pathway: a live daemon is handed off via
+    /// wire `restart` (§3.5a) rather than left running the old image.
+    #[test]
+    fn bootstrap_live_daemon_handed_off() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let (tmp, _e) = fixture("live");
+        let mut t = stub("ldd (GNU libc) 99.0", "OWNED", Smoke::Clean);
+        t.live = true;
+        bootstrap(&t, "live", None).unwrap();
+        std::env::remove_var("SHUNT_HOME");
+        assert_eq!(calls_exact(&t, "restart"), 1);
+        assert_eq!(calls_exact(&t, "start"), 0);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// §15 happy path: clean smoke → copy + mv, and a dead daemon
+    /// takes `start` rather than restart.
     #[test]
     fn bootstrap_compatible_box_ships() {
         let _g = HOME_LOCK.lock().unwrap();
         let (tmp, _e) = fixture("stub-ok");
-        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "CLAIMED", copied: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()) };
+        let t = stub("ldd (GNU libc) 99.0", "CLAIMED", Smoke::Clean);
         bootstrap(&t, "stub-ok", None).unwrap();
         std::env::remove_var("SHUNT_HOME");
         let copied = t.copied.lock().unwrap();
         assert_eq!(copied.len(), 1);
         assert_eq!(copied[0].1, "/q/bin/shunt.new");
         assert_eq!(copied[0].0, std::env::current_exe().unwrap());
+        assert_eq!(calls_exact(&t, "start"), 1);
+        assert_eq!(calls_exact(&t, "restart"), 0);
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -383,7 +584,7 @@ mod tests {
             entry.queues.insert(name.into(), registry::QueueEntry { qroot: root.into(), env_setup: format!("export TARGET={name}"), shell: "bash".into(), exit_on_idle: true, workers });
         }
         registry::save_client(&entry).unwrap();
-        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "OWNED", copied: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()) };
+        let t = stub("ldd (GNU libc) 99.0", "OWNED", Smoke::Clean);
         bootstrap(&t, "multi", None).unwrap();
         let saved = registry::load_client("multi").unwrap();
         assert!(saved.qroot.is_empty() && saved.env_setup.is_empty() && saved.shell.is_empty());
@@ -419,7 +620,7 @@ mod tests {
         registry::canonicalize_queues(&mut entry).unwrap();
         entry.queues.insert("other".into(), registry::QueueEntry { qroot: "/data/other".into(), env_setup: String::new(), shell: String::new(), exit_on_idle: false, workers: None });
         registry::save_client(&entry).unwrap();
-        let t = Stub { ldd: "ldd (GNU libc) 99.0", claim: "OWNED", copied: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()) };
+        let t = stub("ldd (GNU libc) 99.0", "OWNED", Smoke::Clean);
         super::bootstrap_queue(&t, "selected", "other", None).unwrap();
         let calls = t.calls.lock().unwrap();
         assert!(calls.iter().all(|(root, _, _)| root == "/data/other"));

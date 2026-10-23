@@ -106,30 +106,52 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Re
     let c = &resolved.client;
     let t = transport::transport_for(c);
     let bin = shunt_bin(c);
-    let cur = t.exec(c, &["sh".into(), "-c".into(), format!("{} --version 2>&1", shell_quote(&bin))], None).context("remote --version")?;
+    // The remote --version doubles as the §15 compat smoke: loader
+    // noise or a non-starting binary is itself a reason to relink
+    // to the musl asset, even when the version already matches.
+    let (smoke, cur) = match t.exec(c, &["sh".into(), "-c".into(), format!("{} --version 2>&1", shell_quote(&bin))], None) {
+        Ok(out) => (compat::classify_smoke(&out), out),
+        Err(e) => (compat::Compat::Error(format!("{e:#}")), String::new()),
+    };
     let curver = release::parse_version(&cur).map(|(v, _, _)| v).unwrap_or_else(|| "?".into());
     let newer = release::semver_newer(latest, &curver);
+    let relink = !matches!(smoke, compat::Compat::Ok);
+    let compat_tag = match &smoke {
+        compat::Compat::Ok => "ok",
+        compat::Compat::Warn(_) => "warn",
+        compat::Compat::Error(_) => "error",
+    };
     if a.check || a.json {
-        let j = serde_json::json!({"action": "check", "client": name, "queue": queue, "current": curver, "latest": latest, "newer": newer});
+        let j = serde_json::json!({"action": "check", "client": name, "queue": queue, "current": curver, "latest": latest, "newer": newer, "compat": compat_tag});
         if a.json {
             println!("{j}");
             return Ok(());
         }
     }
     if a.check {
-        println!("{name}/{queue}: {}", if newer { format!("new release available: {curver} → {latest}") } else { format!("up to date ({curver})") });
+        let state = if relink { format!(", compat {compat_tag}") } else { String::new() };
+        println!("{name}/{queue}: {}{state}", if newer { format!("new release available: {curver} → {latest}") } else { format!("up to date ({curver})") });
         return Ok(());
     }
-    if !newer && !a.force {
+    if !newer && !relink && !a.force {
         println!("{name}/{queue}: up to date ({curver})");
         return Ok(());
+    }
+    if relink && !newer {
+        match &smoke {
+            compat::Compat::Warn(w) => eprintln!("{name}/{queue}: {w} — relinking to the musl release ({latest})"),
+            compat::Compat::Error(e) => eprintln!("{name}/{queue}: box binary cannot run: {e} — replacing with the musl release ({latest})"),
+            compat::Compat::Ok => {}
+        }
     }
     anyhow::ensure!(t.exec(c, &["uname".into(), "-m".into()], None).map(|s| s.trim() == "x86_64").unwrap_or(false), "release assets are x86_64-only; {name} is not x86_64 — upgrade it by shipping a locally built binary: `client bootstrap {name} --bin-path <build>`");
     let tb = release::fetch_tag_asset(&release.tag, release::MUSL_TARGET)?;
     verify_release(tb.path(), latest)?;
     client_ops::bootstrap_queue(t.as_ref(), name, queue, tb.path().to_str())?;
     if a.json {
-        println!("{}", serde_json::json!({"action": "upgraded", "client": name, "queue": queue, "from": curver, "to": latest}));
+        println!("{}", serde_json::json!({"action": "upgraded", "client": name, "queue": queue, "from": curver, "to": latest, "relinked": relink && !newer}));
+    } else if relink && !newer {
+        println!("{name}/{queue}: relinked to musl {latest}");
     } else {
         println!("{name}/{queue}: upgraded {curver} → {latest}");
     }

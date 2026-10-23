@@ -107,6 +107,12 @@ pub struct StatusReport {
     pub pending_detail: Vec<EntryDetail>,
     #[serde(default)]
     pub running_detail: Vec<EntryDetail>,
+    /// This binary's own max `GLIBC_x.y` reference (self-scan of
+    /// current_exe, §15) — the compat fact the server turns into a
+    /// three-state verdict against the box's `libc`. Absent on a
+    /// static binary and on remotes predating the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_glibc: Option<String>,
 }
 
 /// One queue entry's declared-vs-observed pair. `usage` is `None`
@@ -269,6 +275,12 @@ pub struct ProbeReport {
     /// start (design.md §15). Absent on older remote binaries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub libc: Option<String>,
+    /// This binary's own max `GLIBC_x.y` reference (self-scan of
+    /// current_exe, §15). Absent on a static (musl) build — its
+    /// presence on a glibc-linked binary is what makes a too-old
+    /// box libc readable as a warn-state mismatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_glibc: Option<String>,
 }
 
 #[cfg(test)]
