@@ -72,10 +72,10 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Re
     let latest = release.version.as_str();
     let resolved = registry::load_queue(name, a.queue.as_deref())?;
     let queue = &resolved.name;
-    let c = resolved.client;
-    let t = transport::transport_for(&c);
-    let bin = shunt_bin(&c);
-    let cur = t.exec(&c, &["sh".into(), "-c".into(), format!("{} --version 2>&1", shell_quote(&bin))], None).context("remote --version")?;
+    let c = &resolved.client;
+    let t = transport::transport_for(c);
+    let bin = shunt_bin(c);
+    let cur = t.exec(c, &["sh".into(), "-c".into(), format!("{} --version 2>&1", shell_quote(&bin))], None).context("remote --version")?;
     let curver = release::parse_version(&cur).map(|(v, _, _)| v).unwrap_or_else(|| "?".into());
     let newer = release::semver_newer(latest, &curver);
     if a.check || a.json {
@@ -93,7 +93,7 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Re
         println!("{name}/{queue}: up to date ({curver})");
         return Ok(());
     }
-    anyhow::ensure!(t.exec(&c, &["uname".into(), "-m".into()], None).map(|s| s.trim() == "x86_64").unwrap_or(false), "release assets are x86_64-only; {name} is not x86_64 — upgrade it by shipping a locally built binary: `client bootstrap {name} --bin-path <build>`");
+    anyhow::ensure!(t.exec(c, &["uname".into(), "-m".into()], None).map(|s| s.trim() == "x86_64").unwrap_or(false), "release assets are x86_64-only; {name} is not x86_64 — upgrade it by shipping a locally built binary: `client bootstrap {name} --bin-path <build>`");
     let tb = release::fetch_tag_asset(&release.tag, release::MUSL_TARGET)?;
     verify_release(tb.path(), latest)?;
     client_ops::bootstrap_queue(t.as_ref(), name, queue, tb.path().to_str())?;
@@ -108,7 +108,7 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Re
     // is their call (STOP drains in-flight tasks, never kills them),
     // but staleness must be loud or queue-semantics upgrades (new
     // directives, reschedule) silently don't apply.
-    if let Ok(out) = t.exec(&c, &transport::wire_argv(&c, &["status", "--json"]), None) {
+    if let Ok(out) = transport::queue_exec(t.as_ref(), &resolved, &["status", "--json"], None) {
         if let Ok(rep) = crate::proto::wire::parse::<crate::proto::wire::StatusReport>(&out) {
             if rep.daemon.alive {
                 let pid = rep.daemon.pid.map(|p| format!(" (pid {p})")).unwrap_or_default();

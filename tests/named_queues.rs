@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use shunt::proto::task::TaskFlags;
-use shunt::server::transport::{wire_argv, LocalTransport, Transport};
+use shunt::server::transport::{queue_exec, LocalTransport};
 use shunt::server::{dispatch, registry, spool};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -54,7 +54,7 @@ fn transport() -> LocalTransport {
 
 fn wire(t: &LocalTransport, name: &str, tail: &[&str]) -> Result<String> {
     let resolved = registry::load_queue("box", Some(name))?;
-    t.exec(&resolved.client, &wire_argv(&resolved.client, tail), None)
+    queue_exec(t, &resolved, tail, None)
 }
 
 /// One local client carrying `train` and `eval` queues.

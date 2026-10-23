@@ -6,7 +6,7 @@
 use crate::proto::wire::StatusReport;
 use crate::server::registry;
 use crate::server::spool;
-use crate::server::transport::{wire_argv, Transport};
+use crate::server::transport::{queue_exec, Transport};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,9 +30,10 @@ enum Reach {
     ConnectionDown,
 }
 
-fn probe_client(t: &dyn Transport, client: &registry::ClientEntry) -> Reach {
+fn probe_client(t: &dyn Transport, queue: &registry::ResolvedQueue) -> Reach {
+    let client = &queue.client;
     let failures = registry::conn_fail_read(&client.name);
-    match t.exec(client, &wire_argv(client, &["status", "--json"]), None) {
+    match queue_exec(t, queue, &["status", "--json"], None) {
         Ok(out) => match crate::proto::wire::parse::<StatusReport>(&out) {
             Ok(rep) => Reach::Up { daemon_alive: rep.daemon.alive },
             // An unparseable reply is protocol drift (binary version
@@ -61,10 +62,11 @@ fn probe_client(t: &dyn Transport, client: &registry::ClientEntry) -> Reach {
 /// it for the pending filename. `deduped` means the remote already
 /// held this delivery (`# shunt:id=` match) and returned the
 /// existing entry — the normal outcome of a retry after a lost ack.
-fn push(t: &dyn Transport, client: &registry::ClientEntry, entry: &crate::proto::task::SpoolEntry, body: &str) -> Result<(String, bool)> {
+fn push(t: &dyn Transport, queue: &registry::ResolvedQueue, entry: &crate::proto::task::SpoolEntry, body: &str) -> Result<(String, bool)> {
+    let client = &queue.client;
     // `--slug` is the §5 wire spelling; the submit-side slug check
     // guarantees the value never leads with a dash.
-    let out = t.exec(client, &wire_argv(client, &["enqueue", "--json", "--slug", &entry.meta.slug, "--", "-"]), Some(body))?;
+    let out = queue_exec(t, queue, &["enqueue", "--json", "--slug", &entry.meta.slug, "--", "-"], Some(body))?;
     // Propagate extract failures (no wire line, protocol mismatch):
     // the entry stays spooled and the error names the cause instead
     // of degrading to a generic "enqueue rejected".
@@ -185,11 +187,11 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
         let t: &dyn Transport = forced.unwrap_or_else(|| owned.as_ref());
         let key = (name.clone(), queue.clone());
         if let std::collections::btree_map::Entry::Vacant(v) = reach.entry(key.clone()) {
-            let r = probe_client(t, &target.client);
+            let r = probe_client(t, &target);
             if let Reach::Up { daemon_alive } = r {
                 if !daemon_alive {
                     let failures = registry::conn_fail_read(&name);
-                    match t.exec(&target.client, &wire_argv(&target.client, &["start", "--json"]), None) {
+                    match queue_exec(t, &target, &["start", "--json"], None) {
                         Ok(_) => eprintln!("dispatch: {name} queue {queue} daemon restarted"),
                         Err(e) => {
                             eprintln!("dispatch: {name} queue {queue} start failed: {e:#}");
@@ -225,7 +227,7 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
         let failures = registry::conn_fail_read(&name);
         let client = &target.client;
 
-        match spool::body(&entry.id).and_then(|b| push(t, client, &entry, &b)) {
+        match spool::body(&entry.id).and_then(|b| push(t, &target, &entry, &b)) {
             Ok((name, deduped)) => {
                 eprintln!("dispatch: {} -> {} as {name}{}", entry.id, client.name, if deduped { " (deduped)" } else { "" });
                 // Ledger (design.md §4.5): the spool id -> queue

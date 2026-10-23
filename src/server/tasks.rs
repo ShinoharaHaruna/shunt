@@ -12,7 +12,7 @@
 use crate::proto::task::SpoolEntry;
 use crate::proto::wire::StatusReport;
 use crate::server::registry::{self, ClientEntry};
-use crate::server::transport::{wire_argv, Transport};
+use crate::server::transport::{queue_exec, Transport};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -214,8 +214,7 @@ pub fn observe(t: &dyn Transport, client: &ClientEntry, rec: &mut TaskRecord) ->
         rec.qroot = Some(target.client.qroot.clone());
         save(rec)?;
     }
-    let client = &target.client;
-    let out = match t.exec(client, &wire_argv(client, &["status", "--json"]), None) {
+    let out = match queue_exec(t, &target, &["status", "--json"], None) {
         Ok(o) => o,
         Err(e) => return Ok(Observed::Unreachable(format!("{e:#}"))),
     };

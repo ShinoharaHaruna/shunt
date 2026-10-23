@@ -3,11 +3,11 @@
 
 use crate::proto::wire::StatusReport;
 use crate::server::registry::{self, ClientEntry, ResolvedQueue};
-use crate::server::transport::{wire_argv, Transport};
+use crate::server::transport::{queue_exec, Transport};
 use anyhow::{Context, Result};
 
 fn status(t: &dyn Transport, queue: &ResolvedQueue) -> Result<StatusReport> {
-    let out = t.exec(&queue.client, &wire_argv(&queue.client, &["status", "--json"]), None)?;
+    let out = queue_exec(t, queue, &["status", "--json"], None)?;
     crate::proto::wire::parse(&out).with_context(|| format!("cannot determine {}/{} state; run `shunt status -c {} --queue {}`", queue.client.name, queue.name, queue.client.name, queue.name))
 }
 
@@ -52,7 +52,7 @@ pub fn remove(t: &dyn Transport, client_name: &str, queue_name: &str, purge: boo
     let report = status(t, &queue)?;
     anyhow::ensure!(report.pending.is_empty() && report.running.is_empty(), "queue {client_name}/{queue_name} has pending or running work; drain it before removing the queue");
     for tail in [&["shutdown", "off", "--json"][..], &["stop", "--json"][..]] {
-        let out = t.exec(&queue.client, &wire_argv(&queue.client, tail), None).context("disarm and stop queue before removal")?;
+        let out = queue_exec(t, &queue, tail, None).context("disarm and stop queue before removal")?;
         let result: crate::proto::wire::WireResult = crate::proto::wire::parse(&out)?;
         anyhow::ensure!(result.ok, "queue {client_name}/{queue_name} refused {}: {}; it remains registered", tail[0], result.error.as_deref().unwrap_or("no reason returned"));
     }

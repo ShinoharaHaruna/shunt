@@ -4,7 +4,7 @@
 //! tmp $SHUNT_HOME; no ssh, no remote box.
 
 use anyhow::Result;
-use shunt::server::transport::{wire_argv, LocalTransport, Transport};
+use shunt::server::transport::{queue_exec, LocalTransport};
 use shunt::server::{dispatch, registry, spool};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -37,6 +37,7 @@ fn localhost_submit_dispatch_execute_done() -> Result<()> {
     let client = registry::load_client("localhost")?;
     assert!(client.local);
     assert_eq!(client.qroot, home.join("queue").display().to_string());
+    let queue = registry::resolve_queue(&client, None)?;
     let qroot = PathBuf::from(&client.qroot);
 
     // Loopback transport execs the built binary, not the registry path.
@@ -46,7 +47,7 @@ fn localhost_submit_dispatch_execute_done() -> Result<()> {
     };
 
     // init over the wire surface.
-    t.exec(&client, &wire_argv(&client, &["init", "--json"]), None)?;
+    queue_exec(&t, &queue, &["init", "--json"], None)?;
     assert!(qroot.join("pending").is_dir());
 
     // Server side: stage a task for localhost, then one dispatch sweep.
@@ -83,7 +84,7 @@ fn localhost_submit_dispatch_execute_done() -> Result<()> {
     }
 
     // Drain + exit the daemon; the Drop guard covers failure paths.
-    let _ = t.exec(&client, &wire_argv(&client, &["stop"]), None);
+    let _ = queue_exec(&t, &queue, &["stop"], None);
     let deadline = Instant::now() + Duration::from_secs(10);
     while qroot.join("daemon.pid").exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(200));

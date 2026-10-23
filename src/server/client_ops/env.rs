@@ -2,7 +2,7 @@
 //! under `<qroot>` on the box.
 
 use crate::server::registry::{self, ClientEntry, ResolvedQueue};
-use crate::server::transport::{wire_argv, Transport};
+use crate::server::transport::{queue_exec, Transport};
 use anyhow::{Context, Result};
 
 /// `shunt client env <name>`: push the row's `env_setup`/`shell` to
@@ -36,7 +36,7 @@ pub(super) fn push_resolved_env(t: &dyn Transport, queue: &ResolvedQueue) -> Res
     write_qroot_file(t, e, "exit_on_idle", if e.exit_on_idle { "1\n" } else { "" })?;
     // An unset preference must not reset a live, manually tuned worker pool.
     if let Some(workers) = queue.workers {
-        t.exec(e, &wire_argv(e, &["workers", "set", &workers.to_string(), "--json"]), None).context("push queue workers")?;
+        queue_exec(t, queue, &["workers", "set", &workers.to_string(), "--json"], None).context("push queue workers")?;
     }
     crate::server::tunnel::sync_queue_env(t, &e.name, &queue.name).context("reconcile queue tunnel environment")?;
     Ok(())

@@ -72,24 +72,22 @@ pub(crate) fn task_show(id: &str, json: bool) -> Result<()> {
 /// transport is `ssh` or the `localhost` loopback (design.md §5).
 pub(crate) fn remote(name: &str, tail: &[&str], stdin: Option<&str>, expect_json: bool) -> Result<()> {
     use crate::server::registry;
-    use crate::server::transport::{transport_for, wire_argv};
+    use crate::server::transport::{queue_exec, transport_for};
     let base = registry::load_client(name)?;
     let queue = registry::queue_names(&base).into_iter().next().context("client has no registered queues")?;
-    let client = registry::resolve_queue(&base, Some(&queue))?.client;
-    let argv = wire_argv(&client, tail);
-    let t = transport_for(&client);
-    let out = t.exec(&client, &argv, stdin)?;
+    let resolved = registry::resolve_queue(&base, Some(&queue))?;
+    let t = transport_for(&resolved.client);
+    let out = queue_exec(t.as_ref(), &resolved, tail, stdin)?;
     print!("{}", remote_render(&out, expect_json)?);
     Ok(())
 }
 
 /// Queue controls must resolve an execution target, never the machine row.
 pub(crate) fn remote_queue(name: &str, queue: Option<&str>, tail: &[&str], stdin: Option<&str>, expect_json: bool) -> Result<()> {
-    use crate::server::transport::{transport_for, wire_argv};
+    use crate::server::transport::{queue_exec, transport_for};
     let resolved = crate::server::registry::load_queue(name, queue)?;
-    let client = &resolved.client;
-    let t = transport_for(client);
-    let out = t.exec(client, &wire_argv(client, tail), stdin)?;
+    let t = transport_for(&resolved.client);
+    let out = queue_exec(t.as_ref(), &resolved, tail, stdin)?;
     print!("{}", remote_render(&out, expect_json)?);
     Ok(())
 }

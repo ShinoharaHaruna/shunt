@@ -63,6 +63,15 @@ pub fn wire_argv(client: &ClientEntry, tail: &[&str]) -> Vec<String> {
     v
 }
 
+/// Exec one wire op on a resolved queue: `wire_argv` and the exec
+/// target are the same overlay client — spelled once here so no call
+/// site can pair one queue's `--root` argv with another's identity.
+/// The transport is caller-supplied: tests inject fakes, and
+/// `transport_for` stays a per-client caller decision.
+pub fn queue_exec(t: &dyn Transport, queue: &crate::server::registry::ResolvedQueue, tail: &[&str], stdin: Option<&str>) -> Result<String> {
+    t.exec(&queue.client, &wire_argv(&queue.client, tail), stdin)
+}
+
 /// Hard deadline for one wire op. `ConnectTimeout` only bounds the
 /// ssh handshake; a live-but-hung remote command (frozen NFS qroot,
 /// remote OOM) — or a wedged loopback op — would otherwise block the

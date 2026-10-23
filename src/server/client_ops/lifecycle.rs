@@ -3,7 +3,7 @@
 
 use super::hygiene::rekey;
 use crate::server::registry::{self, ClientEntry, ResolvedQueue};
-use crate::server::transport::{self, wire_argv, Transport};
+use crate::server::transport::{self, queue_exec, Transport};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -223,14 +223,13 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
 fn decommission_queues(t: &dyn Transport, e: &ClientEntry, queues: &[ResolvedQueue], purge: bool) {
     // A stop can honor an armed idle shutdown; disarm every queue before stopping any.
     for queue in queues {
-        let client = &queue.client;
-        if let Err(err) = t.exec(client, &wire_argv(client, &["shutdown", "off", "--json"]), None) {
+        if let Err(err) = queue_exec(t, queue, &["shutdown", "off", "--json"], None) {
             eprintln!("warn: could not disarm shutdown for queue {} ({err}); continuing deregistration", queue.name);
         }
     }
     for queue in queues {
         let client = &queue.client;
-        if let Err(err) = t.exec(client, &wire_argv(client, &["stop", "--json"]), None) {
+        if let Err(err) = queue_exec(t, queue, &["stop", "--json"], None) {
             eprintln!("warn: remote stop of queue {} failed ({err}); continuing deregistration", queue.name);
         }
         // A failed stop must not prevent the remaining best-effort teardown.

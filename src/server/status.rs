@@ -3,7 +3,7 @@
 //! Unreachable clients are reported, never fatal.
 
 use crate::server::registry::{self, ClientEntry};
-use crate::server::transport::{transport_for, wire_argv, Transport};
+use crate::server::transport::{queue_exec, transport_for, Transport};
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -96,7 +96,7 @@ pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
     match registry::all_queues(client) {
         Ok(targets) => {
             for queue in targets {
-                let status = match t.exec(&queue.client, &wire_argv(&queue.client, &["status", "--json"]), None) {
+                let status = match queue_exec(t, &queue, &["status", "--json"], None) {
                     Ok(out) => match crate::proto::wire::parse::<crate::proto::wire::StatusReport>(&out).and_then(|_| crate::proto::wire::extract(&out)) {
                         Ok(report) => QueueStatus { qroot: queue.client.qroot, reachable: true, report: Some(report), error: None },
                         Err(e) => QueueStatus { qroot: queue.client.qroot, reachable: true, report: None, error: Some(format!("bad status JSON: {e:#}")) },
