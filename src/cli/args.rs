@@ -312,6 +312,28 @@ pub struct NewArgs {
     pub cmd: Vec<String>,
 }
 
+impl NewArgs {
+    /// `new`/`mktask` share the meta build: argv → validated
+    /// `TaskMeta` (id/workdir are the server spool's fields, so they
+    /// stay `None` here — the box-side allocator never dedups a
+    /// locally-generated task). The slug refusal names the RAW flag
+    /// so the user sees what they typed, not the sanitized form.
+    /// `timeout`/`retry` go in unfiltered: render_task's own `> 0`
+    /// check drops a literal `0`, so this path never needed the
+    /// submit-side normalization.
+    pub(crate) fn task_meta(&self) -> anyhow::Result<crate::proto::task::TaskMeta> {
+        if self.cmd.is_empty() {
+            anyhow::bail!("missing command after --");
+        }
+        let meta = crate::proto::task::TaskMeta { id: None, slug: crate::proto::task::sanitize_slug(&self.slug), guard: self.guard.clone(), workdir: None, env: crate::proto::task::parse_env_pairs(&self.env)?, cmd: self.cmd.clone(), timeout_s: self.timeout, retry: self.retry, retry_delay_s: self.retry_delay_s, gpu_mem_mb: self.gpu_mem_mb, ram_mb: self.ram_mb, cpu_cores: self.cpu_cores };
+        if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
+            anyhow::bail!("bad slug '{}': {p}", self.slug);
+        }
+        crate::proto::task::validate_meta(&meta)?;
+        Ok(meta)
+    }
+}
+
 #[derive(Args)]
 pub struct PatternArgs {
     /// Pending/running task name or unique substring

@@ -104,14 +104,7 @@ pub(crate) fn agent_new(a: &NewArgs) -> Result<()> {
 fn new_impl(a: &NewArgs) -> Result<()> {
     let json = a.json;
     let inner = || -> Result<crate::agent::queue::EnqueueOutcome> {
-        if a.cmd.is_empty() {
-            anyhow::bail!("missing command after --");
-        }
-        let meta = crate::proto::task::TaskMeta { id: None, slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard.clone(), workdir: None, env: crate::proto::task::parse_env_pairs(&a.env)?, cmd: a.cmd.clone(), timeout_s: a.timeout, retry: a.retry, retry_delay_s: a.retry_delay_s, gpu_mem_mb: a.gpu_mem_mb, ram_mb: a.ram_mb, cpu_cores: a.cpu_cores };
-        if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
-            anyhow::bail!("bad slug '{}': {p}", a.slug);
-        }
-        crate::proto::task::validate_meta(&meta)?;
+        let meta = a.task_meta()?;
         let body = crate::agent::exec::render_task(&meta);
         let root = agent_root(&a.root)?;
         crate::agent::queue::enqueue(&root, &meta.slug, &body)

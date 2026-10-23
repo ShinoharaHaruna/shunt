@@ -424,21 +424,11 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Command::Mktask(a) => {
             // mktask can render for real: it is pure output. An empty
-            // cmd would render `exec ` — a no-op task that exits 0.
-            let r = (|| -> Result<String> {
-                if a.cmd.is_empty() {
-                    anyhow::bail!("missing command after --");
-                }
-                let meta = crate::proto::task::TaskMeta { id: None, slug: crate::proto::task::sanitize_slug(&a.slug), guard: a.guard, workdir: None, env: crate::proto::task::parse_env_pairs(&a.env)?, cmd: a.cmd, timeout_s: a.timeout, retry: a.retry, retry_delay_s: a.retry_delay_s, gpu_mem_mb: a.gpu_mem_mb, ram_mb: a.ram_mb, cpu_cores: a.cpu_cores };
-                if let Some(p) = crate::proto::task::slug_problem(&meta.slug) {
-                    anyhow::bail!("bad slug '{}': {p}", a.slug);
-                }
-                crate::proto::task::validate_meta(&meta)?;
-                Ok(crate::agent::exec::render_task(&meta))
-            })();
-            match r {
-                Ok(s) => {
-                    print!("{s}");
+            // cmd would render `exec ` — a no-op task that exits 0
+            // (task_meta refuses it before we get here).
+            match a.task_meta() {
+                Ok(meta) => {
+                    print!("{}", crate::agent::exec::render_task(&meta));
                     Ok(())
                 }
                 Err(e) => jfail(a.json, &format!("{e:#}")),
