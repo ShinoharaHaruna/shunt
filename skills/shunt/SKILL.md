@@ -227,13 +227,22 @@ Interpretation cheats: `daemon.alive=false` with nonempty `pending/` means nothi
 7. Host keys are shunt's business, never the user's: shunt TOFU-accepts into `~/.config/shunt/known_hosts`. **Never** echo, `ssh-keyscan >>`, or otherwise touch `~/.ssh/known_hosts` — a rebuilt container changes its key, and a stale entry there means the user's own ssh hits REMOTE HOST IDENTIFICATION HAS CHANGED with no obvious culprit. When shunt hits a changed key (`Offending key`/`IDENTIFICATION HAS CHANGED` in an ssh error), run `shunt client hostkey <name>` — it drops the stale entry from OUR store and kills the mux master, then reconnect (fresh TOFU).
 8. Deregistering a box is `shunt client rm <name>` — remote daemon stop + authorized_keys revocation (best-effort), then every local artifact (row, keys, mux socket, state, spool, project bindings). Add `--purge` to also `rm -rf <qroot>` on the box. Task data in bind workdirs is never deleted — the command lists it for the user to decide. Never hand-run the dozen cleanup steps.
 
+## Scheduling objective — the utilization/efficiency Pareto front
+
+The default goal when scheduling on shunt is the Pareto frontier between resource occupancy and task throughput: occupy as much of the paid box as the work can absorb, but never oversubscribe into the regime where tasks stop progressing efficiently. Both directions lose money — a half-idle box burns paid hours on nothing, an oversubscribed one burns them on OOM kills and contention.
+
+- Keep `pending/` fed. Stage the next batch in the spool before `running/` drains — staging is free even while the box is off; an empty queue on a running box is the most preventable utilization failure.
+- Size the pool to the bottleneck, not the default. `workers -c <box> N` × per-task footprint (GPU VRAM, `TASK_THREADS` cores, RAM — read `facts` in `status --all --json`) should cover the box's capacity without exceeding it. Wall-time rising across similar tasks, or OOM `failed/` entries, means the frontier moved inward: back `workers` off.
+- Prefer many small checkpointable tasks over monoliths: fine-grained work bin-packs the box's gaps and holds occupancy high even as tasks finish unevenly.
+- At true drain the frontier ends — but poweroff is a serious, hard-to-reverse action, so stay conservative: `shutdown on` only when the user has actively opted into idle poweroff (armed it themselves or asked for it). Otherwise surface the drained queue and its idle cost, and let the user decide.
+
 ## Cost-aware playbook
 
-1. Arm idle-shutdown right after enqueueing the last task of a batch: `shunt shutdown -c rw-a on`. The countdown only fires when both `pending/` and `running/` are empty, re-checks every second, and cancels if new work arrives, so arming early is safe. Never arm on a `shared` box — the arm is refused server-side anyway; kill the resident daemon instead with `shunt stop -c`.
+1. When the user has opted into idle poweroff, arm it right after enqueueing the last task of a batch: `shunt shutdown -c rw-a on`. The countdown only fires when both `pending/` and `running/` are empty, re-checks every second, and cancels if new work arrives, so arming early is safe — but never arm unprompted; powering off is the user's call. Never arm on a `shared` box — the arm is refused server-side anyway; kill the resident daemon instead with `shunt stop -c`.
 2. Submitting while the box is off costs nothing. The spool holds the task until a human powers the box on and the dispatcher delivers it. Batch overnight submissions; let one power-on drain them.
 3. Read `billing.hourly`/`billing.currency` from `status --all --json` before queueing. On hourly billing, unused paid time is already spent: if the instance has 40 min of paid time left and the next task needs 3 h, hold the long task, run short ones, or warn the user. That decision is yours; shunt only exposes the rate.
 4. Split multi-hour experiments into checkpointable tasks (`--guard runs/epoch10.pt` style) so an at-least-once rerun after a mid-flight death costs minutes, not the whole run. One giant unguarded 12 h task is the expensive failure mode.
-5. When a box is running but `pending/` is empty and you have nothing to add, arm shutdown. Paid idle time is the thing shunt exists to kill.
+5. When a box is running but `pending/` is empty and you have nothing to add, arm shutdown only if the user opted into idle poweroff — otherwise report the idle spend and let them choose. Paid idle time is the thing shunt exists to kill, but the poweroff decision stays the user's.
 
 ## Failure semantics
 
