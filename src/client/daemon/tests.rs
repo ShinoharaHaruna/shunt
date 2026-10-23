@@ -11,7 +11,7 @@ fn dispatch_skips_cycle_on_unreadable_pending() {
     let root = std::env::temp_dir().join(format!("shunt-dispatch-test-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("pending"), b"not a dir").unwrap();
-    let mut d = super::core::Daemon { root: root.clone(), runpids: Default::default(), last_workers: None, got_signal: Default::default() };
+    let mut d = super::core::Daemon { root: root.clone(), runpids: Default::default(), last_workers: None, got_signal: Default::default(), reexec: Default::default(), argv_rest: Default::default() };
     d.dispatch();
     assert!(d.runpids.is_empty(), "nothing may dispatch off an unreadable pending/");
     let log = std::fs::read_to_string(root.join("daemon.log")).unwrap();
@@ -29,7 +29,7 @@ fn dispatch_skips_not_due_rescheduled_entry() {
     let entry = root.join("pending/0100_t");
     std::fs::create_dir_all(&entry).unwrap();
     std::fs::write(entry.join("task.sh"), "#!/usr/bin/env bash\nexec true\n").unwrap();
-    let mut d = super::core::Daemon { root: root.clone(), runpids: Default::default(), last_workers: None, got_signal: Default::default() };
+    let mut d = super::core::Daemon { root: root.clone(), runpids: Default::default(), last_workers: None, got_signal: Default::default(), reexec: Default::default(), argv_rest: Default::default() };
     // Not yet due: entry stays pending, nothing spawns.
     std::fs::write(entry.join("retry_after"), format!("{}\n", crate::proto::time::unix_now() + 3600)).unwrap();
     d.dispatch();
@@ -39,9 +39,14 @@ fn dispatch_skips_not_due_rescheduled_entry() {
     d.dispatch();
     assert_eq!(d.runpids.len(), 1, "due entry must claim");
     assert!(!root.join("running/0100_t/retry_after").exists(), "retry_after must be cleared on claim");
-    for (_, mut h) in d.runpids.drain() {
-        let _ = h.child.kill();
-        let _ = h.child.wait();
+    for (pgid, _) in d.runpids.drain() {
+        // No Child is held in the handle (leaders reap via waitpid):
+        // kill the group and wait by pgid.
+        unsafe {
+            libc::kill(-(pgid as i32), libc::SIGKILL);
+            let mut st = 0;
+            libc::waitpid(pgid as i32, &mut st, 0);
+        }
     }
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -57,10 +62,10 @@ fn dispatch_skips_not_due_rescheduled_entry() {
 fn unenforceable_timeout_stays_unmarked() {
     let root = std::env::temp_dir().join(format!("shunt-timeout-test-{}", std::process::id()));
     std::fs::create_dir_all(root.join("running")).unwrap();
-    let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+    let mut child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
     let pid = child.id();
-    let h = super::core::RunHandle { base: "t-timeout".into(), child, dirs: exec::TaskDirectives { timeout_s: Some(1), ..Default::default() }, deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)), usage: Default::default(), last_jiffies: 0, timed_out: None, kill_at: None, gone: false, unenforceable_warned: 0, exited: None };
-    let mut d = super::core::Daemon { root: root.clone(), runpids: [(pid, h)].into_iter().collect(), last_workers: None, got_signal: Default::default() };
+    let h = super::core::RunHandle { base: "t-timeout".into(), dirs: exec::TaskDirectives { timeout_s: Some(1), ..Default::default() }, deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)), usage: Default::default(), last_jiffies: 0, timed_out: None, kill_at: None, gone: false, unenforceable_warned: 0, exited: None };
+    let mut d = super::core::Daemon { root: root.clone(), runpids: [(pid, h)].into_iter().collect(), last_workers: None, got_signal: Default::default(), reexec: Default::default(), argv_rest: Default::default() };
     d.enforce_timeouts();
     let h = &d.runpids[&pid];
     assert!(h.timed_out.is_none() && h.kill_at.is_none(), "no signal delivered — nothing may be marked");
@@ -70,7 +75,6 @@ fn unenforceable_timeout_stays_unmarked() {
     let log = std::fs::read_to_string(root.join("daemon.log")).unwrap();
     let n = log.matches("timeout_unenforceable").count();
     assert_eq!(n, 1, "undeliverable TERM must be loud once, not once per poll ({n} lines)");
-    let child = &mut d.runpids.get_mut(&pid).unwrap().child;
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&root);
@@ -105,8 +109,8 @@ fn exited_timeout_still_escalates_kill_to_remnant_group() {
     // remnant clause of the §3.9a gate can pass.
     std::fs::write(entry.join("pid"), format!("{pgid}\n")).unwrap();
     let now = std::time::Instant::now();
-    let h = super::core::RunHandle { base: "t-remnant".into(), child, dirs: exec::TaskDirectives { timeout_s: Some(1), ..Default::default() }, deadline: Some(now - std::time::Duration::from_secs(20)), usage: Default::default(), last_jiffies: 0, timed_out: Some(1), kill_at: Some(now - std::time::Duration::from_secs(1)), gone: false, unenforceable_warned: 0, exited: Some(super::core::Exited { rc: 143, deadline: now + std::time::Duration::from_secs(60) }) };
-    let mut d = super::core::Daemon { root: root.clone(), runpids: [(pgid, h)].into_iter().collect(), last_workers: None, got_signal: Default::default() };
+    let h = super::core::RunHandle { base: "t-remnant".into(), dirs: exec::TaskDirectives { timeout_s: Some(1), ..Default::default() }, deadline: Some(now - std::time::Duration::from_secs(20)), usage: Default::default(), last_jiffies: 0, timed_out: Some(1), kill_at: Some(now - std::time::Duration::from_secs(1)), gone: false, unenforceable_warned: 0, exited: Some(super::core::Exited { rc: 143, deadline: now + std::time::Duration::from_secs(60) }) };
+    let mut d = super::core::Daemon { root: root.clone(), runpids: [(pgid, h)].into_iter().collect(), last_workers: None, got_signal: Default::default(), reexec: Default::default(), argv_rest: Default::default() };
     d.enforce_timeouts();
     let h = &d.runpids[&pgid];
     assert!(h.kill_at.is_none(), "elapsed kill_at must be consumed");

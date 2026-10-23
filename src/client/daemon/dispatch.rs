@@ -107,6 +107,14 @@ impl Daemon {
                                "warning": "task running with no pid file; kill cannot reach it"})),
                         );
                     }
+                    // `spawned_at` lets a §3.5a handoff reconstruct the
+                    // timeout deadline from the ORIGINAL spawn instead
+                    // of re-timing it — a restart must never stretch a
+                    // task's budget (§3.13). Dir entries only; flat
+                    // legacy entries carry no sidecars.
+                    if queue::is_dir_entry(&self.root, "running", &next) {
+                        let _ = std::fs::write(queue::piece_file(&self.root, "running", &next, "spawned_at"), format!("{now}\n"));
+                    }
                     let deadline = dirs.timeout_s.map(|s| std::time::Instant::now() + Duration::from_secs(s));
                     // Pid-reuse guard (§3.9): a reaped leader's handle
                     // can sit in runpids for up to pgid_drain_grace
@@ -121,11 +129,18 @@ impl Daemon {
                     // leader's exit and reap() observing it — so
                     // exited may still be None. Force-finalize it out
                     // first and log loud.
-                    if let Some(mut stale) = self.runpids.remove(&pid) {
+                    if let Some(stale) = self.runpids.remove(&pid) {
                         // If reap() hasn't observed the exit yet, do
-                        // it now — dropping Child does not wait — and
-                        // recover the real rc rather than fabricate 1.
-                        let rc = stale.exited.map(|e| e.rc).or_else(|| stale.child.try_wait().ok().flatten().map(|s| exec::status_rc(&s))).unwrap_or(1);
+                        // it now — and recover the real rc rather
+                        // than fabricate 1.
+                        let rc = stale
+                            .exited
+                            .map(|e| e.rc)
+                            .or_else(|| match exec::poll_leader(pid) {
+                                exec::LeaderPoll::Exited(rc) => Some(rc),
+                                _ => None,
+                            })
+                            .unwrap_or(1);
                         dlog(
                             &self.root,
                             "pid_reused",
@@ -138,7 +153,7 @@ impl Daemon {
                         }
                     }
                     let timeout_s = dirs.timeout_s;
-                    self.runpids.insert(pid, RunHandle { base: next.clone(), child, dirs, deadline, usage: Default::default(), last_jiffies: 0, timed_out: None, kill_at: None, gone: false, unenforceable_warned: 0, exited: None });
+                    self.runpids.insert(pid, RunHandle { base: next.clone(), dirs, deadline, usage: Default::default(), last_jiffies: 0, timed_out: None, kill_at: None, gone: false, unenforceable_warned: 0, exited: None });
                     dlog(
                         &self.root,
                         "start",

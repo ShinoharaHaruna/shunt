@@ -1,33 +1,77 @@
-//! Orphan requeue on daemon startup (design.md §3.6) and the
-//! per-cycle leader-exit reaping that finalizes tasks (§3.9).
+//! Orphan adoption + requeue on daemon startup (design.md §3.6)
+//! and the per-cycle leader-exit reaping that finalizes tasks (§3.9).
 
 use anyhow::Result;
 use serde_json::json;
+use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
-use super::core::{pgid_drain_grace, Daemon, Exited};
+use super::core::{pgid_drain_grace, Daemon, Exited, RunHandle};
 use super::{dlog, ev};
-use crate::client::{exec, queue};
+use crate::client::{exec, queue, usage};
 
-/// Orphan requeue: entries left in running/ by a dead daemon go to
-/// `pending/0000_requeued_<clean>`; the interrupted log is swept to
-/// `failed/<clean>.interrupted.<ts>.log` (design.md §3.6). Dir and
-/// legacy flat entries are both handled.
-pub(crate) fn requeue_orphans(root: &Path) -> Result<()> {
+/// Orphan scan at startup: entries left in running/ whose leader is
+/// still OUR child — the §3.5a handoff signature (children keep their
+/// parent across `execve`, while a crashed daemon's orphans reparent
+/// to init) — are adopted into `runpids` and never re-executed;
+/// everything else goes to `pending/0000_requeued_<clean>` with the
+/// interrupted log swept to `failed/<clean>.interrupted.<ts>.log`
+/// (design.md §3.6). Returns the adopted map. Dir and legacy flat
+/// entries are both handled.
+pub(crate) fn adopt_orphans(root: &Path) -> Result<HashMap<u32, RunHandle>> {
     let running = root.join("running");
     let pending = root.join("pending");
     let failed = root.join("failed");
+    let our_pid = std::process::id();
+    let mut adopted: HashMap<u32, RunHandle> = HashMap::new();
+    // One /proc sweep baselines `last_jiffies` for every adoptee: a
+    // seeded `cpu_seconds` must accrue only post-adoption deltas, not
+    // the group's whole lifetime a second time.
+    let mut baseline: Option<usage::Snapshot> = None;
     for base in queue::running_list(root)? {
+        let mut is_adopted = false;
         if let Some((pgid, start)) = exec::read_pid_file(root, "running", &base) {
-            // Two live-group proofs (the §3.9a gate, same as the
-            // signal path): a start_time-verified live leader, OR a
-            // dead leader while the group still holds members — a
-            // live pgid can't be recycled, so that remnant is
-            // provably this task's own (detached grandchildren from
-            // `cmd &` survive the leader). A live pid at pgid with a
-            // mismatched start_time is a recycled stranger's group
-            // and stays silent.
-            if exec::pgid_is_task_group(pgid, start) {
+            // Adoption gate (§3.6): the leader check proves the pid
+            // file's pgid still names this task's leader (a zombie
+            // leader counts — its stat is readable until reaped),
+            // `ppid == our pid` proves the child relation survived
+            // exec, and a pgid already claimed by an earlier adoptee
+            // is operator damage left for the requeue path.
+            if exec::pgid_is_task_leader(pgid, start) && exec::proc_ppid(pgid) == Some(our_pid) && !adopted.contains_key(&pgid) {
+                let dirs = exec::task_directives(&queue::task_file(root, "running", &base));
+                // Rebuild the wall-clock deadline from `spawned_at` so
+                // a restart cannot stretch the budget; a missing or
+                // unparseable sidecar (pre-sidecar entries, flat
+                // layout) re-times from adoption — the pre-adoption
+                // behavior (§3.13).
+                let spawned_at = std::fs::read_to_string(queue::piece_file(root, "running", &base, "spawned_at")).ok().and_then(|s| s.trim().parse::<u64>().ok());
+                let now = crate::proto::time::unix_now();
+                let (deadline, deadline_kind) = match dirs.timeout_s {
+                    Some(t) => match spawned_at {
+                        Some(sa) => {
+                            let end = sa.saturating_add(t);
+                            (Some(if end <= now { std::time::Instant::now() } else { std::time::Instant::now() + Duration::from_secs(end - now) }), "reconstructed")
+                        }
+                        None => (Some(std::time::Instant::now() + Duration::from_secs(t)), "retimed"),
+                    },
+                    None => (None, "none"),
+                };
+                let snap = baseline.get_or_insert_with(usage::Snapshot::take);
+                let last_jiffies = snap.baseline_jiffies(pgid);
+                adopted.insert(pgid, RunHandle { base: base.clone(), dirs, deadline, usage: usage::read_usage(root, "running", &base).unwrap_or_default(), last_jiffies, timed_out: None, kill_at: None, gone: false, unenforceable_warned: 0, exited: None });
+                dlog(root, "orphan_adopted", ev(json!({"task": base, "pgid": pgid, "deadline": deadline_kind})));
+                is_adopted = true;
+            } else if exec::pgid_is_task_group(pgid, start) {
+                // Live but not adoptable — a reparented crash orphan
+                // or a leader-reaped remnant. Two live-group proofs
+                // (the §3.9a gate, same as the signal path): a
+                // start_time-verified live leader, OR a dead leader
+                // while the group still holds members — a live pgid
+                // can't be recycled, so that remnant is provably this
+                // task's own. A live pid at pgid with a mismatched
+                // start_time is a recycled stranger's group and stays
+                // silent.
                 dlog(
                     root,
                     "orphan_live_pgid",
@@ -36,6 +80,9 @@ pub(crate) fn requeue_orphans(root: &Path) -> Result<()> {
                            "warning": "process group still alive; requeued anyway, rerun should be a no-op via the task guard"})),
                 );
             }
+        }
+        if is_adopted {
+            continue;
         }
         let mut clean = base.as_str();
         while let Some(rest) = clean.strip_prefix("0000_requeued_") {
@@ -161,7 +208,7 @@ pub(crate) fn requeue_orphans(root: &Path) -> Result<()> {
             }
         }
     }
-    Ok(())
+    Ok(adopted)
 }
 
 impl Daemon {
@@ -192,16 +239,16 @@ impl Daemon {
                         done.push((*pid, h.base.clone(), ex.rc, true));
                     }
                 }
-                None => match h.child.try_wait() {
-                    Ok(Some(status)) => {
+                None => match exec::poll_leader(*pid) {
+                    exec::LeaderPoll::Exited(rc) => {
                         if exec::pgid_alive(*pid) {
-                            h.exited = Some(Exited { rc: exec::status_rc(&status), deadline: now + grace });
+                            h.exited = Some(Exited { rc, deadline: now + grace });
                         } else {
-                            done.push((*pid, h.base.clone(), exec::status_rc(&status), false));
+                            done.push((*pid, h.base.clone(), rc, false));
                         }
                     }
-                    Ok(None) => {}
-                    Err(_) => {
+                    exec::LeaderPoll::Running => {}
+                    exec::LeaderPoll::Lost => {
                         if exec::pgid_alive(*pid) {
                             h.exited = Some(Exited { rc: 1, deadline: now + grace });
                         } else {
@@ -298,7 +345,7 @@ mod tests {
         std::fs::write(stage.join("task.sh"), "echo hi\n").unwrap();
         // plus an empty stage crashed before the .sh move
         std::fs::create_dir_all(root.join("pending/.tmp.claim.1234.0101_y")).unwrap();
-        requeue_orphans(&root).unwrap();
+        adopt_orphans(&root).unwrap();
         assert!(root.join("pending/0100_x/task.sh").is_file());
         assert_eq!(queue::pending_list(&root).unwrap(), vec!["0100_x".to_string()]);
         let leftovers: Vec<_> = std::fs::read_dir(root.join("pending")).unwrap().flatten().collect();
@@ -319,7 +366,7 @@ mod tests {
         let stage = root.join("pending/.tmp.claim.1234.0100_x");
         std::fs::create_dir_all(&stage).unwrap();
         std::fs::write(stage.join("task.sh"), "echo flat\n").unwrap();
-        requeue_orphans(&root).unwrap();
+        adopt_orphans(&root).unwrap();
         assert!(root.join("pending/0100_x.sh").is_file());
         assert!(root.join("pending/0100_x/task.sh").is_file());
         std::fs::remove_dir_all(&root).ok();
@@ -338,7 +385,7 @@ mod tests {
         std::fs::write(stage.join("task.sh"), "echo hi\n").unwrap();
         // A non-numeric `.tmp.*` name is not an enqueue stage — leave it.
         std::fs::create_dir_all(root.join("pending/.tmp.abc")).unwrap();
-        requeue_orphans(&root).unwrap();
+        adopt_orphans(&root).unwrap();
         assert!(!stage.exists(), "un-acked enqueue stage must be deleted, not recovered");
         assert!(root.join("pending/.tmp.abc").exists(), "non-enqueue .tmp.* litter is out of scope");
         assert!(queue::pending_list(&root).unwrap().is_empty());
@@ -369,7 +416,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         std::fs::write(entry.join("pid"), format!("{pgid}\n")).unwrap();
-        requeue_orphans(&root).unwrap();
+        adopt_orphans(&root).unwrap();
         let log = std::fs::read_to_string(root.join("daemon.log")).unwrap();
         assert!(log.contains("orphan_live_pgid"), "remnant group must warn: {log}");
         assert!(log.contains("\"leader_dead\":true"), "warning must flag the dead leader: {log}");

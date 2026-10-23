@@ -190,7 +190,7 @@ mod tests {
         // Serialize a real StatusReport (required fields carry no
         // serde defaults), then inject a field the type doesn't
         // model to prove `raw` passes it through.
-        let mut rep = serde_json::to_value(&StatusReport { protocol: wire::PROTOCOL_VERSION, daemon: crate::proto::wire::DaemonState { alive: true, pid: Some(7) }, ..Default::default() }).unwrap();
+        let mut rep = serde_json::to_value(&StatusReport { protocol: wire::PROTOCOL_VERSION, daemon: crate::proto::wire::DaemonState { alive: true, pid: Some(7), ..Default::default() }, ..Default::default() }).unwrap();
         rep["extra_remote_field"] = serde_json::json!([1]);
         let s = rep.to_string();
         let good = Fake { out: Box::leak(s.into_boxed_str()), flap: false, calls: Mutex::new(0) };

@@ -106,6 +106,40 @@ pub fn proc_pgrp_start(pid: u32) -> Option<(u32, u64)> {
     Some((f.get(2)?.parse().ok()?, f.get(19)?.parse().ok()?))
 }
 
+/// `/proc/<pid>/stat` → `ppid` (same parse; f[1] after the comm
+/// anchor). The §3.6 adoption gate uses it to tell handoff survivors
+/// — children keep their parent across `execve` — from crash orphans
+/// reparented to init, which must take the requeue path.
+pub fn proc_ppid(pid: u32) -> Option<u32> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = s.rsplit_once(')')?.1;
+    rest.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Tri-state leader reap via `waitpid(pgid, WNOHANG)`: works for
+/// spawned leaders and for §3.5a-adopted ones alike — the child
+/// relation survives `execve` — so one reaping path serves both.
+/// `Lost` is ECHILD-class errors (never our own child): callers map
+/// it to the old `try_wait` Err branch, rc 1.
+pub enum LeaderPoll {
+    Running,
+    Exited(i32),
+    Lost,
+}
+
+pub fn poll_leader(pid: u32) -> LeaderPoll {
+    let mut status: libc::c_int = 0;
+    let r = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
+    if r == 0 {
+        LeaderPoll::Running
+    } else if r == pid as i32 {
+        use std::os::unix::process::ExitStatusExt;
+        LeaderPoll::Exited(super::status_rc(&std::process::ExitStatus::from_raw(status)))
+    } else {
+        LeaderPoll::Lost
+    }
+}
+
 /// The pid file's pgid still names this task's leader: the leader pid
 /// is live, is its own process-group leader, and — when a start_time
 /// was recorded — is the same process the daemon spawned, not a

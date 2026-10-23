@@ -61,7 +61,37 @@ fn upgrade_local(a: &UpgradeArgs, release: &release::Release) -> Result<()> {
     } else {
         println!("upgraded {current} → {latest} ({target}) at {}", exe.display());
     }
+    handoff_local_daemons();
+    // The dispatcher has no pidfile, so its running image is
+    // undiscoverable — tell the operator rather than pretend. USR2
+    // re-execs it in place; a restart is equally safe (spool + dedup).
+    eprintln!("note: a running dispatcher keeps its old image — `kill -USR2 <dispatcher-pid>` re-execs it in place, or restart it");
     Ok(())
+}
+
+/// Hand off every live daemon registered on this box (§3.5a/§16):
+/// `restart` SIGUSR2s it and the image re-execs its own path — the
+/// stage-then-mv install already placed the new binary there. The
+/// per-daemon `daemon.ver` gate means a pre-handler image is named
+/// in the report, never killed by an unhandled signal. A daemon
+/// started from a DIFFERENT binary than the upgraded `current_exe`
+/// re-execs its own stale image — harmless but reported with its
+/// `daemon.bin` path.
+fn handoff_local_daemons() {
+    let dir = crate::client::shutdown::registry_dir();
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for ent in rd.flatten() {
+        let Ok(qroot) = std::fs::read_to_string(ent.path()).map(|s| PathBuf::from(s.trim().to_string())) else {
+            continue;
+        };
+        match crate::client::daemon::restart(&qroot) {
+            Ok(crate::client::daemon::Restart::HandedOff { pid, from_ver }) => println!("daemon at {} handed off (pid {pid}, was {from_ver})", qroot.display()),
+            Ok(crate::client::daemon::Restart::Started { pid }) => println!("daemon at {} was dead; started fresh (pid {pid})", qroot.display()),
+            Err(e) => eprintln!("daemon at {} not handed off: {e:#}", qroot.display()),
+        }
+    }
 }
 
 /// Box upgrade: the musl static asset (runs on every libc — the §15
@@ -103,20 +133,49 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Re
     } else {
         println!("{name}/{queue}: upgraded {curver} → {latest}");
     }
-    // Stage-then-mv replaced the binary FILE; a running daemon keeps
-    // its old in-memory image — `shunt start` on a live daemon is a
-    // no-op by design, so nothing else tells the operator. Restart
-    // is their call (STOP drains in-flight tasks, never kills them),
-    // but staleness must be loud or queue-semantics upgrades (new
-    // directives, reschedule) silently don't apply.
-    // Best-effort staleness hint: every failure below a parsed
-    // report (transport, conn-down, drift) is silently ignored —
-    // the upgrade already happened; this only advises the restart.
-    if let remote::StatusAnswer::Report { report, .. } = remote::remote_status(t.as_ref(), &resolved) {
-        if report.daemon.alive {
-            let pid = report.daemon.pid.map(|p| format!(" (pid {p})")).unwrap_or_default();
-            eprintln!("{name}/{queue}: daemon{pid} still runs the OLD binary image — `shunt queue stop {queue} -c {name}` drains and exits, then `shunt queue start {queue} -c {name}` brings the new one up");
+    // The wire `restart` SIGUSR2s the live daemon — it re-execs
+    // <qroot>/bin/shunt, exactly the path bootstrap installed over,
+    // so queue-semantics changes take effect WITHOUT draining or
+    // killing in-flight tasks (§3.5a). Verification is the daemon's
+    // own `daemon.ver` flipping to the target, not "signal sent": a
+    // pre-handler image refuses the op (the gate lives in daemon.ver
+    // on the box, so an old image is never USR2-killed), and a
+    // daemon started from another path re-execs its own stale image.
+    let stale = |extra: &str| {
+        let bin = match remote::remote_status(t.as_ref(), &resolved) {
+            remote::StatusAnswer::Report { report, .. } => report.daemon.bin.map(|b| format!(" (running image: {b})")),
+            _ => None,
         }
+        .unwrap_or_default();
+        eprintln!("{name}/{queue}: daemon not handed off{bin} — {extra}; run `shunt queue restart {queue} -c {name}` after fixing, or `queue stop`+`queue start`");
+    };
+    match remote::wire_call(t.as_ref(), &resolved, &["restart", "--json"], None) {
+        remote::WireCall::Reply(_) => {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            let mut flipped = false;
+            while std::time::Instant::now() < deadline {
+                if let remote::StatusAnswer::Report { report, .. } = remote::remote_status(t.as_ref(), &resolved) {
+                    if report.daemon.alive && report.daemon.ver.as_deref().and_then(release::parse_version).map(|(v, _, _)| v == latest).unwrap_or(false) {
+                        flipped = true;
+                        break;
+                    }
+                    // A dead-but-restarted daemon reports the new
+                    // version on the first poll; keep waiting only
+                    // while it is still on the old image.
+                    if !report.daemon.alive {
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            if flipped {
+                println!("{name}/{queue}: daemon handed off to {latest}");
+            } else {
+                stale("restart was sent but daemon.ver did not reach the target");
+            }
+        }
+        remote::WireCall::RemoteErr(e) => stale(&format!("restart refused: {e:#}")),
+        remote::WireCall::ConnDown(e) => stale(&format!("connection down: {e:#}")),
     }
     Ok(())
 }

@@ -65,7 +65,10 @@ fn alive_impl(root: &Path, evict_stale: bool, read_cmdline: impl Fn(u32) -> std:
                 // pidfile is owned by a live daemon (design.md §3.4).
                 let still = std::fs::read_to_string(&pidf).ok().and_then(|s| s.trim().parse::<u32>().ok()) == Some(pid);
                 if still {
-                    let _ = std::fs::remove_file(&pidf);
+                    // The §3.5a capability files die with the pid
+                    // they describe; leave them and a later `restart`
+                    // would gate on a dead daemon's version.
+                    super::drop_daemon_files(root);
                 }
             }
             Ok(None)
@@ -149,6 +152,37 @@ pub fn start(root: &Path) -> Result<u32> {
 pub fn stop(root: &Path) -> Result<()> {
     std::fs::write(root.join("STOP"), b"")?;
     Ok(())
+}
+
+/// Outcome of `restart`. `HandedOff` sent SIGUSR2 to a live,
+/// handoff-capable daemon; `Started` means no live daemon was found
+/// and a fresh one was spawned (already the new binary).
+pub enum Restart {
+    HandedOff { pid: u32, from_ver: String },
+    Started { pid: u32 },
+}
+
+/// Handoff-restart the daemon (§3.5a): a live daemon gets SIGUSR2 —
+/// it re-execs its own image in place, adopting in-flight tasks via
+/// the §3.6 ppid gate, so the queue is never unmanaged and no task
+/// is drained or killed. `daemon.ver` is the capability gate: an
+/// image that predates the handler would be KILLED by a bare USR2
+/// (default disposition), so its absence refuses rather than
+/// upgrades. A dead daemon falls through to `start`, which launches
+/// the new binary anyway.
+pub fn restart(root: &Path) -> Result<Restart> {
+    let Some(pid) = alive(root)? else {
+        return start(root).map(|pid| Restart::Started { pid });
+    };
+    let ver = std::fs::read_to_string(root.join("daemon.ver")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let Some(from_ver) = ver else {
+        anyhow::bail!("daemon (pid {pid}) predates handoff support — no daemon.ver, and SIGUSR2 would kill it; upgrade the binary with `shunt upgrade` and retry, or stop+start");
+    };
+    let rc = unsafe { libc::kill(pid as i32, libc::SIGUSR2) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("cannot SIGUSR2 daemon pid {pid}"));
+    }
+    Ok(Restart::HandedOff { pid, from_ver })
 }
 
 #[cfg(test)]

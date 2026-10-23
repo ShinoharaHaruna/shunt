@@ -28,8 +28,18 @@ mod timeouts;
 mod workers;
 
 pub use core::run;
-pub use lifecycle::{alive, check_alive, start, stop};
+pub use lifecycle::{alive, check_alive, restart, start, stop, Restart};
 pub use workers::resolve_workers;
+
+/// Remove the pidfile trio on every exit/eviction path (§3.4):
+/// `daemon.pid` is the liveness source, `daemon.ver`/`daemon.bin`
+/// the §3.5a handoff gate — a stopped daemon must not leave a
+/// capability marker that `restart` would gate on before liveness.
+pub(crate) fn drop_daemon_files(root: &Path) {
+    for f in ["daemon.pid", "daemon.ver", "daemon.bin"] {
+        let _ = std::fs::remove_file(root.join(f));
+    }
+}
 
 /// Event fields helper: json! object -> Map for dlog.
 pub(crate) fn ev(v: serde_json::Value) -> Map<String, serde_json::Value> {

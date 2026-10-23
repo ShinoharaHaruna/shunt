@@ -168,6 +168,15 @@ impl Snapshot {
         }
         u.samples += 1;
     }
+
+    /// Σ group jiffies as read this cycle, WITHOUT applying — the
+    /// adoption baseline (§3.6): a handoff-adopted entry seeds its
+    /// accumulator from the `usage` sidecar, so `cpu_seconds` must
+    /// accrue only post-adoption deltas, never the group's whole
+    /// lifetime a second time.
+    pub fn baseline_jiffies(&self, pgid: u32) -> u64 {
+        self.groups.get(&pgid).map(|g| g.1).unwrap_or(0)
+    }
 }
 
 /// Persist `usage` inside an entry dir (tmp+rename: a torn read

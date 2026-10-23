@@ -346,4 +346,6 @@ pub enum QueueAction {
     Start { name: String },
     /// Drain and stop one queue's daemon
     Stop { name: String },
+    /// Handoff-restart one queue's daemon (SIGUSR2 re-exec, §3.5a)
+    Restart { name: String },
 }

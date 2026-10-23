@@ -128,7 +128,7 @@ pub fn claim(root: &Path, name: &str) -> Result<bool> {
         // (blocking a sibling's idle-shutdown). The staging dir is
         // dot-prefixed, so listings never see it; a stage stranded
         // by kill -9 is recovered to a full pending/<name> dir by
-        // the startup sweep in requeue_orphans.
+        // the startup sweep in adopt_orphans.
         let src = pending.join(format!("{name}.sh"));
         if !src.exists() {
             return Ok(false);

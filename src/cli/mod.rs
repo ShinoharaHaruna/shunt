@@ -410,6 +410,30 @@ pub fn run(cli: Cli) -> Result<()> {
                 Err(e) => jfail(a.json, &format!("{e:#}")),
             }
         }
+        Command::Restart(a) => {
+            if rootless(&a.root) {
+                return print_subhelp("restart");
+            }
+            match local_root(&a.root).and_then(|root| crate::client::daemon::restart(&root)) {
+                Ok(crate::client::daemon::Restart::HandedOff { pid, from_ver }) => {
+                    if a.json {
+                        jprint(jobj(jfields(serde_json::json!({"pid": pid, "handed_off": true, "from_ver": from_ver}))));
+                    } else {
+                        println!("daemon (pid {pid}) re-execs in place — was {from_ver}; in-flight tasks keep running and are adopted by the new image");
+                    }
+                    Ok(())
+                }
+                Ok(crate::client::daemon::Restart::Started { pid }) => {
+                    if a.json {
+                        jprint(jobj(jfields(serde_json::json!({"pid": pid, "started": true}))));
+                    } else {
+                        println!("no live daemon — started fresh (pid {pid})");
+                    }
+                    Ok(())
+                }
+                Err(e) => jfail(a.json, &format!("{e:#}")),
+            }
+        }
         Command::Enqueue(a) => {
             if rootless(&a.root) {
                 return print_subhelp("enqueue");

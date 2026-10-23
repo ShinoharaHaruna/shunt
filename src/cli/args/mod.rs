@@ -80,6 +80,10 @@ pub enum Command {
     Start(RootArgs),
     /// Stop the daemon (client)
     Stop(RootArgs),
+    /// Handoff-restart the daemon: SIGUSR2 re-execs the current image
+    /// in place, adopting in-flight tasks — the §3.5a upgrade path
+    /// (client)
+    Restart(RootArgs),
     /// Install a task file (or stdin with `-`) into pending/ (client)
     #[command(arg_required_else_help = true)]
     Enqueue(EnqueueArgs),

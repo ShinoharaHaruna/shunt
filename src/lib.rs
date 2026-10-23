@@ -8,6 +8,7 @@
 pub mod cli;
 pub mod client;
 pub mod feedback;
+pub mod handoff;
 pub mod proto;
 pub mod server;
 

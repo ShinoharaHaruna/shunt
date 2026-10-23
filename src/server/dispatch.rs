@@ -263,11 +263,38 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
 /// propagate there. In the looping form a failed sweep (e.g. spool
 /// dir unreadable this poll) is logged and retried next cycle; the
 /// dispatcher must never exit on a transient fault.
+///
+/// SIGUSR2 (§3.5a/§16): re-exec this image at the next sweep
+/// boundary — the dispatcher's in-flight state is entirely in
+/// `spool/` plus box-side `# shunt:id=` dedup, so a mid-upgrade
+/// re-exec loses nothing.
 pub fn run(once: bool) -> Result<()> {
     let cfg = registry::load_server_config()?;
     let interval = cfg.poll_interval_s.unwrap_or(DEFAULT_POLL_S);
+    let reexec = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        use anyhow::Context;
+        let flag = std::sync::Arc::clone(&reexec);
+        let mut sigs = signal_hook::iterator::Signals::new([signal_hook::consts::SIGUSR2]).context("cannot install signal handlers")?;
+        std::thread::spawn(move || {
+            for _ in sigs.forever() {
+                flag.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+    }
+    crate::handoff::unblock_usr2();
+    if std::env::var_os(crate::handoff::HANDOFF_ENV).is_some() {
+        std::env::remove_var(crate::handoff::HANDOFF_ENV);
+        eprintln!("dispatch: re-exec'd via handoff");
+    }
+    let argv_rest: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let mut idx = 0u64;
     loop {
+        if reexec.swap(0, std::sync::atomic::Ordering::SeqCst) > 0 {
+            eprintln!("dispatch: SIGUSR2 — re-exec in place");
+            let Err(e) = crate::handoff::exec_self(&argv_rest);
+            eprintln!("dispatch: handoff failed: {e} — continuing on the old image");
+        }
         if once {
             sweep()?;
             return Ok(());

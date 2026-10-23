@@ -189,6 +189,12 @@ pub struct Resources {
 pub struct DaemonState {
     pub alive: bool,
     pub pid: Option<u32>,
+    /// Running image's version/bin path (§3.5a gate + upgrade
+    /// verification); absent on pre-handoff remotes.
+    #[serde(default)]
+    pub ver: Option<String>,
+    #[serde(default)]
+    pub bin: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

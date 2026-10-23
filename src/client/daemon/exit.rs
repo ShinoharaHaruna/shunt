@@ -25,6 +25,25 @@ pub(super) fn warn_orphaned_shutdown_flag(root: &Path) {
 }
 
 impl Daemon {
+    /// SIGUSR2 (§3.5a): re-exec this image in place — same pid,
+    /// `daemon.lock` held across exec, tracked tasks never signaled
+    /// and adopted by the new image via the §3.6 ppid gate. A
+    /// stage-then-mv binary swap is what makes this an upgrade:
+    /// `/proc/self/exe` reads ` (deleted)`, the stripped path names
+    /// the new binary. An exec failure logs loudly and keeps the old
+    /// image — never falls back to the TERM drain.
+    pub(super) fn handoff(&mut self) {
+        let exe = crate::handoff::self_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "<unresolved>".into());
+        dlog(&self.root, "daemon_handoff", ev(json!({"pid": std::process::id(), "exe": exe, "runpids": self.runpids.len()})));
+        let Err(e) = crate::handoff::exec_self(&self.argv_rest);
+        dlog(
+            &self.root,
+            "handoff_failed",
+            ev(json!({"exe": exe, "error": e.to_string(),
+               "warning": "still running the old image; verify the daemon's binary path exists"})),
+        );
+    }
+
     /// TERM/INT/HUP: TERM every tracked pgid, wait 2 s, KILL
     /// survivors, reap them into `failed/`, then exit 143
     /// (design.md §3.5). An armed `shutdown_on_idle` must not be
@@ -72,7 +91,7 @@ impl Daemon {
                 warn_orphaned_shutdown_flag(&self.root);
             } else {
                 dlog(&self.root, "signal_honors_shutdown", Map::new());
-                maybe_shutdown(&self.root, self.runpids.is_empty(), false, Some(&self.got_signal));
+                maybe_shutdown(&self.root, self.runpids.is_empty(), false, Some(&self.got_signal), None);
                 // §3.5: a countdown cancelled by new pending work
                 // returns here with the flag still armed — the exit
                 // must carry the same loud-orphan WARNING as the
@@ -80,7 +99,7 @@ impl Daemon {
                 warn_orphaned_shutdown_flag(&self.root);
             }
         }
-        let _ = std::fs::remove_file(self.root.join("daemon.pid"));
+        super::drop_daemon_files(&self.root);
         shutdown::deregister_qroot(&self.root);
         std::process::exit(143);
     }

@@ -6,19 +6,21 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Map};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Child;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::idle::maybe_shutdown;
 use super::lifecycle::alive;
-use super::reap::requeue_orphans;
+use super::reap::adopt_orphans;
 use super::{dlog, ev, poll_interval};
 use crate::client::{exec, queue, shutdown};
 
-const SIGNALS: [i32; 3] = [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT, signal_hook::consts::SIGHUP];
+/// TERM/INT/HUP drive the destructive drain; SIGUSR2 is the §3.5a
+/// handoff (re-exec, never a task signal).
+const TERM_SIGNALS: [i32; 3] = [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT, signal_hook::consts::SIGHUP];
 
 /// After the leader exits, finalize waits this long for the rest of
 /// the process group to drain before moving the entry anyway
@@ -35,13 +37,15 @@ pub(super) struct Exited {
     pub(super) deadline: std::time::Instant,
 }
 
-/// One in-flight task: the spawned leader plus its wall-clock budget
-/// bookkeeping. `deadline` is spawn-time + `# shunt:timeout_s=`;
+/// One in-flight task: the leader plus its wall-clock budget
+/// bookkeeping. `deadline` is spawn-time + `# shunt:timeout_s=` —
+/// reconstructed from `spawned_at` for §3.5a-adopted entries;
 /// `timed_out` is set once the budget is exceeded so reap can mark
 /// the finalize; `kill_at` is the TERM grace expiry for escalation.
+/// No `Child` is held: leaders are reaped by `waitpid` (§3.9), which
+/// serves spawned and adopted leaders identically.
 pub(super) struct RunHandle {
     pub(super) base: String,
-    pub(super) child: Child,
     /// Directives parsed from the task head at spawn — carries the
     /// wall-clock budget AND the reschedule budget (design.md §3.9)
     /// so neither is re-read from disk at reap.
@@ -78,6 +82,11 @@ pub(super) struct Daemon {
     pub(super) last_workers: Option<u32>,
     /// Count of TERM/INT/HUP seen; >0 means exit at the next boundary.
     pub(super) got_signal: Arc<AtomicUsize>,
+    /// Count of SIGUSR2 seen; >0 means handoff-reexec at the next
+    /// boundary (§3.5a).
+    pub(super) reexec: Arc<AtomicUsize>,
+    /// Original argv minus argv[0], preserved for the re-exec.
+    pub(super) argv_rest: Vec<OsString>,
 }
 
 impl Daemon {
@@ -108,15 +117,30 @@ pub fn run(root: &Path) -> Result<()> {
     // it means a live daemon (unlike .seq.lock there is nothing to
     // wait out). flock auto-releases on process death, so a crashed
     // daemon never wedges the next start.
-    let _lock = std::fs::OpenOptions::new().create(true).append(true).open(root.join("daemon.lock")).context("cannot open daemon.lock")?;
-    match fs2::FileExt::try_lock_exclusive(&_lock) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => anyhow::bail!("daemon already running (daemon.lock held)"),
-        Err(e) => return Err(e).context("flock daemon.lock failed"),
-    }
-    if let Some(pid) = alive(root)? {
-        anyhow::bail!("daemon already running (pid {pid})");
-    }
+    // A §3.5a re-exec arrives already holding daemon.lock AND owning
+    // daemon.pid — flock is per open-file-description, so a second
+    // open+lock would conflict with our own inherited fd, and the
+    // liveness check would find our own pid. The env marker PLUS a
+    // pidfile already naming us proves the handoff (a stray marker
+    // alone never bypasses the mutex); only then are both checks
+    // skipped. The inherited lock fd stays open and keeps the file
+    // locked for this image's whole life, untouched by the exec.
+    let pid_is_ours = std::fs::read_to_string(root.join("daemon.pid")).ok().and_then(|s| s.trim().parse::<u32>().ok()) == Some(std::process::id());
+    let handed_off = std::env::var_os(crate::handoff::HANDOFF_ENV).is_some() && pid_is_ours;
+    let _lock = if handed_off {
+        None
+    } else {
+        let lock = std::fs::OpenOptions::new().create(true).append(true).open(root.join("daemon.lock")).context("cannot open daemon.lock")?;
+        match fs2::FileExt::try_lock_exclusive(&lock) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => anyhow::bail!("daemon already running (daemon.lock held)"),
+            Err(e) => return Err(e).context("flock daemon.lock failed"),
+        }
+        if let Some(pid) = alive(root)? {
+            anyhow::bail!("daemon already running (pid {pid})");
+        }
+        Some(lock)
+    };
     std::fs::write(root.join("daemon.pid"), format!("{}\n", std::process::id()))?;
     if let Err(error) = shutdown::try_register_qroot(root) {
         shutdown::registration_warning(root, &error);
@@ -127,41 +151,71 @@ pub fn run(root: &Path) -> Result<()> {
     // The registry entry is removed on every exit path (§3.11): an
     // error anywhere after registration must not leave the pidfile
     // and box-level entry behind for lazy sweeping.
-    let result = run_registered(root);
+    let argv_rest: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let result = run_registered(root, argv_rest, handed_off);
     if result.is_err() {
-        let _ = std::fs::remove_file(root.join("daemon.pid"));
+        super::drop_daemon_files(root);
         shutdown::deregister_qroot(root);
     }
     result
 }
 
 /// Post-registration half of `run()`: signal handlers, orphan
-/// requeue, and the poll loop. Kept separate so `run()` can strip
+/// adoption, and the poll loop. Kept separate so `run()` can strip
 /// the pidfile/registry entry on any early error.
-fn run_registered(root: &Path) -> Result<()> {
+fn run_registered(root: &Path, argv_rest: Vec<OsString>, handed_off: bool) -> Result<()> {
     let got_signal = Arc::new(AtomicUsize::new(0));
+    let reexec = Arc::new(AtomicUsize::new(0));
     {
         let count = Arc::clone(&got_signal);
-        let mut sigs = signal_hook::iterator::Signals::new(SIGNALS).context("cannot install signal handlers")?;
+        let rexec = Arc::clone(&reexec);
+        let mut sigs = signal_hook::iterator::Signals::new(TERM_SIGNALS.iter().copied().chain(std::iter::once(signal_hook::consts::SIGUSR2)).collect::<Vec<_>>()).context("cannot install signal handlers")?;
         std::thread::spawn(move || {
-            for _ in sigs.forever() {
-                count.fetch_add(1, Ordering::SeqCst);
+            for sig in sigs.forever() {
+                if sig == signal_hook::consts::SIGUSR2 {
+                    rexec.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
             }
         });
     }
+    // A handoff-carried USR2 was blocked across the exec so it pended
+    // rather than default-killing the fresh image (§3.5a): now that
+    // the handler exists, release it — the pending delivery re-fires
+    // one convergent exec. On a cold boot this unblocks nothing.
+    crate::handoff::unblock_usr2();
 
     let root = root.to_path_buf();
-    dlog(&root, "daemon_start", ev(json!({"pid": std::process::id()})));
-    requeue_orphans(&root)?;
+    std::env::remove_var(crate::handoff::HANDOFF_ENV);
+    dlog(&root, "daemon_start", ev(json!({"pid": std::process::id(), "handoff": handed_off})));
+    // The handoff capability pair (§3.4): `restart` gates the USR2 on
+    // daemon.ver, and daemon.bin records which path this image came
+    // from for upgrade verification. A write failure silently
+    // disables restart — make it loud.
+    if let Err(e) = std::fs::write(root.join("daemon.ver"), format!("{}\n", env!("SHUNT_VERSION"))) {
+        dlog(&root, "daemon_ver_write_failed", ev(json!({"error": e.to_string(), "warning": "restart will refuse this daemon (no daemon.ver)"})));
+    }
+    let bin = crate::handoff::self_exe().or_else(|_| std::env::current_exe()).map(|p| p.display().to_string()).unwrap_or_else(|_| "<unresolved>".into());
+    let _ = std::fs::write(root.join("daemon.bin"), format!("{bin}\n"));
+    let adopted = adopt_orphans(&root)?;
 
     // Seed last-known from the previous daemon's persisted value:
     // a garbage `workers` file falls back to it rather than default,
     // matching what a concurrent `status` reports (design.md §3.8).
-    let mut d = Daemon { root: root.clone(), runpids: HashMap::new(), last_workers: super::workers::read_last(&root), got_signal };
+    let mut d = Daemon { root: root.clone(), runpids: adopted, last_workers: super::workers::read_last(&root), got_signal, reexec, argv_rest };
     let poll = poll_interval();
     loop {
         if d.got_signal.load(Ordering::SeqCst) > 0 {
             d.on_term();
+        }
+        // SIGUSR2 (§3.5a): re-exec this image against the same path —
+        // a stage-then-mv binary swap picks up the new build with no
+        // unmanaged window (same pid, daemon.lock held across exec).
+        // TERM outranks it: an operator killing the daemon must not
+        // get an immortal re-exec instead.
+        if d.reexec.swap(0, Ordering::SeqCst) > 0 {
+            d.handoff();
         }
         // reap before enforce: a leader that just exited must be
         // marked `exited` before the deadline check runs, or a
@@ -182,9 +236,9 @@ fn run_registered(root: &Path) -> Result<()> {
                 // and a new pending entry still can.
                 if d.root.join("shutdown_on_idle").exists() && !shutdown::pending_nonempty(&d.root) {
                     dlog(&d.root, "stop_drain_honors_shutdown", Map::new());
-                    maybe_shutdown(&d.root, true, true, Some(&d.got_signal));
+                    maybe_shutdown(&d.root, true, true, Some(&d.got_signal), Some(&d.reexec));
                 }
-                let _ = std::fs::remove_file(d.root.join("daemon.pid"));
+                super::drop_daemon_files(&d.root);
                 shutdown::deregister_qroot(&d.root);
                 return Ok(());
             }
@@ -200,11 +254,11 @@ fn run_registered(root: &Path) -> Result<()> {
             // forever on unrecoverable litter) or an operator's
             // manual mv. Firing poweroff past a ghost is the
             // recoverable direction: the next daemon's
-            // requeue_orphans puts it back in pending/. A peer
+            // adopt_orphans puts it back in pending/. A peer
             // daemon cannot make that distinction from outside, so
             // its gate stays fail-closed on the listing.
             if d.root.join("shutdown_on_idle").exists() && d.runpids.is_empty() && !shutdown::pending_nonempty(&d.root) {
-                maybe_shutdown(&d.root, true, false, Some(&d.got_signal));
+                maybe_shutdown(&d.root, true, false, Some(&d.got_signal), Some(&d.reexec));
             } else if d.root.join("exit_on_idle").exists() && d.runpids.is_empty() && !shutdown::pending_nonempty(&d.root) {
                 // Residency preference (§3.11a): the queue is drained
                 // and the owner asked for no resident daemon — leave
@@ -213,7 +267,7 @@ fn run_registered(root: &Path) -> Result<()> {
                 // is no reason to stay, and `status`/dispatch
                 // auto-heal revives it on the next submit.
                 dlog(&d.root, "daemon_exit_idle", Map::new());
-                let _ = std::fs::remove_file(d.root.join("daemon.pid"));
+                super::drop_daemon_files(&d.root);
                 shutdown::deregister_qroot(&d.root);
                 return Ok(());
             }

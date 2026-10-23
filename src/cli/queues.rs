@@ -50,6 +50,7 @@ fn run(c: &QueueCmd) -> Result<()> {
         }
         QueueAction::Start { name } => return remote_queue(&client_name, Some(name), &["start", "--json"], None, true),
         QueueAction::Stop { name } => return remote_queue(&client_name, Some(name), &["stop", "--json"], None, true),
+        QueueAction::Restart { name } => return remote_queue(&client_name, Some(name), &["restart", "--json"], None, true),
         QueueAction::Rm { name, purge } => {
             let (_, t) = transport::client_transport(&client_name)?;
             crate::server::queue_ops::remove(t.as_ref(), &client_name, name, *purge)?;

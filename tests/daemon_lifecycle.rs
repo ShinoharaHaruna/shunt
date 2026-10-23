@@ -96,6 +96,154 @@ fn lingering_pgid_grace_expiry_warns_and_finalizes() {
 }
 
 #[test]
+fn handoff_reexec_adopts_task_and_keeps_pid() {
+    // §3.5a: SIGUSR2 re-execs the image — same pid, daemon.lock held,
+    // the running task is ADOPTED (ppid gate: still our child across
+    // exec) and finishes under the new image with its real rc.
+    let q = Q::new("handoff");
+    let m1 = q.root.join("handoff-ran");
+    q.enqueue_script("slow", &format!("#!/usr/bin/env bash\nsleep 1\ntouch {}\n", m1.display()));
+    let mut d = q.daemon();
+    wait_until(|| q.tasks("running").len() == 1, 10, "task dispatched");
+    wait_until(|| q.root.join("daemon.ver").exists(), 10, "daemon.ver written");
+    let pid = q.daemon_pid().expect("daemon pid");
+    let running_pid = std::fs::read_to_string(q.root.join("running").read_dir().unwrap().next().unwrap().unwrap().path().join("pid")).unwrap();
+    let pgid: i32 = running_pid.split_whitespace().next().unwrap().parse().unwrap();
+
+    Command::new("kill").args(["-USR2", &pid.to_string()]).status().unwrap();
+
+    wait_until(|| q.dlog().contains("daemon_handoff"), 10, "handoff logged");
+    wait_until(|| q.dlog().contains("orphan_adopted"), 10, "running task adopted");
+    assert_eq!(q.daemon_pid(), Some(pid), "same pid across execve");
+    assert!(q.dlog().contains("\"handoff\":true"), "second daemon_start carries the marker: {}", q.dlog());
+    // The task was never signaled: it finishes on its own schedule
+    // and lands in done/ with its real rc via waitpid.
+    wait_until(|| q.exits("done").iter().any(|(n, rc)| n.contains("slow") && *rc == 0), 15, "adopted task finalized rc 0");
+    assert!(m1.exists());
+    // The adopted pgid is a zombie-or-gone group member now; the
+    // leader must have died only by exiting, never by signal kill.
+    assert!(!q.dlog().contains("finalize_lingering_pgid") || q.exits("done").iter().any(|(n, _)| n.contains("slow")));
+    let _ = pgid;
+    q.stop();
+    let _ = d.wait();
+}
+
+#[test]
+fn restart_cli_hands_off_and_gates_on_daemon_ver() {
+    let q = Q::new("restartcli");
+    q.enqueue_script("s", &sleep_task());
+    let mut d = q.daemon();
+    wait_until(|| q.tasks("running").len() == 1, 10, "task running");
+    wait_until(|| q.root.join("daemon.ver").exists(), 10, "daemon.ver written");
+    let pid = q.daemon_pid().unwrap();
+
+    // A daemon without daemon.ver predates the handler: SIGUSR2
+    // would kill it, so restart refuses rather than upgrades.
+    std::fs::remove_file(q.root.join("daemon.ver")).unwrap();
+    let err = q.run_err(&["restart"]);
+    assert!(err.contains("predates handoff"), "{err}");
+    assert_eq!(q.daemon_pid(), Some(pid), "daemon untouched by refused restart");
+
+    // Restore the capability marker: restart now SIGUSR2s it and the
+    // new image adopts the in-flight task.
+    std::fs::write(q.root.join("daemon.ver"), "0.0.0-test\n").unwrap();
+    let out = q.run_ok(&["restart", "--json"]);
+    assert!(out.contains("\"handed_off\":true"), "{out}");
+    wait_until(|| q.dlog().contains("orphan_adopted"), 10, "task adopted post-restart");
+    assert_eq!(q.daemon_pid(), Some(pid));
+    q.stop();
+    let _ = d.wait();
+}
+
+#[test]
+fn handoff_reconstructs_timeout_deadline() {
+    // The budget counts from the ORIGINAL spawn (spawned_at), not
+    // from the handoff: a USR2 mid-budget must not re-time it.
+    let q = Q::new("handoffto");
+    q.enqueue_script("budgeted", "#!/usr/bin/env bash\n# shunt:timeout_s=2\nsleep 30\n");
+    let mut d = q.daemon();
+    wait_until(|| q.tasks("running").len() == 1, 10, "task dispatched");
+    std::thread::sleep(Duration::from_millis(300));
+    let pid = q.daemon_pid().unwrap();
+    Command::new("kill").args(["-USR2", &pid.to_string()]).status().unwrap();
+    wait_until(|| q.dlog().contains("orphan_adopted"), 10, "adopted");
+    assert!(q.dlog().contains("\"deadline\":\"reconstructed\""), "{}", q.dlog());
+    // timeout_s=2 counted from spawn: the budget must still fire even
+    // though the image restarted — failed/ carries the timeout marker.
+    wait_until(|| !q.exits("failed").is_empty(), 15, "timeout kill finalizes");
+    let entry = q.tasks("failed").into_iter().next().expect("failed entry");
+    assert!(q.root.join("failed").join(&entry).join("timeout").exists(), "timeout marker expected");
+    q.stop();
+    let _ = d.wait();
+}
+
+#[test]
+fn restart_dead_daemon_starts_fresh() {
+    let q = Q::new("restartdead");
+    let out = q.run_ok(&["restart", "--json"]);
+    assert!(out.contains("\"started\":true"), "{out}");
+    wait_until(|| q.daemon_pid().is_some(), 15, "daemon started via restart");
+    q.stop();
+}
+
+#[test]
+fn handoff_picks_up_swapped_binary() {
+    // The real upgrade shape: the binary FILE is replaced mid-run,
+    // so /proc/self/exe reads `<path> (deleted)` — the stripped path
+    // must resolve to the new inode or execve fails ENOENT (§3.5a).
+    let q = Q::new("handoffswap");
+    let dir = q.root.join("bin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let swapped = dir.join("shunt");
+    std::fs::copy(common::bin(), &swapped).unwrap();
+    q.enqueue_script("s", &sleep_task());
+    let mut c = Command::new(&swapped);
+    let mut d = c.args(["daemon", "--root"]).arg(&q.root).env("POLL", "0.1").env("SHUNT_STATE", q.root.join("boxstate")).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().expect("spawn daemon");
+    wait_until(|| q.tasks("running").len() == 1, 10, "task dispatched");
+    let pid = q.daemon_pid().unwrap();
+    assert_eq!(std::fs::read_to_string(q.root.join("daemon.bin")).unwrap().trim(), swapped.display().to_string());
+    // Stage-then-mv: replace the binary file while the daemon runs.
+    std::fs::copy(common::bin(), dir.join("shunt.new")).unwrap();
+    std::fs::rename(dir.join("shunt.new"), &swapped).unwrap();
+
+    Command::new("kill").args(["-USR2", &pid.to_string()]).status().unwrap();
+
+    // Without the ` (deleted)` strip the exec target wouldn't exist;
+    // adoption proves the new inode was actually exec'd.
+    wait_until(|| q.dlog().contains("orphan_adopted"), 10, "re-exec onto the swapped binary");
+    assert_eq!(q.daemon_pid(), Some(pid));
+    assert!(!q.dlog().contains("handoff_failed"), "{}", q.dlog());
+    q.stop();
+    let _ = d.wait();
+}
+
+#[test]
+fn handoff_missing_binary_keeps_old_image() {
+    // Exec failure must never fall back to killing tasks: the old
+    // image logs handoff_failed and keeps managing the queue (§3.5a).
+    let q = Q::new("handoffgone");
+    let dir = q.root.join("bin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let swapped = dir.join("shunt");
+    std::fs::copy(common::bin(), &swapped).unwrap();
+    q.enqueue_script("s", &sleep_task());
+    let mut c = Command::new(&swapped);
+    let mut d = c.args(["daemon", "--root"]).arg(&q.root).env("POLL", "0.1").env("SHUNT_STATE", q.root.join("boxstate")).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().expect("spawn daemon");
+    wait_until(|| q.tasks("running").len() == 1, 10, "task dispatched");
+    let pid = q.daemon_pid().unwrap();
+    std::fs::remove_file(&swapped).unwrap(); // exec target gone
+
+    Command::new("kill").args(["-USR2", &pid.to_string()]).status().unwrap();
+
+    wait_until(|| q.dlog().contains("handoff_failed"), 10, "exec failure logged");
+    assert!(q.dlog().contains("still running the old image"), "{}", q.dlog());
+    assert_eq!(q.daemon_pid(), Some(pid), "old image still manages the queue");
+    assert_eq!(q.tasks("running").len(), 1, "task never killed");
+    q.stop();
+    let _ = d.wait();
+}
+
+#[test]
 fn orphan_live_pgid_warns_and_requeues() {
     let q = Q::new("livepgid");
     // craft a running/ entry by hand: dead-daemon leftover whose pgid
@@ -174,7 +322,7 @@ fn unclaimable_pending_entry_quarantined_not_spun() {
     let ran = q.root.join("next-ran");
     let mut d = q.daemon();
     // Wait for the startup sweep to finish, then create the
-    // collision — requeue_orphans only runs at daemon start.
+    // collision — adopt_orphans only runs at daemon start.
     wait_until(|| q.dlog().contains("workers_now"), 10, "daemon startup done");
     std::fs::create_dir_all(q.root.join("running/0050_stuck")).unwrap();
     std::fs::write(q.root.join("running/0050_stuck/task.sh"), sleep_task()).unwrap();

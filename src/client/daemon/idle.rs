@@ -20,8 +20,12 @@ use crate::client::shutdown;
 /// ends it early so the daemon returns to the poll loop and lets the
 /// signal path run promptly (a second TERM during signal-path honoring
 /// still kills the daemon; a TERM during an idle countdown re-enters
-/// honoring through §3.5).
-pub(crate) fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bool, abort_at: Option<&Arc<AtomicUsize>>) {
+/// honoring through §3.5). `handoff_at` is the SIGUSR2 counter — it
+/// breaks the countdown the same way so the loop-top handoff can run
+/// (§3.5a: the new image re-arms the countdown from full; the arm is
+/// on disk, the countdown in-memory). The TERM-exit path passes
+/// `None`: that daemon is committed to dying either way.
+pub(crate) fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bool, abort_at: Option<&Arc<AtomicUsize>>, handoff_at: Option<&Arc<AtomicUsize>>) {
     let flag = root.join("shutdown_on_idle");
     // running/ is never re-checked during the countdown — the
     // entry-time bool is the only running check, and no dispatch
@@ -37,6 +41,7 @@ pub(crate) fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bo
     }
     let grace = shutdown::grace(root);
     let base = abort_at.map(|c| c.load(Ordering::SeqCst));
+    let hbase = handoff_at.map(|c| c.load(Ordering::SeqCst));
     // No eprintln twin of this event: `shunt daemon`'s stderr IS
     // daemon.log (§3.1 strict JSONL), and `shunt shutdown on`
     // already tells the arming user on its own stdout.
@@ -46,6 +51,12 @@ pub(crate) fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bo
         if let (Some(count), Some(base)) = (abort_at, base) {
             if count.load(Ordering::SeqCst) > base {
                 dlog(root, "idle_shutdown_cancelled", ev(json!({"why": "signal during honoring countdown"})));
+                return;
+            }
+        }
+        if let (Some(count), Some(base)) = (handoff_at, hbase) {
+            if count.load(Ordering::SeqCst) > base {
+                dlog(root, "idle_shutdown_cancelled", ev(json!({"why": "SIGUSR2 handoff; new image re-arms"})));
                 return;
             }
         }
@@ -103,7 +114,7 @@ pub(crate) fn maybe_shutdown(root: &Path, running_empty: bool, stop_consumed: bo
         // poll loop simply re-arms the countdown next cycle.
         match Command::new("sh").arg("-c").arg(&cmd).spawn() {
             Ok(_) => {
-                let _ = std::fs::remove_file(root.join("daemon.pid"));
+                super::drop_daemon_files(root);
                 shutdown::deregister_qroot(root);
                 std::process::exit(0);
             }
@@ -128,7 +139,7 @@ mod tests {
         std::fs::create_dir_all(root.join("pending")).unwrap();
         std::fs::write(root.join("shutdown_on_idle"), b"").unwrap();
         let t0 = std::time::Instant::now();
-        super::maybe_shutdown(&root, false, false, None);
+        super::maybe_shutdown(&root, false, false, None, None);
         assert!(t0.elapsed() < std::time::Duration::from_secs(5), "countdown slept despite live running tasks");
         let log = std::fs::read_to_string(root.join("daemon.log")).unwrap();
         assert!(log.contains("idle_shutdown_aborted"), "early bail must be logged");
