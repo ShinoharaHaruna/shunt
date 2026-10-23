@@ -12,6 +12,7 @@ Mental model:
 - The wire is `ssh <box> 'shunt <cmd> --json --root <qroot>'`; the registry's `qroot` is authoritative. No ports, no server-side daemon besides the dispatcher, no client process besides `shuntd`.
 - **Client = box, queue = named subresource.** One client row is one managed instance and one SSH identity (endpoint, key, mux, tunnel, billing, facts). Under it, named queues (`[queues.<name>]` in the row) each own an independent qroot, sequence space, worker pool, daemon, env_setup/shell, and binary. Old flat rows keep working as a literal queue named `default`.
 - `localhost` is a peer client using the local transport (execs the `shunt` binary directly — no ssh, no key). Its row `clients/localhost.toml` is written on first use (default queue `~/.config/shunt/queue/`); edit it like any client row — `local_bin`/`timeout_s` tune the loopback transport. `shunt client rm localhost` resets the row to factory defaults (the name is reserved); to actually opt out, write `disabled = true` into the row. Use it for dry runs, integration smoke, and dev-loop tasks on the dev machine itself. `shunt client add <name> --local` creates additional loopback queues.
+- **Operate through the CLI, not the files.** Read state via `status --json` / `logs` / `spool ls` / `client show` / `queue ls` / `room read`; change it via `client add|update|env|rename|rm`, `queue …`, `project add|bind`, `submit`, `cancel`, `prio`, `workers`, `shutdown`. Commands carry side effects a hand-edit misses (mux socket, known_hosts, conn-fail streak, spool refs, `.shunt-owner`, tunnel env). Hand-edit only row fields with no setter (`expire`, `env_setup`, `billing`, … — the seeded-row edit after `client add` is exactly this case), and never write machine-owned state at all: `<qroot>` queue tracks, `spool/`, `known_hosts`, `cm/*.sock`, the daemon registry, room ledgers.
 - Execution is at-least-once. Tasks must guard on the artifact they produce so reruns are no-ops.
 - The box powers itself off when the queue drains and `shutdown_on_idle` is armed. Powering on is a human click in the vendor console; shunt never powers a box on.
 - Submitting while the box is off is normal: tasks wait in the server-side spool until the dispatcher can deliver.
@@ -253,6 +254,7 @@ The default goal when scheduling on shunt is the Pareto frontier between resourc
 
 ## Safety rules
 
+- Prefer `shunt` commands over reading or writing shunt's files directly (see the mental-model rule); the only sanctioned hand-edit is a client row field that has no setter.
 - Never signal anything by name or pgrep. Only the pgids recorded in `running/*.pid` belong to the queue; `shunt kill` is the only way to signal a task. Other jobs on the box are not yours.
 - Never let a test reach real `/usr/bin/shutdown`. Tests redirect the command via the `shutdown_cmd` file or `$SHUTDOWN_CMD` env, and never arm `shutdown on` against a box you are not willing to power off.
 - Every daemon liveness check is pidfile + `/proc/<pid>/cmdline` match.
