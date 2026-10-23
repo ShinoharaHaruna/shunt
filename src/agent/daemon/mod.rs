@@ -35,7 +35,7 @@ pub(crate) fn ev(v: serde_json::Value) -> Map<String, serde_json::Value> {
 /// file starts (design.md §3.1).
 pub(crate) fn dlog(root: &Path, event: &str, extra: Map<String, serde_json::Value>) {
     let mut obj = Map::new();
-    obj.insert("ts".into(), json!(crate::agent::queue::iso8601_now()));
+    obj.insert("ts".into(), json!(crate::proto::time::rfc3339_offset_now()));
     obj.insert("event".into(), json!(event));
     obj.extend(extra);
     let path = root.join("daemon.log");

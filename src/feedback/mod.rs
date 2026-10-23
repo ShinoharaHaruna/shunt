@@ -143,7 +143,7 @@ pub fn ls(json: bool) -> Result<()> {
         if json {
             println!("{}", serde_json::json!({"id": id, "kind": art.kind, "title": art.title, "delivered": art.delivered_at.is_some(), "url": art.issue_url, "attempts": art.attempts}));
         } else {
-            println!("{}  {}  {:<22} {}", crate::server::spool::iso_utc(art.created_at), art.kind, state, art.title);
+            println!("{}  {}  {:<22} {}", crate::proto::time::rfc3339_z(art.created_at), art.kind, state, art.title);
         }
     }
     Ok(())
@@ -236,5 +236,5 @@ fn max_per_hour() -> u64 {
 }
 
 pub(crate) fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+    crate::proto::time::unix_now()
 }

@@ -351,7 +351,7 @@ impl Daemon {
                 Vec::new()
             }
         };
-        let now = queue::unix_now();
+        let now = crate::proto::time::unix_now();
         for next in candidates {
             if self.runpids.len() >= workers as usize {
                 break;
@@ -699,11 +699,11 @@ mod tests {
         std::fs::write(entry.join("task.sh"), "#!/usr/bin/env bash\nexec true\n").unwrap();
         let mut d = super::Daemon { root: root.clone(), runpids: Default::default(), last_workers: None, got_signal: Default::default() };
         // Not yet due: entry stays pending, nothing spawns.
-        std::fs::write(entry.join("retry_after"), format!("{}\n", crate::agent::queue::unix_now() + 3600)).unwrap();
+        std::fs::write(entry.join("retry_after"), format!("{}\n", crate::proto::time::unix_now() + 3600)).unwrap();
         d.dispatch();
         assert!(d.runpids.is_empty() && entry.is_dir(), "not-due entry must wait in pending/");
         // Due now: claimed and the marker cleared.
-        std::fs::write(entry.join("retry_after"), format!("{}\n", crate::agent::queue::unix_now() - 1)).unwrap();
+        std::fs::write(entry.join("retry_after"), format!("{}\n", crate::proto::time::unix_now() - 1)).unwrap();
         d.dispatch();
         assert_eq!(d.runpids.len(), 1, "due entry must claim");
         assert!(!root.join("running/0100_t/retry_after").exists(), "retry_after must be cleared on claim");

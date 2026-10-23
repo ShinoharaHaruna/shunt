@@ -3,4 +3,5 @@
 pub mod libc;
 pub mod proc;
 pub mod task;
+pub mod time;
 pub mod wire;

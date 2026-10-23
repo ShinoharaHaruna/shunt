@@ -19,7 +19,6 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// One ledger entry: what a spool id became on the box, and — once
 /// observed — how it ended.
@@ -79,8 +78,7 @@ fn events_path() -> Result<PathBuf> {
 }
 
 fn now_iso() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    crate::server::spool::iso_utc(secs)
+    crate::proto::time::rfc3339_z_now()
 }
 
 /// Append one event line to `events.jsonl`. A single `write_all`

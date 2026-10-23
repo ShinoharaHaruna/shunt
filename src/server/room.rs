@@ -8,12 +8,12 @@
 //! `.seq.lock`; `readers/<label>.json` is each identity's
 //! high-water mark.
 
-use crate::agent::queue::{seq_lock, unix_now};
+use crate::agent::queue::seq_lock;
 use crate::proto::task::sanitize_slug;
+use crate::proto::time::rfc3339_z_now;
 use crate::server::fsutil::{atomic_write, private_dir, tmp_sibling, write_private};
 use crate::server::registry::names::{self, Resolution};
 use crate::server::registry::{self, shunt_home, valid_name};
-use crate::server::spool::iso_utc;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -432,7 +432,7 @@ pub fn create(name: &str, members: &[String], clients: &[String]) -> Result<()> 
     initialize_room(&dir, |dir| {
         private_dir(&dir.join("msgs"))?;
         private_dir(&dir.join("readers"))?;
-        save_meta(dir, &Meta { created_at: iso_utc(unix_now()), members: ms.clone(), clients: cs.clone(), decision: None })
+        save_meta(dir, &Meta { created_at: rfc3339_z_now(), members: ms.clone(), clients: cs.clone(), decision: None })
     })?;
     // Membership is declared data, not gated — but a member that is
     // not a registered project is usually a typo, so say so (the
@@ -465,7 +465,7 @@ pub fn say(room: &str, label: &str, body: &str) -> Result<(u32, bool)> {
     let meta = load_meta(&dir)?;
     let member = on_roster(&meta, label);
     warn_non_member(&name, &meta, label, "posting anyway, recorded member:false");
-    let msg = Msg { author: label.to_string(), ts: iso_utc(unix_now()), body_md: body.to_string(), member };
+    let msg = Msg { author: label.to_string(), ts: rfc3339_z_now(), body_md: body.to_string(), member };
     let n = {
         // Mint + install + archive in one hold (the §3.3
         // critical-section shape): concurrent says serialize, so no
@@ -534,7 +534,7 @@ pub fn decide(room: &str, label: &str, note: &str) -> Result<Decision> {
     let (name, dir) = resolve(room)?;
     let mut meta = load_meta(&dir)?;
     warn_non_member(&name, &meta, label, "recording the decision anyway");
-    meta.decision = Some(Decision { ts: iso_utc(unix_now()), author: label.to_string(), note: note.to_string() });
+    meta.decision = Some(Decision { ts: rfc3339_z_now(), author: label.to_string(), note: note.to_string() });
     // Whole-field overwrite + atomic rename: a concurrent decide
     // degrades to last-writer-wins, which is the spec's "latest
     // wins" — no lock needed.

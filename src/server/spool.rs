@@ -3,12 +3,12 @@
 //! submission survives while the box is powered off.
 
 use crate::proto::task::{sanitize_slug, SpoolEntry, TaskFlags, TaskMeta};
+use crate::proto::time::{rfc3339_z_now, unix_now};
 use crate::server::registry::{self, shunt_home};
 use crate::server::transport::shell_quote;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn spool_dir() -> Result<PathBuf> {
     Ok(shunt_home()?.join("spool"))
@@ -142,29 +142,6 @@ fn merge_file_directives(body: &str, meta: &TaskMeta) -> String {
     out
 }
 
-fn now_unix() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
-}
-
-/// Unix seconds → `YYYY-MM-DDTHH:MM:SSZ` (UTC, civil-from-days).
-pub fn iso_utc(secs: u64) -> String {
-    let days = secs / 86400;
-    let rem = secs % 86400;
-    let (h, m, s) = (rem / 3600, rem % 3600 / 60, rem % 60);
-    // Howard Hinnant's civil_from_days.
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if mo <= 2 { y + 1 } else { y };
-    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
-}
-
 /// New server-side task id: `<unix>-<pidseq>`, deduped against the
 /// spool dir. `pidseq` packs pid<<16 | per-process seq so two
 /// same-second submits still differ in the 8-char tail `submit`
@@ -174,7 +151,7 @@ fn new_task_id(dir: &std::path::Path) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let tag = ((std::process::id() as u64) << 16) | (SEQ.fetch_add(1, Ordering::Relaxed) & 0xffff);
-    let base = format!("{:x}-{:x}", now_unix(), tag);
+    let base = format!("{:x}-{:x}", unix_now(), tag);
     for i in 0..1000 {
         let id = if i == 0 { base.clone() } else { format!("{base}-{i}") };
         if !dir.join(format!("{id}.json")).exists() {
@@ -271,7 +248,7 @@ pub fn submit_to(client_name: &str, queue: Option<&str>, project: Option<&str>, 
         eprintln!("submit: WARNING: '{}' carries no guard; at-least-once requeue will run it twice (lost ack, orphan requeue). Pass --guard <path> unless the task is naturally idempotent.", meta.slug);
     }
 
-    let entry = SpoolEntry { id: id.clone(), project: project.unwrap_or_default(), client: client.name.clone(), queue: target.name, qroot: Some(target.client.qroot), meta, submitted_at: iso_utc(now_unix()) };
+    let entry = SpoolEntry { id: id.clone(), project: project.unwrap_or_default(), client: client.name.clone(), queue: target.name, qroot: Some(target.client.qroot), meta, submitted_at: rfc3339_z_now() };
     stage(&entry, &body)?;
     Ok(id)
 }
@@ -459,11 +436,5 @@ mod tests {
             valid_task_id(&id).unwrap();
         }
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn iso_epoch() {
-        assert_eq!(iso_utc(0), "1970-01-01T00:00:00Z");
-        assert_eq!(iso_utc(1_700_000_000), "2023-11-14T22:13:20Z");
     }
 }

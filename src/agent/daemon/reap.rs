@@ -46,7 +46,7 @@ pub(crate) fn requeue_orphans(root: &Path) -> Result<()> {
                 // Not `with_extension("log")`: the timestamp after the
                 // last dot IS the extension, so it must go inside the
                 // name — `<clean>.interrupted.<unixts>.log` (§3.6).
-                let _ = std::fs::rename(&old_log, failed.join(format!("{clean}.interrupted.{}.log", queue::unix_now())));
+                let _ = std::fs::rename(&old_log, failed.join(format!("{clean}.interrupted.{}.log", crate::proto::time::unix_now())));
             }
             let _ = std::fs::remove_file(dir.join("pid"));
             // Rust rename() onto an existing EMPTY dir silently
@@ -89,7 +89,7 @@ pub(crate) fn requeue_orphans(root: &Path) -> Result<()> {
             }
             let old_log = running.join(format!("{base}.sh.log"));
             if old_log.exists() {
-                let _ = std::fs::rename(&old_log, failed.join(format!("{clean}.interrupted.{}.log", queue::unix_now())));
+                let _ = std::fs::rename(&old_log, failed.join(format!("{clean}.interrupted.{}.log", crate::proto::time::unix_now())));
             }
             let _ = std::fs::remove_file(running.join(format!("{base}.sh.pid")));
         }
@@ -103,7 +103,7 @@ pub(crate) fn requeue_orphans(root: &Path) -> Result<()> {
                 let _ = std::fs::remove_file(ent.path());
             } else if name.ends_with(".log") {
                 let clean = name.trim_end_matches(".sh.log").to_string();
-                let _ = std::fs::rename(ent.path(), failed.join(format!("{clean}.interrupted.{}.log", queue::unix_now())));
+                let _ = std::fs::rename(ent.path(), failed.join(format!("{clean}.interrupted.{}.log", crate::proto::time::unix_now())));
                 dlog(root, "sweep_stray_log", ev(json!({"from": name})));
             }
         }
