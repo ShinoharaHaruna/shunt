@@ -54,8 +54,11 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
     let old_sock = crate::server::transport::cm_dir()?.join(format!("{old}.sock"));
     let _ = std::fs::remove_file(&old_sock);
     // Conn-fail streak and tunnel state follow the identity, as does
-    // the per-client known_hosts file.
-    for (dir, ext) in [("state", "fail"), ("tunnels", "pid"), ("tunnels", "port"), ("tunnels", "log")] {
+    // the per-client known_hosts file. The .fail.lock sidecar moves
+    // too: left behind it orphans under the old name (the streak file
+    // it serializes is gone), and deleting it instead of moving it
+    // would break a concurrent holder's exclusion (state.rs).
+    for (dir, ext) in [("state", "fail"), ("state", "fail.lock"), ("tunnels", "pid"), ("tunnels", "port"), ("tunnels", "log")] {
         let (from, to) = (home.join(dir).join(format!("{old}.{ext}")), home.join(dir).join(format!("{new}.{ext}")));
         if from.exists() {
             let _ = std::fs::rename(&from, &to);
@@ -185,7 +188,9 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
         let _ = std::fs::remove_file(&default_key);
         let _ = std::fs::remove_file(public_key_path(&default_key));
     }
-    for (dir, ext) in [("state", "fail"), ("tunnels", "pid"), ("tunnels", "port"), ("tunnels", "log")] {
+    // The .fail.lock sidecar goes too — it serializes access to a
+    // streak file that no longer exists for a client that is gone.
+    for (dir, ext) in [("state", "fail"), ("state", "fail.lock"), ("tunnels", "pid"), ("tunnels", "port"), ("tunnels", "log")] {
         let _ = std::fs::remove_file(home.join(dir).join(format!("{name}.{ext}")));
     }
     let _ = std::fs::remove_file(registry::known_hosts_path(name)?);

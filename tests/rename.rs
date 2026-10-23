@@ -25,10 +25,11 @@ fn rename_moves_row_keys_state_and_refs() -> Result<()> {
     spool::stage(&SpoolEntry { id: "t1".into(), project: "p".into(), client: "old-box".into(), queue: "default".into(), qroot: None, meta: TaskMeta { id: None, slug: "s".into(), guard: None, workdir: None, env: Default::default(), cmd: vec!["echo".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None }, submitted_at: "2026-01-01T00:00:00Z".into() }, "echo s\n")?;
     let env_of = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     registry::save_project(&ProjectEntry { name: "p".into(), desc: String::new(), repo: String::new(), defaults: shunt::server::registry::ProjectDefaults { env: env_of(&[("A", "1"), ("B", "2")]) }, bind: vec![Binding { client: "old-box".into(), queue: "default".into(), workdir: "/w".into(), env: env_of(&[("B", "3")]) }] })?;
-    // Conn-fail streak file.
+    // Conn-fail streak file and its sidecar flock (issue #8).
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
     std::fs::write(state.join("old-box.fail"), "3\n")?;
+    std::fs::write(state.join("old-box.fail.lock"), "")?;
 
     client_ops::rename("old-box", "new-box")?;
 
@@ -40,6 +41,8 @@ fn rename_moves_row_keys_state_and_refs() -> Result<()> {
     assert!(registry::load_client("old-box").is_err());
     assert_eq!(registry::conn_fail_read("new-box"), 3);
     assert_eq!(registry::conn_fail_read("old-box"), 0);
+    assert!(state.join("new-box.fail.lock").exists());
+    assert!(!state.join("old-box.fail.lock").exists());
     assert_eq!(spool::list()?[0].client, "new-box");
     assert_eq!(registry::load_project("p")?.bind[0].client, "new-box");
 
