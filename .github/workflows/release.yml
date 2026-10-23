@@ -93,6 +93,10 @@ jobs:
       # step is what decides whether released binaries carry the UI.
       - name: Set up pnpm and Node
         uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2 # v4
+        with:
+          # pnpm version comes from web/package.json's packageManager
+          # field — the repo root has no package.json for it to read.
+          package_json_file: web/package.json
 
       - name: Set up Node.js
         uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6
