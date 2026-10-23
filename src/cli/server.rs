@@ -192,7 +192,7 @@ pub(crate) fn cmd_room(c: &super::args::RoomCmd) -> Result<()> {
             if *json {
                 println!("{}", serde_json::to_string_pretty(&serde_json::json!({"ok": true, "as": label, "rooms": views, "suggested": suggested}))?);
             } else {
-                print_room_ls(label.as_deref(), &views, &suggested);
+                print_room_ls(&label, &views, &suggested);
             }
             Ok(())
         }
@@ -262,8 +262,8 @@ pub(crate) fn cmd_room(c: &super::args::RoomCmd) -> Result<()> {
     }
 }
 
-/// Mark-capable room ops need an identity; --as > $USER, else the
-/// error says how to supply one (§17.3).
+/// Mark-capable room ops need an identity; --as > `admin` (the
+/// operator), canonicalized against registered projects (§17.3).
 fn room_required_label(as_flag: Option<&str>) -> Result<String> {
     crate::server::room::required_label(as_flag)
 }
@@ -297,12 +297,9 @@ fn print_members(v: &crate::server::room::RoomView) {
     println!("members: {}", if members.is_empty() { "-".into() } else { members });
 }
 
-fn print_room_ls(label: Option<&str>, views: &[crate::server::room::RoomView], suggested: &[crate::server::room::Suggested]) {
+fn print_room_ls(label: &str, views: &[crate::server::room::RoomView], suggested: &[crate::server::room::Suggested]) {
     if views.is_empty() {
-        match label {
-            Some(l) => println!("no rooms for '{l}' (--all lists every room)"),
-            None => println!("no rooms yet"),
-        }
+        println!("no rooms for '{label}' (--all lists every room)");
     } else {
         let rows: Vec<Vec<String>> = views
             .iter()

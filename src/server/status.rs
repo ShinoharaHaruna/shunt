@@ -145,7 +145,7 @@ pub fn run_client(name: &str, json: bool) -> Result<()> {
 /// Transport resolves per client (ssh / loopback). `--json` emits one
 /// object; otherwise a table — the server status a human asked for.
 /// `as_label` is the §17.5 identity for the `rooms` block: unread
-/// counts are computed for it (default $USER); reporting only —
+/// counts are computed for it (default `admin`); reporting only —
 /// status never marks a reader position (polling is awareness).
 ///
 /// Probes run in parallel (std::thread, one per client): a dead box
@@ -209,7 +209,7 @@ pub fn run_all(json: bool, as_label: Option<&str>) -> Result<()> {
             Ok(v) => (serde_json::json!(v.len()), serde_json::Value::Null),
             Err(e) => (serde_json::Value::Null, serde_json::json!(format!("{e:#}"))),
         };
-        let rooms = crate::server::room::status_rooms(room_label.as_deref());
+        let rooms = crate::server::room::status_rooms(Some(&room_label));
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "protocol": crate::proto::wire::PROTOCOL_VERSION, "clients": out, "spool_pending": pending, "spool_error": err, "rooms": rooms }))?);
         return Ok(());
     }
@@ -229,13 +229,10 @@ pub fn run_all(json: bool, as_label: Option<&str>) -> Result<()> {
     }
     // §17.5: the aggregate carries the coordination inbox too —
     // report-only, and only when rooms exist (zero noise otherwise).
-    let rooms = crate::server::room::status_rooms(room_label.as_deref());
+    let rooms = crate::server::room::status_rooms(Some(&room_label));
     if !rooms.is_empty() {
         println!();
-        match &room_label {
-            Some(l) => println!("== rooms ==  unread for '{l}'"),
-            None => println!("== rooms =="),
-        }
+        println!("== rooms ==  unread for '{room_label}'");
         for r in &rooms {
             let unread = r["unread_msgs"].as_u64().map(|n| n.to_string()).unwrap_or_else(|| "-".into());
             let members = r["members"].as_array().map(|a| a.iter().filter_map(|m| m.as_str()).collect::<Vec<_>>().join(",")).unwrap_or_default();

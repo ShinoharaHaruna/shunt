@@ -212,7 +212,8 @@ pub struct StatusArgs {
     #[arg(long, conflicts_with = "all")]
     pub root: Option<String>,
     /// Identity for the rooms block (server aggregate only, §17.5):
-    /// unread counts are computed for this label; default $USER.
+    /// unread counts are computed for this label; default `admin`
+    /// (the operator); case-canonicalized to a registered project.
     /// Implies the aggregate — rooms are server-local, so a -c wire
     /// op or a local --root has none to report.
     #[arg(long = "as", conflicts_with_all = ["client", "root"])]
@@ -524,7 +525,8 @@ pub enum RoomAction {
     /// suggested groups (projects sharing a box with no room yet);
     /// --all lists every room. Never marks.
     Ls {
-        /// Identity for unread counts (default $USER)
+        /// Identity for unread counts (default `admin`, the
+        /// operator identity)
         #[arg(long = "as")]
         as_label: Option<String>,
         /// List every room, not just ones the label belongs to
@@ -546,8 +548,9 @@ pub enum RoomAction {
         body_file: Option<String>,
         /// `-` reads the body from stdin
         source: Option<String>,
-        /// Author + read-cursor label (default $USER); a non-member
-        /// label still posts — recorded member:false
+        /// Author + read-cursor label (default `admin`);
+        /// case-matched against registered project names, and a
+        /// non-member label still posts — recorded member:false
         #[arg(long = "as")]
         as_label: Option<String>,
         #[arg(long)]
@@ -558,7 +561,7 @@ pub enum RoomAction {
     Read {
         /// Room name or unique prefix
         room: String,
-        /// Reader label (default $USER)
+        /// Reader label (default `admin`)
         #[arg(long = "as")]
         as_label: Option<String>,
         /// Full stream instead of unread-only

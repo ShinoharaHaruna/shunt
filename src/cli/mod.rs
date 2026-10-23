@@ -298,6 +298,10 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Project(c) => match c.action {
             ProjectAction::Add { name, repo, desc } => {
                 registry::valid_name(&name)?;
+                // `admin` is the room's reserved operator identity
+                // (§17.3): a project by that name would collide
+                // with it in every --as comparison.
+                anyhow::ensure!(!name.eq_ignore_ascii_case(crate::server::room::ADMIN_LABEL), "{name:?} is reserved for the room operator identity (§17.3) — pick a real project name");
                 let e = registry::ProjectEntry { name: name.clone(), desc: desc.unwrap_or_default(), repo: repo.unwrap_or_default(), defaults: Default::default(), bind: Vec::new() };
                 let p = registry::save_project(&e)?;
                 println!("wrote {}", p.display());

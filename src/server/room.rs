@@ -113,28 +113,71 @@ pub struct RoomView {
     pub decision: Option<Decision>,
 }
 
-/// The caller's `--as` label: author of messages AND key of the
-/// readers/ cursor — you read under the name you speak under
-/// (§17.3). Resolution: explicit `--as` > `$USER`; the value is
-/// sanitized like a §3.3 slug, then must also be a valid registry
-/// name (it becomes `readers/<label>.json` — a `..` must not
-/// escape). `Ok(None)` = neither source exists.
-pub(crate) fn resolve_label(as_flag: Option<&str>) -> Result<Option<String>> {
-    let raw = match as_flag {
-        Some(s) => s.to_string(),
-        None => match std::env::var("USER") {
-            Ok(u) if !u.trim().is_empty() => u,
-            _ => return Ok(None),
-        },
-    };
-    let label = sanitize_slug(&raw);
-    valid_name(&label).with_context(|| format!("bad --as label {raw:?} (sanitized to {label:?}): use letters, digits, '_', '.', '-' — your project name is the convention"))?;
-    Ok(Some(label))
+/// `admin` (case-insensitive in every comparison) is the human
+/// operator's reserved identity (§17.3). No `--as` means the
+/// operator — an agent forgetting `--as` posts as a person, not
+/// under a stray $USER. `admin` is exempt from the non-member
+/// warning (a human reading a foreign room is overseeing, not
+/// leaking) yet still records `member: false` — it is honestly not
+/// on the roster. It can never BECOME a roster member or a
+/// registered project: both are rejected at intake, so no lookup
+/// can turn the operator into a project.
+pub const ADMIN_LABEL: &str = "admin";
+
+fn is_admin(label: &str) -> bool {
+    label.eq_ignore_ascii_case(ADMIN_LABEL)
 }
 
-/// A marking op's label, or the error naming how to supply one.
+/// Roster membership is case-insensitive (§17.3): canonicalization
+/// already aligns registered project names, and the insensitive
+/// compare extends the same courtesy to rosters holding
+/// non-registered member names.
+fn on_roster(meta: &Meta, label: &str) -> bool {
+    meta.members.iter().any(|m| m.eq_ignore_ascii_case(label))
+}
+
+/// Open trust: a non-member op still lands — but name the roster so
+/// a wrong-room typo is loud, not silently leaked into a foreign
+/// channel (§17.3). `admin` is exempt: the operator is the one
+/// reader the warning would be noise for.
+fn warn_non_member(name: &str, meta: &Meta, label: &str, action: &str) {
+    if !is_admin(label) && !on_roster(meta, label) {
+        eprintln!("warning: '{label}' is not a member of room '{name}' (roster: {}) — {action}", meta.members.join(", "));
+    }
+}
+
+/// The caller's `--as` label: author of messages AND key of the
+/// readers/ cursor — you read under the name you speak under
+/// (§17.3). Resolution: explicit `--as` > `admin`. The value is
+/// sanitized like a §3.3 slug, then must also be a valid registry
+/// name (it becomes `readers/<label>.json` — a `..` must not
+/// escape), then canonicalized so every case variant of one
+/// identity lands on ONE spelling: `admin` in any case folds to
+/// `admin`, and exactly one registered project matching
+/// case-insensitively substitutes its canonical spelling —
+/// membership checks, `author`, and the cursor all agree on who
+/// this is. Two registered projects differing only by case make
+/// the label ambiguous — a loud error, not a coin flip; a label
+/// matching nothing is free-form and passes through.
+pub(crate) fn resolve_label(as_flag: Option<&str>) -> Result<String> {
+    let raw = as_flag.unwrap_or(ADMIN_LABEL);
+    let label = sanitize_slug(raw);
+    valid_name(&label).with_context(|| format!("bad --as label {raw:?} (sanitized to {label:?}): use letters, digits, '_', '.', '-' — your project name is the convention"))?;
+    if is_admin(&label) {
+        return Ok(ADMIN_LABEL.to_string());
+    }
+    let matches: Vec<String> = registry::list_names("projects")?.into_iter().filter(|p| p.eq_ignore_ascii_case(&label)).collect();
+    match matches.len() {
+        0 => Ok(label),
+        1 => Ok(matches.into_iter().next().unwrap()),
+        _ => anyhow::bail!("--as label {label:?} is ambiguous: registered projects {} differ only by case — rename one", matches.join(", ")),
+    }
+}
+
+/// A marking op's label — same resolution; the name keeps call
+/// sites honest about why an identity is required (§17.3).
 pub(crate) fn required_label(as_flag: Option<&str>) -> Result<String> {
-    resolve_label(as_flag)?.context("no identity to post/read under: pass --as <label> (your project name) or set $USER")
+    resolve_label(as_flag)
 }
 
 /// `$SHUNT_HOME/rooms/`, created 0700 like every registry dir.
@@ -364,6 +407,7 @@ pub fn create(name: &str, members: &[String], clients: &[String]) -> Result<()> 
     for m in members {
         let m = m.trim();
         valid_name(m).with_context(|| format!("bad member name {m:?} — members are project names"))?;
+        anyhow::ensure!(!is_admin(m), "member {m:?} is the reserved operator identity (§17.3) — `admin` can never join a roster");
         if !ms.iter().any(|x| x == m) {
             ms.push(m.to_string());
         }
@@ -407,13 +451,8 @@ pub fn say(room: &str, label: &str, body: &str) -> Result<(u32, bool)> {
     anyhow::ensure!(body.len() <= MAX_BODY, "body is {} bytes; the cap is {MAX_BODY} — a coordination message carries decisions, not logs", body.len());
     let (name, dir) = resolve(room)?;
     let meta = load_meta(&dir)?;
-    let member = meta.members.iter().any(|m| m == label);
-    if !member {
-        // Open trust: the post still lands — but name the roster so
-        // a wrong-room typo is loud, not silently leaked into a
-        // foreign channel (§17.3).
-        eprintln!("warning: '{label}' is not a member of room '{name}' (roster: {}) — posting anyway, recorded member:false", meta.members.join(", "));
-    }
+    let member = on_roster(&meta, label);
+    warn_non_member(&name, &meta, label, "posting anyway, recorded member:false");
     let msg = Msg { author: label.to_string(), ts: iso_utc(unix_now()), body_md: body.to_string(), member };
     let n = {
         // Mint + install + archive in one hold (the §3.3
@@ -468,9 +507,7 @@ fn load_msgs(dir: &Path) -> Vec<(u32, Msg)> {
 pub fn read(room: &str, label: &str, all: bool) -> Result<Vec<(u32, Msg)>> {
     let (name, dir) = resolve(room)?;
     let meta = load_meta(&dir)?;
-    if !meta.members.iter().any(|m| m == label) {
-        eprintln!("warning: '{label}' is not a member of room '{name}' (roster: {}) — returning the stream anyway", meta.members.join(", "));
-    }
+    warn_non_member(&name, &meta, label, "returning the stream anyway");
     let msgs = load_msgs(&dir);
     let mark0 = last_read(&dir, label);
     let returned: Vec<_> = if all { msgs } else { msgs.into_iter().filter(|(n, _)| *n > mark0).collect() };
@@ -486,9 +523,7 @@ pub fn read(room: &str, label: &str, all: bool) -> Result<Vec<(u32, Msg)>> {
 pub fn decide(room: &str, label: &str, note: &str) -> Result<Decision> {
     let (name, dir) = resolve(room)?;
     let mut meta = load_meta(&dir)?;
-    if !meta.members.iter().any(|m| m == label) {
-        eprintln!("warning: '{label}' is not a member of room '{name}' (roster: {}) — recording the decision anyway", meta.members.join(", "));
-    }
+    warn_non_member(&name, &meta, label, "recording the decision anyway");
     meta.decision = Some(Decision { ts: iso_utc(unix_now()), author: label.to_string(), note: note.to_string() });
     // Whole-field overwrite + atomic rename: a concurrent decide
     // degrades to last-writer-wins, which is the spec's "latest
@@ -551,7 +586,7 @@ fn stale_members(meta: &Meta) -> Vec<String> {
 /// `room ls` (§17.2/§17.4): the caller's member rooms (or every
 /// room under `--all`) with unread counts, plus suggested groups —
 /// same-box project sets with no room yet.
-pub fn list(as_flag: Option<&str>, all: bool) -> Result<(Option<String>, Vec<RoomView>, Vec<Suggested>)> {
+pub fn list(as_flag: Option<&str>, all: bool) -> Result<(String, Vec<RoomView>, Vec<Suggested>)> {
     let label = resolve_label(as_flag)?;
     let groups = binding_groups();
     let mut views = Vec::new();
@@ -568,13 +603,11 @@ pub fn list(as_flag: Option<&str>, all: bool) -> Result<(Option<String>, Vec<Roo
             };
             member_sets.push(meta.members.clone());
             // Default scope is the caller's inbox: rooms the label
-            // belongs to. `--all` widens to the directory; no
-            // resolvable label at all falls back to the directory
-            // too (there is nothing to scope by).
-            if !all && label.as_ref().is_some_and(|l| !meta.members.contains(l)) {
+            // belongs to. `--all` widens to the directory.
+            if !all && !on_roster(&meta, &label) {
                 continue;
             }
-            views.push(view(&name, &rd, &meta, label.as_deref()));
+            views.push(view(&name, &rd, &meta, Some(&label)));
         }
     }
     // A group already has a room when some room's roster covers it
