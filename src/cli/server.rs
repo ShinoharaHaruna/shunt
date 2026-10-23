@@ -206,11 +206,11 @@ pub(crate) fn cmd_room(c: &super::args::RoomCmd) -> Result<()> {
             Ok(())
         }
         A::Ls { as_label, all, json } => {
-            let (label, views, suggested) = room::list(as_label.as_deref(), *all)?;
+            let ls = room::list(as_label.as_deref(), *all)?;
             if *json {
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({"ok": true, "as": label, "rooms": views, "suggested": suggested}))?);
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({"ok": true, "as": ls.label, "rooms": ls.rooms, "suggested": ls.suggested, "archived": ls.archived}))?);
             } else {
-                print_room_ls(&label, &views, &suggested, *all);
+                print_room_ls(&ls, *all);
             }
             Ok(())
         }
@@ -308,10 +308,30 @@ pub(crate) fn cmd_room(c: &super::args::RoomCmd) -> Result<()> {
             }
             Ok(())
         }
-        A::Rm { room, json } => {
-            let name = room::remove(room)?;
+        A::Archive { room, json } => {
+            let name = room::archive(room)?;
             if *json {
-                println!("{}", serde_json::json!({"ok": true, "removed": name}));
+                println!("{}", serde_json::json!({"ok": true, "archived": name}));
+            } else {
+                println!("room '{name}' archived");
+            }
+            Ok(())
+        }
+        A::Unarchive { name, json } => {
+            room::unarchive(name)?;
+            if *json {
+                println!("{}", serde_json::json!({"ok": true, "unarchived": name}));
+            } else {
+                println!("room '{name}' unarchived");
+            }
+            Ok(())
+        }
+        A::Rm { room, json } => {
+            let (name, archived) = room::remove(room)?;
+            if *json {
+                println!("{}", serde_json::json!({"ok": true, "removed": name, "archived": archived}));
+            } else if archived {
+                println!("archived room '{name}' removed");
             } else {
                 println!("room '{name}' removed");
             }
@@ -373,7 +393,8 @@ fn print_members(v: &crate::server::room::RoomView) {
     println!("members: {}", if members.is_empty() { "-".into() } else { members });
 }
 
-fn print_room_ls(label: &str, views: &[crate::server::room::RoomView], suggested: &[crate::server::room::Suggested], all: bool) {
+fn print_room_ls(ls: &crate::server::room::Listings, all: bool) {
+    let (label, views, suggested, archived) = (&ls.label, &ls.rooms, &ls.suggested, &ls.archived);
     if views.is_empty() {
         // Under --all the label never scoped the listing — an empty
         // table means zero rooms exist, not that it has none.
@@ -405,6 +426,12 @@ fn print_room_ls(label: &str, views: &[crate::server::room::RoomView], suggested
         for s in suggested {
             println!("  {}: {}  ->  shunt room create <name> --members {} --clients {}", s.endpoint, s.projects.join(","), s.projects.join(","), s.clients.join(","));
         }
+    }
+    // Cold storage is names only — the archived line carries no
+    // msgs/unread columns because an archived room has no cursor
+    // work to report.
+    if !archived.is_empty() {
+        println!("archived: {}", archived.join(", "));
     }
 }
 

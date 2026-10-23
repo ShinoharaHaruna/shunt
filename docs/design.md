@@ -502,7 +502,7 @@ Facts are advisory registry data for agent-side matching, not enforced constrain
 | `shunt cancel` / `prio` / `kill`                                                                  | client | pending/running ops                                                                                                   |
 | `shunt workers [N]` (wire: `workers get`\|`set N`)                                                | client | pool size get/set                                                                                                     |
 | `shunt shutdown on\|off\|status`                                                                  | client | idle poweroff                                                                                                         |
-| `shunt room create\|ls\|say\|read\|decide\|members\|compact\|rm`                                  | server | project-membership coordination rooms (§17)                                                                           |
+| `shunt room create\|ls\|say\|read\|decide\|members\|compact\|archive\|unarchive\|rm`              | server | project-membership coordination rooms (§17)                                                                           |
 | `shunt logs [-n N] [-f] [pat]` / `shunt dlog`                                                     | client | task/daemon logs                                                                                                      |
 | `shunt probe`                                                                                     | client | machine facts JSON                                                                                                    |
 | `shunt completions <shell>`                                                                       | local  | shell completion script                                                                                               |
@@ -658,12 +658,15 @@ rooms/
       .archive/             # overflow past the §17.4 cap + compacted history (§17.6)
     readers/
       <label>.json          # {last_read_n} — high-water mark per identity (§17.5)
+  .archive/
+    <name>/                 # cold-stored rooms (§17.4)
 ```
 
 - A room is a LINEAR stream, not threads: one `msgs/` sequence, `NNNN` minted under `.seq.lock` with the §3.2 rules (flock, bounded wait, missing counter rebuilt from high-water, corrupt counter an error with remediation), message dir created temp-then-rename. The topic/reply two-level structure was rejected for rigidity — a coordination stream does not know its topics in advance, and a single ordered log is what a group chat is.
 - `meta.json.members` names projects, not client rows: row names are private dev-side bookkeeping — two registries can name the same box `riboworld-7032` and `pytorch-7032` — while the project name is the shared vocabulary a counterpart actually needs to read. `clients` is annotation context (which boxes this room coordinates), never a gate.
 - Message bodies are markdown (`body_md`) hard-capped at 16 KiB — oversize rejected before anything is written; a coordination message has no business carrying logs.
 - `summary_through` on a `msgs/NNNN.json` marks the message as a compaction digest, the value being the highest message number it covers (§17.6) — one optional field doubles as the kind tag, so a summary stays an ordinary stream item everywhere else. `meta.json.compacted_through` ratchets the highest covered N; it lives in meta rather than being derived from the stream because the 500-cap can archive the newest summary itself, leaving nothing live to derive from.
+- A room dir is fully self-contained — `meta.json`, both message tiers (`msgs/` and `msgs/.archive/`), `readers/`, and `.seq` all live under `<name>/` — so room archiving is a single rename into `rooms/.archive/` and `unarchive` restores byte-for-byte, with no cross-references to break. The two `.archive/` levels coexist and are unrelated: `msgs/.archive/` ages individual messages (§17.6), `rooms/.archive/` cold-stores whole rooms (§17.4).
 
 ### 17.2 Command surface
 
@@ -676,10 +679,12 @@ shunt room decide <room> --note T [--as L]  # record the current agreed state in
 shunt room members <room>                 # roster
 shunt room compact <room> [--ratio 0.8]               # plan: shunt picks the split, dumps the digest packet
 shunt room compact <room> --through N (--body|--body-file|-)  # commit: archive ≤N, store the digest
+shunt room archive <room>
+shunt room unarchive <name>
 shunt room rm <room>
 ```
 
-All server-local — no `-c` forwarding exists because there is nothing to forward to. Body source precedence `--body` > `--body-file` > `-` (stdin), the §14.1 rule. `<room>` resolves through the §4.1 ladder — exact, then unique case-fold — plus the rooms-specific unique-prefix acceptance that predates the middleware; an ambiguous prefix bails listing the candidates, and a miss carries did-you-mean suggestions. `read` with no selector prints only messages past the reader's mark (§17.5); `say`, `read`, `decide`, and `compact` all mark.
+All server-local — no `-c` forwarding exists because there is nothing to forward to. Body source precedence `--body` > `--body-file` > `-` (stdin), the §14.1 rule. `<room>` resolves through the §4.1 ladder — exact, then unique case-fold — plus the rooms-specific unique-prefix acceptance that predates the middleware; an ambiguous prefix bails listing the candidates, and a miss carries did-you-mean suggestions. `read` with no selector prints only messages past the reader's mark (§17.5); `say`, `read`, `decide`, and `compact` all mark. `archive` resolves through that same ladder — a room being put away is still a live name — while `unarchive`, and `rm` aimed at the cold side, match EXACT names only under `.archive/` (cold storage takes no prefixes), and every other op pointed at an archived room fails naming `shunt room unarchive` — one uniform remediation, because they all route through the same resolution.
 
 `read`'s view selectors — `--all`, `--digest`, and the `--from`/`--to` range — are mutually exclusive; `--from` and `--to` may each appear alone as an open range, and a range reaching below the live floor reads straight into `.archive/`. `compact` runs two phases under one verb (§17.6): `--through` plus a body source is a commit, neither is a plan, and exactly one is an error naming the missing half; `--ratio` exists only in plan mode. A `read` by a label off the roster still returns the stream and marks — the same open trust as `say`/`decide` — but stderr names the roster, so a wrong-room or mis-cased label is loud instead of silently reading a foreign channel (§17.3). `decide` writes `meta.decision = {ts, author, note}` — latest wins, replacing the topic-close mechanism: what coordination needs is "the current agreement", not a closed thread; the stream retains how it was reached.
 
@@ -700,6 +705,9 @@ A `say`/`decide`/`read` whose resolved label is not in `meta.members` still land
 - A room's stream is capped at 500 live messages; past that, oldest `NNNN.json` move to `msgs/.archive/` — the §3.9 track-cap discipline, dot-prefixed and invisible to the default `read`/`ls` view but no longer write-only: `read --from/--to` reaches it.
 - Compaction is the second mover into `.archive/` and the cap is the first — a `compact` commit renames the covered non-summary messages there (§17.6). Both movers keep the same `NNNN` namespace, so a `--from`/`--to` range read spans live and archived seamlessly.
 - Rooms themselves never auto-expire — the registry is cheap disk and the coordination record is the asset; cleanup is `room rm`. `readers/` is capped at 64 label files, oldest-mtime evicted — a label gone quiet loses only its read positions, never data.
+- `room archive` is the ending that keeps the record: a coordination relationship can be over — box released, project retired — while `room rm` would destroy the asset named above and a dead room left live pollutes `ls`. Live and archived names form one disjoint namespace — `create` refuses an archived namesake and points at `unarchive`/`rm` — so neither direction of the rename can ever collide.
+- Archived rooms stay visible but out of the way: `room ls` prints them in a separate trailing section (JSON: an `"archived"` field beside `rooms`), while `status --json` stays live-only — a cold room is a stored record, not an inbox anyone should poll.
+- `room rm` resolves either namespace — exact-name only on the archived side (§17.2) — and reports which it removed, so destroying a cold room takes a deliberate exact name, never a lucky prefix.
 
 ### 17.5 Read state: per-label high-water marks
 

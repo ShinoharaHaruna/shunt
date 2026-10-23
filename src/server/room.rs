@@ -200,6 +200,14 @@ pub(crate) fn required_label(as_flag: Option<&str>) -> Result<String> {
     resolve_label(as_flag)
 }
 
+/// Cold-storage namespace (§17): `rooms/.archive/` holds whole
+/// room dirs — a room dir is fully self-contained (meta.json,
+/// msgs/ incl. msgs/.archive, readers/, .seq), so one rename moves
+/// the entire record between live and archived with no format
+/// work. Dot-prefixed, so `room_names` keeps the live candidate
+/// set disjoint from the archive for free.
+const ARCHIVE_DIR: &str = ".archive";
+
 /// `$SHUNT_HOME/rooms/`, created 0700 like every registry dir.
 fn rooms_dir() -> Result<PathBuf> {
     let d = shunt_home()?.join("rooms");
@@ -220,6 +228,13 @@ fn room_names(dir: &Path) -> Vec<String> {
     names::room_names(dir)
 }
 
+/// The shared live-miss error — `resolve` and `remove` each run
+/// their own archived-name check first, then build this identically
+/// so the wording never drifts between them.
+fn unknown_room_err(input: &str, suggestions: &[String]) -> anyhow::Error {
+    anyhow::anyhow!("no room named or prefixed {input:?}{} — `shunt room ls --all` lists what exists, `shunt room create <name> --members p1,p2` makes one", names::did_you_mean(suggestions))
+}
+
 /// `<room>` resolves through the name middleware (§4.1): exact,
 /// then unique case-fold or unique prefix (§17.2's accepted
 /// resolutions, both reported as `Canonical` and taken silently),
@@ -231,7 +246,16 @@ fn resolve(input: &str) -> Result<(String, PathBuf)> {
     let dir = rooms_dir()?;
     match names::resolve_room(input)? {
         Resolution::Exact(name) | Resolution::Canonical { canonical: name, .. } => Ok((name.clone(), dir.join(&name))),
-        Resolution::Unknown { input, suggestions } => anyhow::bail!("no room named or prefixed {input:?}{} — `shunt room ls --all` lists what exists, `shunt room create <name> --members p1,p2` makes one", names::did_you_mean(&suggestions)),
+        Resolution::Unknown { input, suggestions } => {
+            // An exact archived namesake is not "unknown" — the
+            // error names the restore path instead. Exact-only:
+            // cold storage names are typed in full, never
+            // prefix-matched (the prefix ladder stays live-only).
+            if dir.join(ARCHIVE_DIR).join(&input).is_dir() {
+                anyhow::bail!("room '{input}' is archived — `shunt room unarchive {input}` restores it");
+            }
+            Err(unknown_room_err(&input, &suggestions))
+        }
         Resolution::Ambiguous(cands) => anyhow::bail!("room prefix {input:?} is ambiguous: {}", cands.join(", ")),
     }
 }
@@ -404,6 +428,10 @@ fn initialize_room(dir: &Path, initialize: impl FnOnce(&Path) -> Result<()>) -> 
 /// annotation context only.
 pub fn create(name: &str, members: &[String], clients: &[String]) -> Result<()> {
     valid_name(name)?;
+    // Dot-prefixed dirs are shunt-internal (`.archive` is the
+    // cold-storage namespace) and invisible to the live candidate
+    // set — a leading-dot room would resolve nowhere.
+    anyhow::ensure!(!name.starts_with('.'), "room names can't start with '.' — {ARCHIVE_DIR}/ is the cold-storage namespace, and dot-prefixed dirs are invisible to `room ls` and resolution");
     anyhow::ensure!(!members.is_empty(), "room '{name}' needs --members p1,p2 — a room coordinates the projects sharing compute");
     // Members canonicalize against registered projects through the
     // name middleware — the roster then stores the spelling
@@ -453,7 +481,14 @@ pub fn create(name: &str, members: &[String], clients: &[String]) -> Result<()> 
             cs.push(c);
         }
     }
-    let dir = rooms_dir()?.join(name);
+    let rooms = rooms_dir()?;
+    let dir = rooms.join(name);
+    // Live and archived names share one namespace (§17): an
+    // archived namesake claims the name already. Checked before
+    // the exclusive mkdir — the disjoint invariant means this can
+    // only fire when no live dir exists, so the error names
+    // `unarchive`/`rm` rather than the generic "already exists".
+    anyhow::ensure!(!rooms.join(ARCHIVE_DIR).join(name).is_dir(), "an archived room '{name}' exists — `shunt room unarchive {name}` restores it, or `shunt room rm {name}` removes it");
     initialize_room(&dir, |dir| {
         private_dir(&dir.join("msgs"))?;
         private_dir(&dir.join("readers"))?;
@@ -832,15 +867,30 @@ fn stale_members(meta: &Meta) -> Vec<String> {
     meta.members.iter().filter(|m| !groups.iter().any(|g| g.projects.contains(m))).cloned().collect()
 }
 
+/// The `room ls` report (§17.2/§17.4): the resolved reader label,
+/// that label's member rooms (or every room under `--all`) with
+/// unread counts, suggested same-box project groups, and the
+/// archived room names (cold storage: names only, no cursor work).
+pub struct Listings {
+    pub label: String,
+    pub rooms: Vec<RoomView>,
+    pub suggested: Vec<Suggested>,
+    pub archived: Vec<String>,
+}
+
 /// `room ls` (§17.2/§17.4): the caller's member rooms (or every
 /// room under `--all`) with unread counts, plus suggested groups —
 /// same-box project sets with no room yet.
-pub fn list(as_flag: Option<&str>, all: bool) -> Result<(String, Vec<RoomView>, Vec<Suggested>)> {
+pub fn list(as_flag: Option<&str>, all: bool) -> Result<Listings> {
     let label = resolve_label(as_flag)?;
     let groups = binding_groups();
     let mut views = Vec::new();
     let mut member_sets: Vec<Vec<String>> = Vec::new();
+    let mut archived = Vec::new();
     if let Some(dir) = existing_rooms_dir() {
+        // Cold storage lists as names only — no msgs/unread counts:
+        // an archived room carries no cursor work.
+        archived = archived_names(&dir);
         for name in room_names(&dir) {
             let rd = dir.join(&name);
             let meta = match load_meta(&rd) {
@@ -862,7 +912,41 @@ pub fn list(as_flag: Option<&str>, all: bool) -> Result<(String, Vec<RoomView>, 
     // A group already has a room when some room's roster covers it
     // (superset: a room may span boxes — §17.4).
     let suggested = groups.into_iter().filter(|g| !member_sets.iter().any(|ms| g.projects.iter().all(|p| ms.contains(p)))).collect();
-    Ok((label, views, suggested))
+    Ok(Listings { label, rooms: views, suggested, archived })
+}
+
+/// Archived room names under `rooms/.archive/`, sorted — the same
+/// "is a room" predicate as the live set (dirs holding meta.json).
+fn archived_names(rooms: &Path) -> Vec<String> {
+    room_names(&rooms.join(ARCHIVE_DIR))
+}
+
+/// `room archive` (§17): rename the room dir into
+/// `rooms/.archive/` — the record is self-contained, so one atomic
+/// rename is the whole operation. No lock: every op resolves its
+/// dir fresh per call, so a rename mid-flight just moves where the
+/// next resolution lands.
+pub fn archive(room: &str) -> Result<String> {
+    let (name, dir) = resolve(room)?;
+    let archive = rooms_dir()?.join(ARCHIVE_DIR);
+    private_dir(&archive)?;
+    fs::rename(&dir, archive.join(&name)).with_context(|| format!("cannot move {} into cold storage", dir.display()))?;
+    Ok(name)
+}
+
+/// `room unarchive` (§17): exact name only under `.archive/` —
+/// cold storage names are typed in full, no prefix ladder. The
+/// disjoint live/archive namespace makes a live namesake a hard
+/// refusal, never a clobber.
+pub fn unarchive(name: &str) -> Result<()> {
+    valid_name(name)?;
+    let rooms = rooms_dir()?;
+    let src = rooms.join(ARCHIVE_DIR).join(name);
+    anyhow::ensure!(src.is_dir(), "no archived room named {name:?} — `shunt room ls` lists archived rooms");
+    let dest = rooms.join(name);
+    anyhow::ensure!(!dest.exists(), "a live room '{name}' already exists — remove or rename it first");
+    fs::rename(&src, &dest).with_context(|| format!("cannot restore {} from cold storage", src.display()))?;
+    Ok(())
 }
 
 /// `room members` (§17.2): the roster view of one room.
@@ -873,11 +957,31 @@ pub fn roster(room: &str, label: Option<&str>) -> Result<RoomView> {
 }
 
 /// `room rm` (§17.4): rooms never auto-expire — the coordination
-/// record is the asset — so removal is this command only.
-pub fn remove(room: &str) -> Result<String> {
-    let (name, dir) = resolve(room)?;
-    fs::remove_dir_all(&dir).with_context(|| format!("cannot remove {}", dir.display()))?;
-    Ok(name)
+/// record is the asset — so removal is this command only. It spans
+/// both namespaces: the live ladder first (exact > case-fold >
+/// unique prefix), then an exact `.archive/` name — cold storage
+/// names are typed in full, never prefix-matched. Returns the name
+/// and whether the archived record was the one dropped, so output
+/// can say which.
+pub fn remove(room: &str) -> Result<(String, bool)> {
+    valid_name(room)?;
+    let rooms = rooms_dir()?;
+    match names::resolve_room(room)? {
+        Resolution::Exact(name) | Resolution::Canonical { canonical: name, .. } => {
+            let dir = rooms.join(&name);
+            fs::remove_dir_all(&dir).with_context(|| format!("cannot remove {}", dir.display()))?;
+            Ok((name, false))
+        }
+        Resolution::Unknown { input, suggestions } => {
+            let dir = rooms.join(ARCHIVE_DIR).join(&input);
+            if dir.is_dir() {
+                fs::remove_dir_all(&dir).with_context(|| format!("cannot remove {}", dir.display()))?;
+                return Ok((input, true));
+            }
+            Err(unknown_room_err(&input, &suggestions))
+        }
+        Resolution::Ambiguous(cands) => anyhow::bail!("room prefix {room:?} is ambiguous: {}", cands.join(", ")),
+    }
 }
 
 /// The `status --json` rooms block (§17.5): `[{name, members,

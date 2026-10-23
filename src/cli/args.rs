@@ -652,10 +652,29 @@ pub enum RoomAction {
         #[arg(long)]
         json: bool,
     },
+    /// Move a room to cold storage (rooms/.archive/<name>/): one
+    /// atomic rename preserves meta, msgs, and readers; ops on an
+    /// archived room fail naming `unarchive`
+    Archive {
+        /// Room name or unique prefix (live rooms only)
+        room: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore an archived room — exact name only, cold storage
+    /// names are typed in full; refuses when a live room already
+    /// holds the name
+    Unarchive {
+        /// Archived room name (exact match only)
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove a room and its whole record — the only cleanup; rooms
-    /// never auto-expire
+    /// never auto-expire. Reaches cold storage too: the live name
+    /// ladder first, then an exact archived name
     Rm {
-        /// Room name or unique prefix
+        /// Room name or unique prefix (live), or exact archived name
         room: String,
         #[arg(long)]
         json: bool,
@@ -1134,6 +1153,14 @@ mod tests {
         let cli = parse(&["shunt", "room", "rm", "gpu"]);
         let Command::Room(r) = cli.command else { panic!() };
         assert!(matches!(r.action, RoomAction::Rm { .. }));
+
+        let cli = parse(&["shunt", "room", "archive", "gpu", "--json"]);
+        let Command::Room(r) = cli.command else { panic!() };
+        assert!(matches!(r.action, RoomAction::Archive { .. }));
+
+        let cli = parse(&["shunt", "room", "unarchive", "gpu"]);
+        let Command::Room(r) = cli.command else { panic!() };
+        assert!(matches!(r.action, RoomAction::Unarchive { .. }));
 
         assert!(Cli::try_parse_from(["shunt", "room", "create", "x"]).is_err());
     }
