@@ -214,7 +214,7 @@ pub(crate) fn cmd_room(c: &super::args::RoomCmd) -> Result<()> {
             if *json {
                 println!("{}", serde_json::to_string_pretty(&serde_json::json!({"ok": true, "as": label, "rooms": views, "suggested": suggested}))?);
             } else {
-                print_room_ls(&label, &views, &suggested);
+                print_room_ls(&label, &views, &suggested, *all);
             }
             Ok(())
         }
@@ -319,9 +319,15 @@ fn print_members(v: &crate::server::room::RoomView) {
     println!("members: {}", if members.is_empty() { "-".into() } else { members });
 }
 
-fn print_room_ls(label: &str, views: &[crate::server::room::RoomView], suggested: &[crate::server::room::Suggested]) {
+fn print_room_ls(label: &str, views: &[crate::server::room::RoomView], suggested: &[crate::server::room::Suggested], all: bool) {
     if views.is_empty() {
-        println!("no rooms for '{label}' (--all lists every room)");
+        // Under --all the label never scoped the listing — an empty
+        // table means zero rooms exist, not that it has none.
+        if all {
+            println!("no rooms");
+        } else {
+            println!("no rooms for '{label}' (--all lists every room)");
+        }
     } else {
         let rows: Vec<Vec<String>> = views
             .iter()
@@ -329,10 +335,14 @@ fn print_room_ls(label: &str, views: &[crate::server::room::RoomView], suggested
                 let members = v.members.iter().map(|m| if v.stale.contains(m) { format!("{m}(stale)") } else { m.clone() }).collect::<Vec<_>>().join(",");
                 let unread = v.unread_msgs.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
                 let dec = v.decision.as_ref().map(|d| format!("{} ({}, {})", d.note, d.author, d.ts)).unwrap_or_else(|| "-".into());
-                vec![v.name.clone(), unread, members, dec]
+                vec![v.name.clone(), v.msgs.to_string(), unread, members, dec]
             })
             .collect();
-        let mut all_rows = vec![vec!["room".into(), "unread".into(), "members".into(), "decision".into()]];
+        // `msgs` is the live total; `unread` is past the resolved
+        // label's mark. The header names that reader — under --all
+        // the label may own no room, and a bare 'unread' column
+        // would read as a total (the issue-#10 bug).
+        let mut all_rows = vec![vec!["room".into(), "msgs".into(), format!("unread({label})"), "members".into(), "decision".into()]];
         all_rows.extend(rows);
         print_cols(&all_rows);
     }

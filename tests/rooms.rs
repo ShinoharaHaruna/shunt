@@ -133,6 +133,58 @@ fn read_marks_and_unread_counts() {
     std::fs::remove_dir_all(&home).ok();
 }
 
+/// `room ls` prints `msgs` (live total) beside `unread(<label>)` —
+/// the column header names the resolved reader, so `--all` never
+/// shows a bare total under an 'unread' claim (issue #10, §17.5).
+#[test]
+fn ls_distinguishes_msgs_and_attributes_unread() {
+    let home = tmpdir("ls-cols");
+    ok(&home, &["room", "create", "r1", "--members", "p1,p2"]);
+    ok(&home, &["room", "create", "r2", "--members", "p3"]);
+    for i in 1..=3 {
+        ok(&home, &["room", "say", "r1", "--body", &format!("m{i}"), "--as", "p1"]);
+    }
+    ok(&home, &["room", "say", "r2", "--body", "x1", "--as", "p3"]);
+    // p2 reads all of r1: its unread is 0 while the total stays 3.
+    ok(&home, &["room", "read", "r1", "--as", "p2", "--all"]);
+
+    // Member label: the row shows that label's unread, not a total,
+    // and the header names the reader.
+    let out = ok(&home, &["room", "ls", "--as", "p2"]);
+    assert!(out.contains("unread(p2)"), "{out}");
+    let r1: Vec<&str> = out.lines().find(|l| l.starts_with("r1")).unwrap().split_whitespace().collect();
+    assert_eq!(r1[1], "3", "msgs is the live total: {out}");
+    assert_eq!(r1[2], "0", "unread is p2's count, not the total: {out}");
+    assert!(!out.lines().any(|l| l.starts_with("r2")), "member ls stays label-scoped: {out}");
+
+    // --all with an explicit --as names that reader.
+    let out = ok(&home, &["room", "ls", "--all", "--as", "p1"]);
+    assert!(out.contains("unread(p1)"), "{out}");
+
+    // --all without --as attributes the column to `admin` — never a
+    // bare 'unread' header. Admin never read r1, so its count equals
+    // the total — the header, not the number, says whose it is.
+    let out = ok(&home, &["room", "ls", "--all"]);
+    assert!(out.contains("unread(admin)"), "{out}");
+    assert!(!out.contains("unread  "), "unattributed unread column must be gone: {out}");
+    let r1: Vec<&str> = out.lines().find(|l| l.starts_with("r1")).unwrap().split_whitespace().collect();
+    assert_eq!(r1[1], "3", "{out}");
+    assert_eq!(r1[2], "3", "admin's unread equals the total and is labeled admin's: {out}");
+    let r2: Vec<&str> = out.lines().find(|l| l.starts_with("r2")).unwrap().split_whitespace().collect();
+    assert_eq!(r2[1], "1");
+    assert_eq!(r2[2], "1");
+
+    // JSON keeps the attributed unread per room plus the resolved
+    // `as` label — same semantics, machine-readable.
+    let out = ok(&home, &["room", "ls", "--all", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["as"], "admin", "{out}");
+    let r1 = v["rooms"].as_array().unwrap().iter().find(|r| r["name"] == "r1").unwrap();
+    assert_eq!(r1["msgs"], 3);
+    assert_eq!(r1["unread_msgs"], 3);
+    std::fs::remove_dir_all(&home).ok();
+}
+
 /// A say whose --as is off the roster still posts (open trust) but
 /// is recorded member:false and names the roster on stderr (§17.3).
 #[test]
