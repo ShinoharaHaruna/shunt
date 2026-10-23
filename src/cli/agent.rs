@@ -138,6 +138,19 @@ fn new_impl(a: &NewArgs) -> Result<()> {
     }
 }
 
+/// Reduce a `match_pending`/`match_running` hit list to the one
+/// task the op acts on: `none` jfails an empty list, `several` a
+/// multi-hit. The wording stays the caller's because the refusals
+/// are the CLI/wire surface — `prio` collapses both cases into one
+/// count-carrying message and passes it for both.
+fn one_match(m: &[String], json: bool, none: &str, several: &str) -> Result<String> {
+    if m.len() == 1 {
+        return Ok(m[0].clone());
+    }
+    jfail(json, if m.is_empty() { none } else { several })?;
+    unreachable!("jfail exits under --json and bails otherwise")
+}
+
 pub(crate) fn agent_cancel(a: &PatternArgs) -> Result<()> {
     wire(a.json, cancel_impl(a))
 }
@@ -145,19 +158,14 @@ pub(crate) fn agent_cancel(a: &PatternArgs) -> Result<()> {
 fn cancel_impl(a: &PatternArgs) -> Result<()> {
     let root = agent_root(&a.root)?;
     let m = crate::agent::queue::match_pending(&root, &a.pattern)?;
-    match m.len() {
-        0 => jfail(a.json, &format!("no pending task matches '{}'", a.pattern)),
-        1 => {
-            crate::agent::queue::remove_pending(&root, &m[0])?;
-            if a.json {
-                jprint(jobj(jfields(serde_json::json!({"name": m[0]}))));
-            } else {
-                println!("cancelled: {}", m[0]);
-            }
-            Ok(())
-        }
-        _ => jfail(a.json, &format!("pattern matches several tasks, refusing:\n  {}", m.join("\n  "))),
+    let name = one_match(&m, a.json, &format!("no pending task matches '{}'", a.pattern), &format!("pattern matches several tasks, refusing:\n  {}", m.join("\n  ")))?;
+    crate::agent::queue::remove_pending(&root, &name)?;
+    if a.json {
+        jprint(jobj(jfields(serde_json::json!({"name": name}))));
+    } else {
+        println!("cancelled: {name}");
     }
+    Ok(())
 }
 
 pub(crate) fn agent_prio(a: &PrioArgs) -> Result<()> {
@@ -170,25 +178,23 @@ fn prio_impl(a: &PrioArgs) -> Result<()> {
         return jfail(a.json, &format!("prio number must be inside the 0000-{:04} priority band, got {:04}", crate::agent::queue::PRIORITY_BAND_MAX, a.n));
     }
     let m = crate::agent::queue::match_pending(&root, &a.pattern)?;
-    if m.len() != 1 {
-        return jfail(a.json, &format!("need exactly one pending match, got {}:\n  {}", m.len(), m.join("\n  ")));
-    }
-    let base = &m[0];
-    let rest = base.split_once('_').map(|(_, r)| r).unwrap_or(base);
+    let miss = format!("need exactly one pending match, got {}:\n  {}", m.len(), m.join("\n  "));
+    let base = one_match(&m, a.json, &miss, &miss)?;
+    let rest = base.split_once('_').map(|(_, r)| r).unwrap_or(base.as_str());
     let new = format!("{:04}_{rest}", a.n);
     // Entry shapes: a dir renames to a dir; a legacy flat file keeps
     // its `.sh` suffix so it stays visible to the listing.
-    let (from, to) = if crate::agent::queue::is_dir_entry(&root, "pending", base) { (root.join("pending").join(base), root.join("pending").join(&new)) } else { (root.join("pending").join(format!("{base}.sh")), root.join("pending").join(format!("{new}.sh"))) };
+    let (from, to) = if crate::agent::queue::is_dir_entry(&root, "pending", &base) { (root.join("pending").join(&base), root.join("pending").join(&new)) } else { (root.join("pending").join(format!("{base}.sh")), root.join("pending").join(format!("{new}.sh"))) };
     // refuse to clobber an existing pending task (bash `mv -f` defect,
     // design.md §3.14); check BOTH shapes for BOTH entry shapes — a
     // flat source renaming onto a same-named pending DIR would leave
     // `NNNN_x/` + `NNNN_x.sh` coexisting as two tasks.
     let occupied = root.join("pending").join(&new).exists() || root.join("pending").join(format!("{new}.sh")).exists();
-    if occupied && new != *base {
+    if occupied && new != base {
         return jfail(a.json, &format!("target name exists: {new}"));
     }
-    if new != *base {
-        if crate::agent::queue::is_dir_entry(&root, "pending", base) {
+    if new != base {
+        if crate::agent::queue::is_dir_entry(&root, "pending", &base) {
             // check-then-rename: rename onto a non-empty dir already
             // fails; onto an EMPTY dir it silently replaces — a
             // residual race window the pre-check above shrinks but
@@ -220,36 +226,33 @@ pub(crate) fn agent_kill(a: &PatternArgs) -> Result<()> {
 fn kill_impl(a: &PatternArgs) -> Result<()> {
     let root = agent_root(&a.root)?;
     let m = crate::agent::queue::match_running(&root, &a.pattern)?;
-    match m.len() {
-        0 => jfail(a.json, &format!("no running task matches '{}'", a.pattern)),
-        1 => match crate::agent::exec::kill_task(&root, &m[0]) {
-            Ok(crate::agent::exec::KillOutcome::Gone) => {
-                // Honest report: the recorded pgid no longer names
-                // this task's leader (reaped already or recycled) —
-                // nothing was signaled.
-                if a.json {
-                    jprint(jobj(jfields(serde_json::json!({"gone": true}))));
-                } else {
-                    println!("{} already gone; nothing signaled", m[0]);
-                }
-                Ok(())
+    let name = one_match(&m, a.json, &format!("no running task matches '{}'", a.pattern), &format!("pattern matches several tasks, refusing:\n  {}", m.join("\n  ")))?;
+    match crate::agent::exec::kill_task(&root, &name) {
+        Ok(crate::agent::exec::KillOutcome::Gone) => {
+            // Honest report: the recorded pgid no longer names
+            // this task's leader (reaped already or recycled) —
+            // nothing was signaled.
+            if a.json {
+                jprint(jobj(jfields(serde_json::json!({"gone": true}))));
+            } else {
+                println!("{name} already gone; nothing signaled");
             }
-            Ok(crate::agent::exec::KillOutcome::Signaled { pgid, escalated }) => {
-                if a.json {
-                    jprint(jobj(jfields(serde_json::json!({"pgid": pgid, "escalated": escalated}))));
+            Ok(())
+        }
+        Ok(crate::agent::exec::KillOutcome::Signaled { pgid, escalated }) => {
+            if a.json {
+                jprint(jobj(jfields(serde_json::json!({"pgid": pgid, "escalated": escalated}))));
+            } else {
+                println!("killing {name} (pgid {pgid})");
+                if escalated {
+                    println!("still alive after 10 s; sent SIGKILL");
                 } else {
-                    println!("killing {} (pgid {pgid})", m[0]);
-                    if escalated {
-                        println!("still alive after 10 s; sent SIGKILL");
-                    } else {
-                        println!("terminated");
-                    }
+                    println!("terminated");
                 }
-                Ok(())
             }
-            Err(e) => jfail(a.json, &format!("{e:#}")),
-        },
-        _ => jfail(a.json, &format!("pattern matches several tasks, refusing:\n  {}", m.join("\n  "))),
+            Ok(())
+        }
+        Err(e) => jfail(a.json, &format!("{e:#}")),
     }
 }
 
