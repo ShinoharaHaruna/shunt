@@ -112,13 +112,10 @@ fn save(rec: &TaskRecord) -> Result<()> {
     let dir = tasks_dir()?;
     crate::server::fsutil::private_dir(&dir)?;
     let path = dir.join(format!("{}.json", rec.id));
-    // pid in the tmp name (queue.rs enqueue convention): concurrent
-    // savers — `task show` lazy outcome write-back racing
-    // `client rename`'s retarget_client — share an id's tmp path
-    // otherwise, and the loser's torn write renames over the winner.
-    let tmp = dir.join(format!(".{}.{}.json.tmp", rec.id, std::process::id()));
-    crate::server::fsutil::write_private(&tmp, serde_json::to_string_pretty(rec)?)?;
-    fs::rename(&tmp, &path)?;
+    // tmp+rename: concurrent savers — `task show` lazy outcome
+    // write-back racing `client rename`'s retarget_client — must
+    // never publish a torn record.
+    crate::server::fsutil::atomic_write(&path, serde_json::to_string_pretty(rec)?)?;
     Ok(())
 }
 

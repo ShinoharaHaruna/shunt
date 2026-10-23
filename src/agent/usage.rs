@@ -179,13 +179,10 @@ pub fn write_usage(root: &Path, track: &str, base: &str, u: &TaskUsage) {
     if !entry.is_dir() {
         return;
     }
-    let tmp = entry.join(".usage.tmp");
     let Ok(j) = serde_json::to_string(u) else {
         return;
     };
-    if std::fs::write(&tmp, j).is_ok() {
-        let _ = std::fs::rename(&tmp, entry.join("usage"));
-    }
+    let _ = crate::server::fsutil::atomic_write_umask(&entry.join("usage"), j);
 }
 
 /// Read an entry's `usage` sidecar (status path). Missing or

@@ -10,7 +10,7 @@
 
 use crate::agent::queue::{seq_lock, unix_now};
 use crate::proto::task::sanitize_slug;
-use crate::server::fsutil::{private_dir, write_private};
+use crate::server::fsutil::{atomic_write, private_dir, tmp_sibling, write_private};
 use crate::server::registry::names::{self, Resolution};
 use crate::server::registry::{self, shunt_home, valid_name};
 use crate::server::spool::iso_utc;
@@ -223,15 +223,10 @@ fn load_meta(dir: &Path) -> Result<Meta> {
     serde_json::from_str(&text).with_context(|| format!("bad JSON in {} — fix or remove the file; `room rm` drops the whole room", path.display()))
 }
 
-/// meta.json rewrite: temp-then-rename + 0600, the registry's
-/// save_with_header discipline — a concurrent `ls`/`members` must
-/// never read a torn roster.
+/// meta.json rewrite via fsutil::atomic_write — a concurrent
+/// `ls`/`members` must never read a torn roster.
 fn save_meta(dir: &Path, meta: &Meta) -> Result<()> {
-    let path = dir.join("meta.json");
-    let tmp = dir.join(format!(".meta.{}.tmp", std::process::id()));
-    write_private(&tmp, serde_json::to_string_pretty(meta)?)?;
-    fs::rename(&tmp, &path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
+    atomic_write(&dir.join("meta.json"), serde_json::to_string_pretty(meta)?)
 }
 
 /// Live message numbers, sorted. `msgs/.archive/` is dot-prefixed
@@ -324,10 +319,7 @@ fn mark(dir: &Path, label: &str, through: Option<u32>) -> Result<()> {
     let max_n = through.unwrap_or_else(|| msg_numbers(dir).last().copied().unwrap_or(0)).max(last_read(dir, label));
     let rdir = dir.join("readers");
     private_dir(&rdir)?;
-    let path = rdir.join(format!("{label}.json"));
-    let tmp = rdir.join(format!(".tmp.{}.{label}", std::process::id()));
-    write_private(&tmp, serde_json::to_string(&Reader { last_read_n: max_n })?)?;
-    fs::rename(&tmp, &path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    atomic_write(&rdir.join(format!("{label}.json")), serde_json::to_string(&Reader { last_read_n: max_n })?)?;
 
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     if let Ok(rd) = fs::read_dir(&rdir) {
@@ -361,7 +353,8 @@ fn initialize_room(dir: &Path, initialize: impl FnOnce(&Path) -> Result<()>) -> 
         // replacement, which remove_dir alone would otherwise accept.
         if fs::symlink_metadata(dir).is_ok_and(|m| m.dev() == owned.dev() && m.ino() == owned.ino()) {
             let cleanup = || -> std::io::Result<()> {
-                let tmp = dir.join(format!(".meta.{}.tmp", std::process::id()));
+                // save_meta's staging sibling, if it stranded mid-write.
+                let tmp = tmp_sibling(&dir.join("meta.json"));
                 if tmp.exists() {
                     fs::remove_file(tmp)?;
                 }
@@ -483,9 +476,7 @@ pub fn say(room: &str, label: &str, body: &str) -> Result<(u32, bool)> {
         let n = mint_locked(&dir)?;
         let msgs = dir.join("msgs");
         private_dir(&msgs)?;
-        let tmp = msgs.join(format!(".tmp.{}.{n:04}", std::process::id()));
-        write_private(&tmp, serde_json::to_string_pretty(&msg)?)?;
-        fs::rename(&tmp, msgs.join(format!("{n:04}.json"))).with_context(|| format!("cannot install message {n:04} in {}", msgs.display()))?;
+        atomic_write(&msgs.join(format!("{n:04}.json")), serde_json::to_string_pretty(&msg)?)?;
         // §17.4 cap: oldest-first into the dot-prefixed archive.
         let mut live = msg_numbers(&dir);
         if live.len() > msg_keep() {
@@ -694,7 +685,7 @@ mod creation_tests {
         let result = initialize_room(&dir, |dir| {
             fs::create_dir(dir.join("msgs"))?;
             fs::create_dir(dir.join("readers"))?;
-            fs::write(dir.join(format!(".meta.{}.tmp", std::process::id())), b"partial")?;
+            fs::write(tmp_sibling(&dir.join("meta.json")), b"partial")?;
             anyhow::bail!("injected initialization failure")
         });
         assert!(result.is_err());

@@ -288,12 +288,7 @@ pub fn stage(entry: &SpoolEntry, body: &str) -> Result<()> {
     crate::server::fsutil::private_dir(&dir)?;
     let json = serde_json::to_string_pretty(entry)?;
     for (name, contents) in [(format!("{}.sh", entry.id), body.to_string()), (format!("{}.json", entry.id), json)] {
-        // Same pid-tagged tmp convention as queue.rs enqueue: ids are
-        // unique per entry so collisions are unlikely, but a shared
-        // tmp name is still the wrong primitive under concurrency.
-        let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-        crate::server::fsutil::write_private(&tmp, contents)?;
-        fs::rename(&tmp, dir.join(&name))?;
+        crate::server::fsutil::atomic_write(&dir.join(name), contents)?;
     }
     Ok(())
 }
@@ -305,11 +300,8 @@ pub(crate) fn pin_target(entry: &mut SpoolEntry, qroot: &str) -> Result<()> {
         let mut pinned = entry.clone();
         pinned.qroot = Some(qroot.into());
         let dir = spool_dir()?;
-        let name = format!("{}.json", entry.id);
         valid_task_id(&entry.id)?;
-        let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-        crate::server::fsutil::write_private(&tmp, serde_json::to_string_pretty(&pinned)?)?;
-        fs::rename(&tmp, dir.join(name))?;
+        crate::server::fsutil::atomic_write(&dir.join(format!("{}.json", entry.id)), serde_json::to_string_pretty(&pinned)?)?;
         *entry = pinned;
     }
     Ok(())

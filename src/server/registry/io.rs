@@ -3,7 +3,7 @@
 
 use super::paths::shunt_home;
 use super::types::*;
-use crate::server::fsutil::{private_dir, write_private};
+use crate::server::fsutil::{atomic_write, private_dir};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -84,16 +84,9 @@ fn save_with_header<T: Serialize>(dir: &str, name: &str, value: &T, header: &str
         private_dir(parent)?;
     }
     let text = format!("{header}{}", toml::to_string_pretty(value)?);
-    // Temp-write + rename: a concurrent `dispatch --once` sweep
-    // reading the row mid-update must never see a truncated TOML.
-    // The tmp name carries the pid (`<name>.toml.<pid>.tmp`, same
-    // convention as queue.rs enqueue's `.tmp.<pid>.<n>`): two shunt
-    // processes writing the same row — `client update` racing a
-    // probe facts merge — would otherwise interleave into ONE tmp
-    // file and rename a torn TOML over the good row, losing it.
-    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
-    write_private(&tmp, text)?;
-    fs::rename(&tmp, &path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    // atomic_write: a concurrent `dispatch --once` sweep reading
+    // the row mid-update must never see a truncated TOML.
+    atomic_write(&path, text)?;
     Ok(path)
 }
 
@@ -250,11 +243,9 @@ pub fn retarget_default_client(old: &str, new: Option<&str>) -> Result<bool> {
     if !done {
         return Ok(false);
     }
-    // Same tmp+rename + 0600 discipline as save_with_header: a
+    // Same atomic-install discipline as save_with_header: a
     // concurrent reader must never see a truncated server.toml.
-    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
-    write_private(&tmp, out)?;
-    fs::rename(&tmp, &path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    atomic_write(&path, out)?;
     Ok(true)
 }
 

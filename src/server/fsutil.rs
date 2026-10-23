@@ -3,11 +3,11 @@
 //! secrets-adjacent data, so dir/file creation is funneled through
 //! these two helpers.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Registry privacy (design.md §4.1: ssh.password is plaintext —
 /// "keep registry private"). `create_dir_all`/`fs::write` follow the
@@ -52,6 +52,44 @@ pub(crate) fn write_private(path: &Path, contents: impl AsRef<[u8]>) -> Result<(
     Ok(())
 }
 
+/// The pid-tagged staging sibling `atomic_write*` installs route
+/// through — `.<name>.<pid>.tmp` in `path`'s own directory. A
+/// sibling keeps the install rename on one filesystem; the dot
+/// prefix keeps every shunt listing (registry rows, spool, tasks
+/// ledger, room msgs/readers) blind to the half-written file; the
+/// pid keeps two processes writing one target from sharing a tmp —
+/// otherwise the loser's torn write would rename over the winner's.
+/// `pub(crate)` so a site that must predict a stranded staging name
+/// (room create's cleanup) derives it the same way.
+pub(crate) fn tmp_sibling(path: &Path) -> PathBuf {
+    let mut n = std::ffi::OsString::from(".");
+    n.push(path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("tmp")));
+    n.push(format!(".{}.tmp", std::process::id()));
+    path.with_file_name(n)
+}
+
+/// Atomic `path` install under the §4.1 0600 discipline: `contents`
+/// is written to the pid-tagged staging sibling (tmp_sibling) via
+/// write_private, then renamed over `path` — a concurrent reader
+/// can never observe a truncated file. Creating `path`'s parent
+/// stays with the caller (private_dir where the registry owns it).
+pub(crate) fn atomic_write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    let tmp = tmp_sibling(path);
+    write_private(&tmp, contents)?;
+    fs::rename(&tmp, path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+/// `atomic_write` minus the 0600 tightening, for paths the §4.1
+/// privacy scope deliberately excludes — a box-side queue root
+/// follows the umask like every sibling there (task.sh lands 0755).
+pub(crate) fn atomic_write_umask(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    let tmp = tmp_sibling(path);
+    fs::write(&tmp, contents).with_context(|| format!("cannot write {}", tmp.display()))?;
+    fs::rename(&tmp, path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +123,26 @@ mod tests {
         std::env::remove_var("SHUNT_HOME");
         fs::remove_dir_all(&home).ok();
         fs::remove_dir_all(&outside).ok();
+    }
+
+    /// atomic_write lands complete contents at 0600 with no staging
+    /// sibling left behind; the tmp is a dot-prefixed pid-tagged
+    /// same-dir sibling (same-fs rename).
+    #[test]
+    fn atomic_write_installs_privately() {
+        let dir = std::env::temp_dir().join(format!("shunt-aw-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("row.toml");
+        atomic_write(&path, "a = 1\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a = 1\n");
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        atomic_write(&path, "a = 2\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a = 2\n");
+        let tmp = tmp_sibling(&path);
+        assert_eq!(tmp.file_name().unwrap(), format!(".row.toml.{}.tmp", std::process::id()).as_str());
+        assert!(!tmp.exists(), "staging sibling must not survive the install");
+        atomic_write_umask(&path, "a = 3\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a = 3\n");
+        fs::remove_dir_all(&dir).ok();
     }
 }

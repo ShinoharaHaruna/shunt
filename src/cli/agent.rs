@@ -265,16 +265,11 @@ fn workers_impl(a: &WorkersArgs) -> Result<()> {
         _ => None,
     };
     if let Some(n) = set_to {
-        // tmp+rename: a direct truncate+write leaves an empty file
+        // tmp+rename (umask flavor — a qroot is outside §4.1's
+        // 0600 scope): a direct truncate+write leaves an empty file
         // mid-write, and a daemon polling then falls back to
-        // last-known workers for one cycle. The tmp name carries
-        // the pid (same convention as registry io.rs's
-        // `toml.<pid>.tmp`): two `workers set` on one qroot would
-        // otherwise share `.workers.tmp` and race.
-        let target = root.join("workers");
-        let tmp = root.join(format!(".workers.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, format!("{n}\n")).with_context(|| format!("cannot write {}", tmp.display()))?;
-        std::fs::rename(&tmp, &target).with_context(|| format!("cannot write {}", target.display()))?;
+        // last-known workers for one cycle.
+        crate::server::fsutil::atomic_write_umask(&root.join("workers"), format!("{n}\n"))?;
     }
     let w = crate::agent::daemon::resolve_workers(&root);
     if a.json {
