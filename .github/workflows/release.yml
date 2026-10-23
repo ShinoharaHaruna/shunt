@@ -110,7 +110,8 @@ jobs:
           archive="shunt-$TAG-$TARGET"
           mkdir -p "dist/$archive"
           install -m 755 "target/$TARGET/release/shunt" "dist/$archive/shunt"
-          cp LICENSE README.md README.cn.md "dist/$archive/"
+          cp LICENSE README.md "dist/$archive/"
+          cp -R docs "dist/$archive/"
           tar -C dist -czf "dist/$archive.tar.gz" "$archive"
           cd dist
           # per-target sums: the matrix would otherwise race on a

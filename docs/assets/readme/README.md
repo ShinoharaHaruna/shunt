@@ -1,6 +1,6 @@
 # README artwork
 
-These assets support the English project homepage in [README.md](../../../README.md) and its Simplified Chinese translation in [README.cn.md](../../../README.cn.md).
+These shared assets support the canonical English project homepage in [README.md](../../../README.md). Localized READMEs and their SVG diagrams live together under [docs/readme/](../../readme/README.md); all editions reuse the shared hero.
 
 | Asset                                      | Source                                                                                                                                                                                                                                                   |
 | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -9,6 +9,8 @@ These assets support the English project homepage in [README.md](../../../README
 | [queue-lifecycle.svg](queue-lifecycle.svg) | Hand-authored, editable SVG. Summarizes normal task transitions, orphan recovery, declared retries, and optional drain behavior from [design spec §3](../../design.md#3-client-queue-semantics).                                                         |
 
 Keep technical labels in the SVG sources so they remain editable, searchable, and independent of image generation. Detailed edge cases remain in the design spec. The hero is copied into this directory and requires no external image host.
+
+Each localized diagram translates visible prose and accessibility descriptions while retaining literal directory names and technical identifiers. Its editable text uses a font stack covering the target script. Keep all language variants in sync when changing the English SVG sources; the [translation guide](../../readme/README.md) lists the supported editions and their status.
 
 ## Hero generation prompt
 

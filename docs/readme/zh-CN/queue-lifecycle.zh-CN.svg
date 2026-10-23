@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title description" lang="zh-CN" xml:lang="zh-CN">
+  <title id="title">shunt 各队列的任务生命周期与恢复机制</title>
+  <desc id="description">每个命名队列都有独立的文件系统状态目录。待运行任务通过重命名从 pending 移入 running；成功任务归入 done，终止性失败归入 failed。显式声明重试上限后，退出码为 rc 75 或识别到内存不足（OOM）的失败可重新调度；不符合这些条件的普通错误，以及重试次数耗尽后的失败，均为终止性失败。failed 也记录超时任务。守护进程重启时，孤立的运行中任务回到 pending 队首。队列清空后，守护进程可继续驻留，也可选择正常退出。机器空闲关机需单独启用，并等待宽限倒计时结束。服务端在启用前检查所有已注册的同机队列，并拒绝为共享客户端启用关机。运行时的关机检查仅涵盖同一 Unix 账户下仍存活的同机守护进程，不涵盖机器上的全部负载；新任务会取消倒计时。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#697575"/></marker>
+    <marker id="recover" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#bb6238"/></marker>
+  </defs>
+  <rect width="1200" height="620" rx="20" fill="#f8f6f1"/>
+  <g font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" fill="#1d292c">
+    <text x="44" y="60" font-size="32" font-weight="700">每个任务，状态分明。</text>
+    <text x="44" y="94" font-size="19" fill="#586565">各队列状态独立、日志可查、恢复方式明确。</text>
+    <text x="44" y="142" font-size="18" fill="#9b4a28">守护进程重启：孤立的运行中任务回到待运行队首。</text>
+    <path d="M 588 196 V 184 Q 588 170 574 170 H 198 Q 184 170 184 184 V 196" fill="none" stroke="#bb6238" stroke-width="2.5" stroke-dasharray="7 6" stroke-linejoin="round" marker-end="url(#recover)"/>
+    <rect x="44" y="210" width="280" height="112" rx="14" fill="#ffffff" stroke="#cdd4d1" stroke-width="2"/>
+    <text x="68" y="252" font-family="DejaVu Sans Mono, monospace" font-size="28" font-weight="700">pending/</text>
+    <text x="68" y="291" font-size="19" fill="#586565">等待领取</text>
+    <rect x="448" y="210" width="280" height="112" rx="14" fill="#e7eeeb" stroke="#24776b" stroke-width="2"/>
+    <text x="472" y="252" font-family="DejaVu Sans Mono, monospace" font-size="28" font-weight="700" fill="#1d665c">running/</text>
+    <text x="472" y="291" font-size="19" fill="#586565">独立进程组</text>
+    <rect x="904" y="170" width="252" height="100" rx="14" fill="#e7eeeb" stroke="#c5d8ce" stroke-width="2"/>
+    <text x="928" y="209" font-family="DejaVu Sans Mono, monospace" font-size="26" font-weight="700" fill="#1d665c">done/</text>
+    <text x="928" y="244" font-size="18" fill="#586565">成功退出</text>
+    <rect x="904" y="330" width="252" height="100" rx="14" fill="#f7eae2" stroke="#e2c7b7" stroke-width="2"/>
+    <text x="928" y="369" font-family="DejaVu Sans Mono, monospace" font-size="26" font-weight="700" fill="#9b4a28">failed/</text>
+    <text x="928" y="403" font-size="17" fill="#79594a">终止性失败</text>
+    <path d="M 336 266 H 432" fill="none" stroke="#697575" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <text x="384" y="247" font-size="17" text-anchor="middle" fill="#586565">重命名</text>
+    <path d="M 740 242 H 816 V 220 H 888" fill="none" stroke="#697575" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#arrow)"/>
+    <text x="812" y="195" font-size="17" text-anchor="middle" fill="#586565">exit 0</text>
+    <path d="M 740 290 H 816 V 380 H 888" fill="none" stroke="#697575" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#arrow)"/>
+    <path d="M 588 336 V 368 Q 588 382 574 382 H 198 Q 184 382 184 368 V 336" fill="none" stroke="#bb6238" stroke-width="2.5" stroke-dasharray="7 6" stroke-linejoin="round" marker-end="url(#recover)"/>
+    <text x="44" y="420" font-size="18" fill="#9b4a28">显式声明重试上限：rc 75 / 已识别的 OOM（内存不足）→ 延迟重试。</text>
+    <line x1="44" y1="468" x2="1156" y2="468" stroke="#d9ddda"/>
+    <circle cx="52" cy="504" r="6" fill="#24776b"/>
+    <text x="72" y="511" font-size="20" font-weight="700">队列清空后：继续驻留，或选择让守护进程正常退出。</text>
+    <text x="72" y="550" font-size="18" fill="#586565">可选空闲关机：宽限倒计时 + 仅检查同账户的同机存活守护进程。</text>
+    <text x="72" y="585" font-size="18" fill="#586565">新任务会取消倒计时。共享客户端拒绝由服务端启用关机。</text>
+  </g>
+</svg>

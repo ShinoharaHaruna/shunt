@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" lang="pt-BR" xml:lang="pt-BR" role="img" aria-labelledby="title description">
+  <title id="title">Ciclo de vida e recuperação de tarefas por fila no shunt</title>
+  <desc id="description">Cada fila nomeada tem diretórios de estado independentes. Uma tarefa em pending é assumida por renomeação e passa para running; tarefas bem-sucedidas terminam em done e falhas definitivas em failed. Um limite explícito de novas tentativas permite reagendar falhas com rc 75 ou falta de memória reconhecida (OOM); erros fora desses critérios e tarefas que esgotam as novas tentativas são definitivos. failed também registra tarefas que ultrapassam o tempo limite. Ao reiniciar o daemon, tarefas órfãs em running voltam ao início de pending. Com a fila vazia, o daemon pode continuar ativo ou ser configurado para encerrar normalmente. O desligamento por ociosidade é ativado separadamente e aguarda uma contagem regressiva de tolerância. Antes da ativação, o servidor verifica todas as filas registradas na mesma máquina e recusa clientes compartilhados. Durante a execução, as verificações de desligamento abrangem apenas daemons ativos das demais filas da mesma conta Unix, não todas as cargas da máquina; novas tarefas cancelam a contagem.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#697575"/></marker>
+    <marker id="recover" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#bb6238"/></marker>
+  </defs>
+  <rect width="1200" height="620" rx="20" fill="#f8f6f1"/>
+  <g font-family="DejaVu Sans, sans-serif" fill="#1d292c">
+    <text x="44" y="60" font-size="32" font-weight="700">Cada tarefa tem seu lugar.</text>
+    <text x="44" y="94" font-size="19" fill="#586565">Estado por fila, logs consultáveis e recuperação explícita.</text>
+    <text x="44" y="142" font-size="18" fill="#9b4a28">Reinício do daemon: tarefas órfãs voltam ao início da fila.</text>
+    <path d="M 588 196 V 184 Q 588 170 574 170 H 198 Q 184 170 184 184 V 196" fill="none" stroke="#bb6238" stroke-width="2.5" stroke-dasharray="7 6" stroke-linejoin="round" marker-end="url(#recover)"/>
+    <rect x="44" y="210" width="280" height="112" rx="14" fill="#ffffff" stroke="#cdd4d1" stroke-width="2"/>
+    <text x="68" y="252" font-family="DejaVu Sans Mono, monospace" font-size="28" font-weight="700">pending/</text>
+    <text x="68" y="291" font-size="19" fill="#586565">Esperando execução</text>
+    <rect x="448" y="210" width="280" height="112" rx="14" fill="#e7eeeb" stroke="#24776b" stroke-width="2"/>
+    <text x="472" y="252" font-family="DejaVu Sans Mono, monospace" font-size="28" font-weight="700" fill="#1d665c">running/</text>
+    <text x="472" y="291" font-size="16.5" fill="#586565">Grupo de processos próprio</text>
+    <rect x="904" y="170" width="252" height="100" rx="14" fill="#e7eeeb" stroke="#c5d8ce" stroke-width="2"/>
+    <text x="928" y="209" font-family="DejaVu Sans Mono, monospace" font-size="26" font-weight="700" fill="#1d665c">done/</text>
+    <text x="928" y="244" font-size="18" fill="#586565">Saída com sucesso</text>
+    <rect x="904" y="330" width="252" height="100" rx="14" fill="#f7eae2" stroke="#e2c7b7" stroke-width="2"/>
+    <text x="928" y="369" font-family="DejaVu Sans Mono, monospace" font-size="26" font-weight="700" fill="#9b4a28">failed/</text>
+    <text x="928" y="403" font-size="17" fill="#79594a">Falha definitiva</text>
+    <path d="M 336 266 H 432" fill="none" stroke="#697575" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <text x="384" y="247" font-size="17" text-anchor="middle" fill="#586565">renomear</text>
+    <path d="M 740 242 H 816 V 220 H 888" fill="none" stroke="#697575" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#arrow)"/>
+    <text x="812" y="195" font-size="17" text-anchor="middle" fill="#586565">exit 0</text>
+    <path d="M 740 290 H 816 V 380 H 888" fill="none" stroke="#697575" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#arrow)"/>
+    <path d="M 588 336 V 368 Q 588 382 574 382 H 198 Q 184 382 184 368 V 336" fill="none" stroke="#bb6238" stroke-width="2.5" stroke-dasharray="7 6" stroke-linejoin="round" marker-end="url(#recover)"/>
+    <text x="44" y="420" font-size="18" fill="#9b4a28">Limite explícito de novas tentativas: rc 75 / OOM reconhecido → repetir após uma espera.</text>
+    <line x1="44" y1="468" x2="1156" y2="468" stroke="#d9ddda"/>
+    <circle cx="52" cy="504" r="6" fill="#24776b"/>
+    <text x="72" y="511" font-size="20" font-weight="700">Fila vazia: manter o daemon ativo ou optar pelo encerramento normal.</text>
+    <text x="72" y="550" font-size="18" fill="#586565">Desligamento opcional: contagem regressiva + daemons ativos de outras filas da mesma conta.</text>
+    <text x="72" y="585" font-size="18" fill="#586565">Novas tarefas cancelam a contagem. Clientes compartilhados recusam a ativação pelo servidor.</text>
+  </g>
+</svg>

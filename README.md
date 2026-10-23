@@ -1,6 +1,8 @@
 # shunt
 
-English | [简体中文](README.cn.md)
+**English** · [Français](docs/readme/fr/README.fr.md) · [Deutsch](docs/readme/de/README.de.md) · [Italiano](docs/readme/it/README.it.md) · [日本語](docs/readme/ja/README.ja.md) · [Español](docs/readme/es/README.es.md) · [한국어](docs/readme/ko/README.ko.md) · [简体中文](docs/readme/zh-CN/README.zh-CN.md) · [繁體中文](docs/readme/zh-TW/README.zh-TW.md) · [Русский](docs/readme/ru/README.ru.md) · [Bahasa Indonesia](docs/readme/id/README.id.md) · [Português (BR)](docs/readme/pt-BR/README.pt-BR.md)
+
+[Translation status](docs/readme/README.md): all listed editions are complete translations with localized diagrams.
 
 ![shunt — a railway switching yard routing experiment tasks to compute](docs/assets/readme/hero.png)
 

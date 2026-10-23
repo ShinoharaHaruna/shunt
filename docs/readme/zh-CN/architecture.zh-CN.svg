@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" role="img" aria-labelledby="title description" lang="zh-CN" xml:lang="zh-CN">
+  <title id="title">shunt 架构：同一二进制，连接本地与远程实验机器</title>
+  <desc id="description">开发机在注册表中保存机器、具名队列和项目，在暂存区持久保存任务，并向提交时指定的队列投递。协作房间记录项目协定，任务台账保留投递与执行结果的历史。SSH 或本地执行将任务与命令发送到实验机器，并返回 JSON。每条具名队列拥有独立的文件系统状态目录、守护进程、worker 池与环境。机器不可达时，任务继续留在暂存区。空闲时退出守护进程或关闭机器均为可选行为。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#24776b"/></marker>
+    <marker id="return" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#697575"/></marker>
+  </defs>
+  <rect width="1200" height="600" rx="20" fill="#f8f6f1"/>
+  <g font-family="'Noto Sans CJK SC', 'Microsoft YaHei', 'PingFang SC', sans-serif" fill="#1d292c">
+    <text x="44" y="60" font-size="32" font-weight="700">同一个二进制，贯通本地与远程。</text>
+    <text x="44" y="94" font-size="19" fill="#586565">持久暂存任务，明确投递目标，各队列独立运行。</text>
+    <rect x="44" y="130" width="430" height="354" rx="16" fill="#ffffff" stroke="#d9ddda" stroke-width="2"/>
+    <path d="M 60 130 H 458 Q 474 130 474 146 V 194 H 44 V 146 Q 44 130 60 130" fill="#e9edeb"/>
+    <text x="72" y="169" font-size="20" font-weight="700">01 / 开发机</text>
+    <rect x="726" y="130" width="430" height="354" rx="16" fill="#ffffff" stroke="#d9ddda" stroke-width="2"/>
+    <path d="M 742 130 H 1140 Q 1156 130 1156 146 V 194 H 726 V 146 Q 726 130 742 130" fill="#e3eeea"/>
+    <text x="754" y="169" font-size="20" font-weight="700">02 / 实验机器</text>
+    <circle cx="80" cy="219" r="5" fill="#bb6238"/>
+    <text x="98" y="227" font-size="23" font-weight="700">注册表</text>
+    <text x="98" y="254" font-size="18" fill="#586565">机器、具名队列与项目</text>
+    <line x1="72" y1="273" x2="446" y2="273" stroke="#e7eae6"/>
+    <circle cx="80" cy="291" r="5" fill="#bb6238"/>
+    <text x="98" y="299" font-size="23" font-weight="700">任务暂存</text>
+    <text x="98" y="326" font-size="18" fill="#586565">确认收讫前持续保留任务</text>
+    <line x1="72" y1="345" x2="446" y2="345" stroke="#e7eae6"/>
+    <circle cx="80" cy="363" r="5" fill="#bb6238"/>
+    <text x="98" y="371" font-size="23" font-weight="700">任务投递</text>
+    <text x="98" y="398" font-size="18" fill="#586565">投递任务，按需拉起队列守护进程</text>
+    <line x1="72" y1="417" x2="446" y2="417" stroke="#e7eae6"/>
+    <circle cx="80" cy="435" r="5" fill="#bb6238"/>
+    <text x="98" y="443" font-size="23" font-weight="700">协作房间与任务台账</text>
+    <text x="98" y="470" font-size="18" fill="#586565">记录项目协定与任务历史</text>
+    <rect x="754" y="212" width="374" height="104" rx="10" fill="#f4f8f5" stroke="#d9e4dd"/>
+    <text x="774" y="243" font-size="22" font-weight="700" fill="#1d665c">队列 / train</text>
+    <text x="774" y="273" font-size="17" fill="#586565">独立目录、守护进程、worker 池与环境</text>
+    <text x="774" y="298" font-family="DejaVu Sans Mono, monospace" font-size="15" fill="#586565">pending/ running/ done/ failed/</text>
+    <rect x="754" y="330" width="374" height="104" rx="10" fill="#f4f8f5" stroke="#d9e4dd"/>
+    <text x="774" y="361" font-size="22" font-weight="700" fill="#1d665c">队列 / eval</text>
+    <text x="774" y="391" font-size="17" fill="#586565">独立目录、守护进程、worker 池与环境</text>
+    <text x="774" y="416" font-family="DejaVu Sans Mono, monospace" font-size="15" fill="#586565">pending/ running/ done/ failed/</text>
+    <text x="941" y="464" font-size="17" text-anchor="middle" fill="#586565">独立队列，共用一个 client 身份</text>
+    <text x="600" y="260" font-size="20" font-weight="700" text-anchor="middle" fill="#24776b">SSH / 本地执行</text>
+    <path d="M 492 282 H 708" fill="none" stroke="#24776b" stroke-width="3" marker-end="url(#arrow)"/>
+    <text x="600" y="310" font-size="17" text-anchor="middle" fill="#586565">任务与命令</text>
+    <text x="600" y="363" font-size="20" font-weight="700" text-anchor="middle" fill="#586565">JSON 响应</text>
+    <path d="M 708 382 H 492" fill="none" stroke="#697575" stroke-width="2.5" marker-end="url(#return)"/>
+    <line x1="44" y1="518" x2="1156" y2="518" stroke="#d9ddda"/>
+    <text x="44" y="551" font-size="18" fill="#586565">工作站 · 实验室服务器 · 云端实例 · CPU 或 GPU</text>
+    <text x="44" y="582" font-size="17" fill="#586565">机器离线时，任务继续保留在暂存区。</text>
+    <text x="1156" y="582" font-size="17" text-anchor="end" fill="#586565">可选：空闲时退出守护进程，或关闭机器。</text>
+  </g>
+</svg>

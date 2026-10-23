@@ -1,8 +1,8 @@
 # shunt
 
-[English](README.md) | 简体中文
+[English](../../../README.md) · [Français](../fr/README.fr.md) · [Deutsch](../de/README.de.md) · [Italiano](../it/README.it.md) · [日本語](../ja/README.ja.md) · [Español](../es/README.es.md) · [한국어](../ko/README.ko.md) · **简体中文** · [繁體中文](../zh-TW/README.zh-TW.md) · [Русский](../ru/README.ru.md) · [Bahasa Indonesia](../id/README.id.md) · [Português (BR)](../pt-BR/README.pt-BR.md)
 
-![shunt —— 将实验任务调度到计算资源的铁路编组场](docs/assets/readme/hero.png)
+![shunt —— 将实验任务调度到计算资源的铁路编组场](../../assets/readme/hero.png)
 
 <p align="center">
   <strong>运行实验，协调算力。</strong><br>
@@ -10,13 +10,13 @@
 </p>
 
 <p align="center">
-  <a href="Cargo.toml"><img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-313c40?style=flat-square"></a>
+  <a href="../../../Cargo.toml"><img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-313c40?style=flat-square"></a>
   <img
     alt="平台：Linux"
     src="https://img.shields.io/badge/platform-Linux-313c40?style=flat-square"
   >
-  <a href="docs/design.md#5-wire-protocol"><img alt="通信：SSH + JSON" src="https://img.shields.io/badge/wire-SSH_%2B_JSON-24776b?style=flat-square"></a>
-  <a href="LICENSE"><img alt="许可证：MIT" src="https://img.shields.io/badge/license-MIT-bb6238?style=flat-square"></a>
+  <a href="../../design.md#5-wire-protocol"><img alt="通信：SSH + JSON" src="https://img.shields.io/badge/wire-SSH_%2B_JSON-24776b?style=flat-square"></a>
+  <a href="../../../LICENSE"><img alt="许可证：MIT" src="https://img.shields.io/badge/license-MIT-bb6238?style=flat-square"></a>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
   <a href="#工作原理">架构</a> ·
   <a href="#协调共享算力">协作</a> ·
   <a href="#面向-agent">Agent 指南</a> ·
-  <a href="docs/design.md">设计规范</a> ·
+  <a href="../../design.md">设计规范</a> ·
   <a href="#参与贡献">参与贡献</a>
 </p>
 
@@ -99,7 +99,7 @@ shunt project bind experiments --client lab \
 
 `--shared` 阻止从 server 侧开启空闲关机；`--exit-on-idle` 让队列守护进程在排空后退出，并在下次投递时重新启动。如果你使用独占机器并希望守护进程常驻，可以省略这两个参数。`expire = "unlimited"` 适用于自有或实验室机器；云端机器也可以使用 `"metered"` 或订阅到期时间，并按需配置计费费率。
 
-Bootstrap 将二进制安装到队列根目录下、检查运行时兼容性、初始化队列、启动守护进程并探测机器信息。如果本地构建依赖较新的 glibc，它可以获取匹配版本的静态 release；其他架构或尚未发布的构建可能需要显式指定 `--bin-path`。参见[二进制兼容性](docs/design.md#15-binary-compatibility-at-bootstrap)。
+Bootstrap 将二进制安装到队列根目录下、检查运行时兼容性、初始化队列、启动守护进程并探测机器信息。如果本地构建依赖较新的 glibc，它可以获取匹配版本的静态 release；其他架构或尚未发布的构建可能需要显式指定 `--bin-path`。参见[二进制兼容性](../../design.md#15-binary-compatibility-at-bootstrap)。
 
 对于独占的云端实例，`--template autodl` 等厂商模板可预填部署默认值。不指定 `--key` 时，shunt 会生成专用密钥对：你可以自行安装公钥；也可以在独占机器上配置 `ssh.password` 并安装 `sshpass`，用密码辅助部署。共享 client 跳过自动密钥部署。
 
@@ -125,7 +125,7 @@ shunt logs -c lab exp1               # 查看任务日志
 
 ## 工作原理
 
-![架构：开发机持有 registry、spool、dispatcher 和协作房间；通过 SSH 或本地执行连接实验机器，机器上设有彼此独立的具名队列](docs/assets/readme/architecture.svg)
+![架构：开发机持有 registry、spool、dispatcher 和协作房间；通过 SSH 或本地执行连接实验机器，机器上设有彼此独立的具名队列](architecture.zh-CN.svg)
 
 名字来自铁路调车（shunting）。开发机是编组场，每台实验机器是一条目的地侧线。**Client** 是登记的机器；**queue** 是机器上的一条执行通道；**项目绑定**为 `(client, queue)` 对提供工作目录和环境。
 
@@ -158,11 +158,11 @@ shunt status -c lab --queue eval --json
 
 ### 可以直接检查的队列
 
-![任务生命周期：pending 任务被领取进入 running，然后结束于 done 或 failed；守护进程重启会将孤儿 running 条目重新排队；开启空闲关机后，倒计时只在队列排空后开始](docs/assets/readme/queue-lifecycle.svg)
+![任务生命周期：pending 任务被领取进入 running，然后结束于 done 或 failed；守护进程重启会将孤儿 running 条目重新排队；开启空闲关机后，倒计时只在队列排空后开始](queue-lifecycle.zh-CN.svg)
 
 每个任务是一个名为 `NNNN_<slug>` 的目录，包含 `task.sh`，并逐渐积累 `log`、实时 `pid` 记录、实测 `usage` 和最终的 `exit` 码。队列通过文件系统 rename 迁移状态。每次轮询都会重新读取 worker 数量，调整池大小无需重启；减少 worker 时，会让当前任务完成。任务运行在独立进程组中，发送信号前会核对记录的进程身份。
 
-**执行语义是至少一次。** Server 生成的任务 ID 可以对仍在队列各状态目录中的重复投递去重，但守护进程恢复或超出去重窗口的投递仍可能触发重跑。Guard 是执行前的存在性检查，因此只有当产物代表已完成的工作时才发布它，并确保重跑安全。它不提供恰好一次执行，也不是防止重叠执行的锁。参见 [guard 契约](docs/design.md#313-task-file-format-and-the-guard-contract) 和[任务模板](task_template.sh)。
+**执行语义是至少一次。** Server 生成的任务 ID 可以对仍在队列各状态目录中的重复投递去重，但守护进程恢复或超出去重窗口的投递仍可能触发重跑。Guard 是执行前的存在性检查，因此只有当产物代表已完成的工作时才发布它，并确保重跑安全。它不提供恰好一次执行，也不是防止重叠执行的锁。参见 [guard 契约](../../design.md#313-task-file-format-and-the-guard-contract) 和[任务模板](../../../task_template.sh)。
 
 ## 感知资源的实验运行
 
@@ -181,7 +181,7 @@ shunt status -c lab --json
 
 Status 将资源声明与采样得到的每个任务 RAM 峰值、各 GPU 的 VRAM 峰值及累计 CPU 秒数并列展示，同时报告当前 GPU 显存与利用率、主机 RAM 和负载；机器探测提供考虑 cgroup 限额的容量信息。GPU 遥测在可用时使用 `nvidia-smi`。采样可能漏掉短命进程或短暂峰值。
 
-**资源估计是标注，不会预留资源，也不执行准入检查。** 目标机器、worker 数量和 GPU 分配由你或 agent 决定。纯 CPU 任务使用同一套队列，无需 GPU 参数。参见[资源遥测](docs/design.md#316-resource-declarations-and-usage-telemetry)。
+**资源估计是标注，不会预留资源，也不执行准入检查。** 目标机器、worker 数量和 GPU 分配由你或 agent 决定。纯 CPU 任务使用同一套队列，无需 GPU 参数。参见[资源遥测](../../design.md#316-resource-declarations-and-usage-telemetry)。
 
 ## 协调共享算力
 
@@ -201,7 +201,7 @@ shunt status --all --json --as experiments
 
 房间记录项目成员、各身份的未读位置和当前决议。`room ls` 会建议将绑定到同一台机器的项目分组。长对话可以压缩成消息流中的摘要，同时保留已归档消息，供按范围读取；整个房间也可以归档和恢复。
 
-房间保存在一台开发机上，可关联其登记的多个 client。共享该 registry 的 agent 可以在调整共享算力前轮询房间。参与者通过 `workers` 或 `submit --env` 等命令落实约定后，协定才会生效；房间本身不强制执行调度或资源分配。参见[协作房间](docs/design.md#17-coordination-rooms-server-side)。
+房间保存在一台开发机上，可关联其登记的多个 client。共享该 registry 的 agent 可以在调整共享算力前轮询房间。参与者通过 `workers` 或 `submit --env` 等命令落实约定后，协定才会生效；房间本身不强制执行调度或资源分配。参见[协作房间](../../design.md#17-coordination-rooms-server-side)。
 
 ## 日常操作
 
@@ -234,7 +234,7 @@ shunt status --all --json --as experiments
 
 升级会在安装前校验 release 校验和与二进制版本。运行中的远程守护进程会继续使用已加载的版本，直到通过 `queue stop` / `queue start` 排空并重启；替换二进制不会中断当前工作。预构建 release 升级目前面向 Linux x86_64。
 
-用 `shunt <command> --help` 查看参数，完整命令见 [CLI 参考](docs/design.md#10-cli-surface)。`status`、`logs` 等队列命令也可以加上 `--root <qroot>`，直接在机器上运行。
+用 `shunt <command> --help` 查看参数，完整命令见 [CLI 参考](../../design.md#10-cli-surface)。`status`、`logs` 等队列命令也可以加上 `--root <qroot>`，直接在机器上运行。
 
 ### 可选的空闲关机
 
@@ -246,7 +246,7 @@ shunt status --all --json --as experiments
 
 CLI 同时也是 agent 接口。队列状态与任务台账查询提供结构化 JSON 或 JSONL；任务及守护进程日志提供这些状态背后的细节。机器信息、实时资源、资源声明与实测用量对比，以及房间未读数，为 agent 选择目标、规划批量任务和协商共享算力提供上下文。机器有成本或到期限制时，配置好的计费费率与到期元数据也会提供参考。
 
-随附的 [shunt skill](skills/shunt/SKILL.md) 涵盖初始化配置、带 guard 的提交、队列解读、协作、失败处理，以及可选的成本感知操作。让 agent 管理实验机器前，先将这个 skill 交给它。
+随附的 [shunt skill](../../../skills/shunt/SKILL.md) 涵盖初始化配置、带 guard 的提交、队列解读、协作、失败处理，以及可选的成本感知操作。让 agent 管理实验机器前，先将这个 skill 交给它。
 
 把 `skills/shunt/` 链接到你的 agent 加载 skill 的目录即可安装：
 
@@ -264,7 +264,7 @@ shunt task show <id> --json
 
 shunt 提供事实并执行明确的命令。选择机器、落实资源协定、判断一次运行是否符合预算，以及配置或开启机器，仍由人或外围的 agent 工作流负责。
 
-当 agent 遇到 shunt 的缺陷或不顺手之处，`shunt feedback "title" --body "…"` 会将反馈提交为 GitHub issue。反馈通道会擦除 registry 中已知的凭据，以及已登记的 client、项目和队列名称；先在本地保存报告，再投递，并通过重复去重和每小时上限限制提交。用 `--dry-run` 预览、`feedback ls --json` 查看待投递报告、`feedback retry` 重新投递。报告默认公开，擦除器无法识别任意形式的秘密信息。参见[反馈通道](docs/design.md#14-feedback-channel)。
+当 agent 遇到 shunt 的缺陷或不顺手之处，`shunt feedback "title" --body "…"` 会将反馈提交为 GitHub issue。反馈通道会擦除 registry 中已知的凭据，以及已登记的 client、项目和队列名称；先在本地保存报告，再投递，并通过重复去重和每小时上限限制提交。用 `--dry-run` 预览、`feedback ls --json` 查看待投递报告、`feedback retry` 重新投递。报告默认公开，擦除器无法识别任意形式的秘密信息。参见[反馈通道](../../design.md#14-feedback-channel)。
 
 ## 运行边界
 
@@ -274,11 +274,11 @@ shunt 提供事实并执行明确的命令。选择机器、落实资源协定�
 - **关机需要显式开启。** 空闲关机使用可配置的命令和宽限期，默认 60 秒。受管队列为空，无法证明其他用户或未受管工作负载已空闲。请确认关机命令适用于你的机器；shunt 不控制厂商的计费规则。与最后一次关机检查同时发生的入队，仍可能来不及阻止关机。
 - **部署需要显式操作。** 项目绑定记录路径和环境；它不同步源码、不安装依赖，也不创建远程 workdir。
 
-Rust 实现覆盖 registry、具名队列、spool、dispatcher、SSH 与本地 transport、任务遥测、协作房间、tunnel、升级、反馈和 client 队列守护进程。项目仍在积极开发；[docs/design.md](docs/design.md) 定义行为契约及其边界情况。
+Rust 实现覆盖 registry、具名队列、spool、dispatcher、SSH 与本地 transport、任务遥测、协作房间、tunnel、升级、反馈和 client 队列守护进程。项目仍在积极开发；[docs/design.md](../../design.md) 定义行为契约及其边界情况。
 
 ## 参与贡献
 
-先读[设计规范](docs/design.md)和[仓库指南](AGENTS.md)。改动队列行为时，请同步更新契约，并覆盖相关的状态迁移或失败场景。
+先读[设计规范](../../design.md)和[仓库指南](../../../AGENTS.md)。改动队列行为时，请同步更新契约，并覆盖相关的状态迁移或失败场景。
 
 ```bash
 just setup       # 启用版本化的 Git hooks
@@ -290,7 +290,7 @@ just check       # 格式检查 + clippy (-D warnings) + 测试
 
 ### 发布版本
 
-在要发布的 commit 上打一个 SemVer tag，例如 `v0.1.0`（也支持 `0.1.0`），然后推送。去掉可选的 `v` 前缀后，版本必须与 `Cargo.toml` 中的 `package.version` 一致；修改版本时也要同步更新 `Cargo.lock`。该 commit 必须包含 [release workflow](.github/workflows/release.yml)。
+在要发布的 commit 上打一个 SemVer tag，例如 `v0.1.0`（也支持 `0.1.0`），然后推送。去掉可选的 `v` 前缀后，版本必须与 `Cargo.toml` 中的 `package.version` 一致；修改版本时也要同步更新 `Cargo.lock`。该 commit 必须包含 [release workflow](../../../.github/workflows/release.yml)。
 
 ```bash
 git tag -a v0.1.0 -m "Release v0.1.0"
@@ -299,14 +299,14 @@ git push origin v0.1.0
 
 Workflow 会检查格式、运行 Clippy，并对两个 target 运行测试；通过后发布 GitHub Release，附带自动生成的更新说明、Linux x86_64 musl（静态）与 GNU 二进制压缩包，以及各 target 的 `SHA256SUMS-<target>` 文件。带预发布后缀的 tag（例如 `v0.2.0-rc.1`）会创建 prerelease。使用内置的 `GITHUB_TOKEN`，无需额外配置 secret。重跑不会覆盖已发布的 release。
 
-| 从这里开始                           | 用途                                     |
-| ------------------------------------ | ---------------------------------------- |
-| [设计规范](docs/design.md)           | 队列语义、通信协议、遥测、房间和测试策略 |
-| [Agent skill](skills/shunt/SKILL.md) | AI agent 的操作手册                      |
-| [厂商模板](etc/vendors/)             | AutoDL 和 generic 的 client 默认配置     |
-| [任务模板](task_template.sh)         | 编写带 guard 的任务脚本                  |
-| [集成测试](tests/)                   | 队列、进程、关机和投递行为               |
+| 从这里开始                                    | 用途                                     |
+| --------------------------------------------- | ---------------------------------------- |
+| [设计规范](../../design.md)                   | 队列语义、通信协议、遥测、房间和测试策略 |
+| [Agent skill](../../../skills/shunt/SKILL.md) | AI agent 的操作手册                      |
+| [厂商模板](../../../etc/vendors/)             | AutoDL 和 generic 的 client 默认配置     |
+| [任务模板](../../../task_template.sh)         | 编写带 guard 的任务脚本                  |
+| [集成测试](../../../tests/)                   | 队列、进程、关机和投递行为               |
 
 ## License
 
-[MIT](LICENSE)。
+[MIT](../../../LICENSE)。
