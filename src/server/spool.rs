@@ -193,7 +193,14 @@ pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slu
 #[allow(clippy::too_many_arguments)]
 pub fn submit_to(client_name: &str, queue: Option<&str>, project: Option<&str>, guard: Option<&str>, slug: Option<&str>, file: Option<&str>, flags: &TaskFlags, cmd: &[String]) -> Result<String> {
     let client = registry::load_client(client_name)?;
-    let project_entry = project.map(registry::load_project).transpose()?;
+    // `--project` resolves through the name middleware like `-c` —
+    // a case-folded hit substitutes the canonical spelling with a
+    // note; a miss names did-you-mean candidates (§4.1).
+    let project = match project {
+        Some(p) => Some(registry::names::into_resolved(registry::names::resolve_project(p)?, "project")?),
+        None => None,
+    };
+    let project_entry = project.as_deref().map(registry::load_project).transpose()?;
     // A sole binding is unambiguous even when the client's default differs.
     let binding_queue = project_entry.as_ref().and_then(|p| {
         let mut bindings = p.bind.iter().filter(|b| b.client == client_name);
@@ -264,7 +271,7 @@ pub fn submit_to(client_name: &str, queue: Option<&str>, project: Option<&str>, 
         eprintln!("submit: WARNING: '{}' carries no guard; at-least-once requeue will run it twice (lost ack, orphan requeue). Pass --guard <path> unless the task is naturally idempotent.", meta.slug);
     }
 
-    let entry = SpoolEntry { id: id.clone(), project: project.unwrap_or("").to_string(), client: client.name.clone(), queue: target.name, qroot: Some(target.client.qroot), meta, submitted_at: iso_utc(now_unix()) };
+    let entry = SpoolEntry { id: id.clone(), project: project.unwrap_or_default(), client: client.name.clone(), queue: target.name, qroot: Some(target.client.qroot), meta, submitted_at: iso_utc(now_unix()) };
     stage(&entry, &body)?;
     Ok(id)
 }

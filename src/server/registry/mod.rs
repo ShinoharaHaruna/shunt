@@ -11,6 +11,7 @@
 //! - `tests` — unit tests + `HOME_LOCK` (serializes `SHUNT_HOME` users)
 
 mod io;
+pub mod names;
 mod paths;
 mod queues;
 mod state;

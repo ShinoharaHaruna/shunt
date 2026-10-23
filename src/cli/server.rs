@@ -138,12 +138,34 @@ pub(crate) fn rootless(root: &Option<String>) -> bool {
     root.is_none() && std::env::var_os("SHUNT_ROOT").is_none()
 }
 
+/// A typed client reference (`-c`, `version -c`, `upgrade -c`,
+/// `project bind <client>`): resolve through the registry name
+/// middleware (design.md §4.1). A unique case-fold hit substitutes
+/// the canonical spelling with a stderr note — picking a box to
+/// talk to deserves a spoken word — and a miss carries did-you-mean
+/// suggestions. (Configured names like `default_client` are not
+/// typed input and do not come through here.)
+pub(crate) fn canonical_client(typed: &str) -> Result<String> {
+    use crate::server::registry::names::{self, Resolution};
+    match names::resolve_client(typed)? {
+        Resolution::Unknown { input, suggestions } => {
+            // list_clients skips disabled rows, so a disabled name
+            // lands here — name it disabled rather than unknown.
+            if crate::server::registry::load_client_row(&input).is_ok_and(|r| r.disabled) {
+                anyhow::bail!("client {input} is disabled");
+            }
+            anyhow::bail!("unknown client {input:?}{}", names::did_you_mean(&suggestions));
+        }
+        r => names::into_resolved(r, "client"),
+    }
+}
+
 /// Client for a server-only command (submit, tunnel): `-c` wins,
 /// else `server.toml` `default_client`; neither is an error
 /// (design.md §4.1).
 pub(crate) fn required_client(flag: &Option<String>) -> Result<String> {
     if let Some(c) = flag {
-        return Ok(c.clone());
+        return canonical_client(c);
     }
     crate::server::registry::load_server_config()?.default_client.ok_or_else(|| anyhow::anyhow!("no -c/--client given and no default_client in server.toml"))
 }
@@ -155,7 +177,7 @@ pub(crate) fn required_client(flag: &Option<String>) -> Result<String> {
 /// never hijacked by a stray server.toml (design.md §4.1).
 pub(crate) fn resolve_client(flag: &Option<String>, root: &Option<String>) -> Result<Option<String>> {
     if let Some(c) = flag {
-        return Ok(Some(c.clone()));
+        return Ok(Some(canonical_client(c)?));
     }
     if !rootless(root) {
         return Ok(None);
@@ -515,6 +537,10 @@ mod tests {
         let home = tmp_home("reqcli");
         std::env::set_var("SHUNT_HOME", &home);
         std::fs::write(home.join("server.toml"), "default_client = \"gpu-1\"\n").unwrap();
+        // The -c value resolves through the registry name middleware,
+        // so the row must exist for the flag path to return it.
+        std::fs::create_dir_all(home.join("clients")).unwrap();
+        std::fs::write(home.join("clients/other.toml"), "name = \"other\"\n").unwrap();
         assert_eq!(required_client(&None).unwrap(), "gpu-1");
         assert_eq!(required_client(&Some("other".into())).unwrap(), "other");
         std::fs::remove_dir_all(&home).ok();
@@ -582,7 +608,10 @@ mod tests {
         assert_eq!(resolve_client(&None, &None).unwrap().as_deref(), Some("gpu-1"));
         // A local root in scope keeps the call local.
         assert_eq!(resolve_client(&None, &Some("/tmp/q".into())).unwrap(), None);
-        // Explicit -c always wins.
+        // Explicit -c always wins — resolved through the name
+        // middleware, so the row must be registered.
+        std::fs::create_dir_all(home.join("clients")).unwrap();
+        std::fs::write(home.join("clients/x.toml"), "name = \"x\"\n").unwrap();
         assert_eq!(resolve_client(&Some("x".into()), &Some("/tmp/q".into())).unwrap().as_deref(), Some("x"));
         std::fs::remove_dir_all(&home).ok();
     }

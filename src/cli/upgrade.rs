@@ -12,13 +12,16 @@ use std::path::PathBuf;
 
 pub fn cmd_upgrade(a: &UpgradeArgs) -> Result<()> {
     anyhow::ensure!(a.queue.is_none() || a.client.is_some(), "--queue requires -c CLIENT for a remote upgrade");
-    if let Some(name) = &a.client {
+    // Same -c resolution as the rest of the server CLI: case-fold
+    // substitutes canonical spelling with a note (§4.1).
+    let client = a.client.as_deref().map(crate::cli::server::canonical_client).transpose()?;
+    if let Some(name) = &client {
         let c = registry::load_client(name)?;
         anyhow::ensure!(a.queue.is_some() || registry::queue_names(&c).len() == 1, "{name} has multiple queue binaries; select each explicitly with `shunt upgrade -c {name} --queue NAME` (list with `shunt queue ls -c {name}`)");
         registry::resolve_queue(&c, a.queue.as_deref())?;
     }
     let latest = release::latest_release()?;
-    match &a.client {
+    match &client {
         Some(name) => upgrade_remote(a, name, &latest),
         None => upgrade_local(a, &latest),
     }
@@ -63,7 +66,8 @@ fn upgrade_local(a: &UpgradeArgs, release: &release::Release) -> Result<()> {
 /// Box upgrade: the musl static asset (runs on every libc — the §15
 /// rescue's pick is simply the default here) through `bootstrap`,
 /// which keeps the owner-claim, stage-then-mv and smoke checks.
-/// Skips when the box already reports the target version.
+/// Skips when the box already reports the target version. `name` is
+/// the already-resolved canonical client name.
 fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Result<()> {
     let latest = release.version.as_str();
     let resolved = registry::load_queue(name, a.queue.as_deref())?;

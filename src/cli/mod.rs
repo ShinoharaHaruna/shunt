@@ -329,7 +329,7 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             ProjectAction::Remove { name } => registry::remove("projects", &name),
             ProjectAction::Bind { name, client, client_pos, queue, workdir, env } => {
-                let client = client.or(client_pos).expect("clap requires a client");
+                let client = canonical_client(&client.or(client_pos).expect("clap requires a client"))?;
                 let queue = registry::load_queue(&client, queue.as_deref())?.name;
                 let mut e = registry::load_project(&name)?;
                 let mut map = std::collections::BTreeMap::new();
@@ -344,7 +344,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
             ProjectAction::Unbind { name, client, client_pos, queue } => {
-                let client = client.or(client_pos).expect("clap requires a client");
+                let client = canonical_client(&client.or(client_pos).expect("clap requires a client"))?;
                 let queue = registry::load_queue(&client, queue.as_deref())?.name;
                 let mut e = registry::load_project(&name)?;
                 e.bind.retain(|b| b.client != client || b.queue != queue);
@@ -549,7 +549,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 // Forward the --version flag, not a `version`
                 // subcommand — remotes older than this feature
                 // don't have one.
-                let out = remote(name, &["--version"], None, false);
+                let name = canonical_client(name)?;
+                let out = remote(&name, &["--version"], None, false);
                 return out;
             }
             if a.json {

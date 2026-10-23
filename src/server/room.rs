@@ -11,6 +11,7 @@
 use crate::agent::queue::{seq_lock, unix_now};
 use crate::proto::task::sanitize_slug;
 use crate::server::fsutil::{private_dir, write_private};
+use crate::server::registry::names::{self, Resolution};
 use crate::server::registry::{self, shunt_home, valid_name};
 use crate::server::spool::iso_utc;
 use anyhow::{Context, Result};
@@ -151,14 +152,13 @@ fn warn_non_member(name: &str, meta: &Meta, label: &str, action: &str) {
 /// (§17.3). Resolution: explicit `--as` > `admin`. The value is
 /// sanitized like a §3.3 slug, then must also be a valid registry
 /// name (it becomes `readers/<label>.json` — a `..` must not
-/// escape), then canonicalized so every case variant of one
-/// identity lands on ONE spelling: `admin` in any case folds to
-/// `admin`, and exactly one registered project matching
-/// case-insensitively substitutes its canonical spelling —
-/// membership checks, `author`, and the cursor all agree on who
-/// this is. Two registered projects differing only by case make
-/// the label ambiguous — a loud error, not a coin flip; a label
-/// matching nothing is free-form and passes through.
+/// escape), then run through the registry name middleware (§4.1):
+/// `admin` in any case folds to `admin`, and a unique case-fold hit
+/// against registered projects substitutes the canonical spelling
+/// silently — membership checks, `author`, and the cursor all agree
+/// on who this is. Two registered projects differing only by case
+/// make the label ambiguous — a loud error, not a coin flip; a
+/// label matching nothing is free-form and passes through.
 pub(crate) fn resolve_label(as_flag: Option<&str>) -> Result<String> {
     let raw = as_flag.unwrap_or(ADMIN_LABEL);
     let label = sanitize_slug(raw);
@@ -166,11 +166,12 @@ pub(crate) fn resolve_label(as_flag: Option<&str>) -> Result<String> {
     if is_admin(&label) {
         return Ok(ADMIN_LABEL.to_string());
     }
-    let matches: Vec<String> = registry::list_names("projects")?.into_iter().filter(|p| p.eq_ignore_ascii_case(&label)).collect();
-    match matches.len() {
-        0 => Ok(label),
-        1 => Ok(matches.into_iter().next().unwrap()),
-        _ => anyhow::bail!("--as label {label:?} is ambiguous: registered projects {} differ only by case — rename one", matches.join(", ")),
+    match names::resolve_project(&label)? {
+        Resolution::Exact(p) | Resolution::Canonical { canonical: p, .. } => Ok(p),
+        Resolution::Ambiguous(projects) => anyhow::bail!("--as label {label:?} is ambiguous: registered projects {} differ only by case — rename one", projects.join(", ")),
+        // Free-form labels stay legal (§17.3): a non-member warning
+        // still fires downstream where the roster is known.
+        Resolution::Unknown { .. } => Ok(label),
     }
 }
 
@@ -194,42 +195,25 @@ fn existing_rooms_dir() -> Option<PathBuf> {
     d.is_dir().then_some(d)
 }
 
-/// Room dir names, sorted (each is a `rooms/<name>/` dir holding
-/// meta.json — a stray file is not a room).
+/// Room dir names, sorted — the candidate set lives in
+/// `registry::names` so listing and resolving share one predicate.
 fn room_names(dir: &Path) -> Vec<String> {
-    let mut names = Vec::new();
-    if let Ok(rd) = fs::read_dir(dir) {
-        for e in rd.flatten() {
-            if e.file_type().is_ok_and(|t| t.is_dir()) {
-                let n = e.file_name().to_string_lossy().into_owned();
-                if !n.starts_with('.') && e.path().join("meta.json").exists() {
-                    names.push(n);
-                }
-            }
-        }
-    }
-    names.sort();
-    names
+    names::room_names(dir)
 }
 
-/// `<room>` resolves by exact name or unique prefix (§17.2). The
-/// input must be a valid name regardless — it is joined under
-/// rooms/, so `..`/slashes can never escape the dir.
+/// `<room>` resolves through the name middleware (§4.1): exact,
+/// then unique case-fold or unique prefix (§17.2's accepted
+/// resolutions, both reported as `Canonical` and taken silently),
+/// ambiguous prefix a loud bail. The input must be a valid name
+/// regardless — it is joined under rooms/, so `..`/slashes can
+/// never escape the dir.
 fn resolve(input: &str) -> Result<(String, PathBuf)> {
     valid_name(input)?;
     let dir = rooms_dir()?;
-    let exact = dir.join(input);
-    if exact.is_dir() && exact.join("meta.json").exists() {
-        return Ok((input.to_string(), exact));
-    }
-    let matches: Vec<String> = room_names(&dir).into_iter().filter(|n| n.starts_with(input)).collect();
-    match matches.len() {
-        0 => anyhow::bail!("no room named or prefixed {input:?} — `shunt room ls --all` lists what exists, `shunt room create <name> --members p1,p2` makes one"),
-        1 => {
-            let n = matches.into_iter().next().unwrap();
-            Ok((n.clone(), dir.join(n)))
-        }
-        _ => anyhow::bail!("room prefix {input:?} is ambiguous: {}", matches.join(", ")),
+    match names::resolve_room(input)? {
+        Resolution::Exact(name) | Resolution::Canonical { canonical: name, .. } => Ok((name.clone(), dir.join(&name))),
+        Resolution::Unknown { input, suggestions } => anyhow::bail!("no room named or prefixed {input:?}{} — `shunt room ls --all` lists what exists, `shunt room create <name> --members p1,p2` makes one", names::did_you_mean(&suggestions)),
+        Resolution::Ambiguous(cands) => anyhow::bail!("room prefix {input:?} is ambiguous: {}", cands.join(", ")),
     }
 }
 
@@ -403,21 +387,52 @@ fn initialize_room(dir: &Path, initialize: impl FnOnce(&Path) -> Result<()>) -> 
 pub fn create(name: &str, members: &[String], clients: &[String]) -> Result<()> {
     valid_name(name)?;
     anyhow::ensure!(!members.is_empty(), "room '{name}' needs --members p1,p2 — a room coordinates the projects sharing compute");
+    // Members canonicalize against registered projects through the
+    // name middleware — the roster then stores the spelling
+    // identities resolve to. A non-registered name still lands
+    // (membership is declared data); it is noted below along with
+    // any did-you-mean suggestions the middleware found.
     let mut ms: Vec<String> = Vec::new();
+    let mut member_hints: Vec<(String, Vec<String>)> = Vec::new();
     for m in members {
         let m = m.trim();
         valid_name(m).with_context(|| format!("bad member name {m:?} — members are project names"))?;
         anyhow::ensure!(!is_admin(m), "member {m:?} is the reserved operator identity (§17.3) — `admin` can never join a roster");
-        if !ms.iter().any(|x| x == m) {
-            ms.push(m.to_string());
+        let m = match names::resolve_project(m)? {
+            Resolution::Exact(p) => p,
+            Resolution::Canonical { canonical, typed } => {
+                eprintln!("note: member '{typed}' → project '{canonical}'");
+                canonical
+            }
+            Resolution::Ambiguous(projects) => anyhow::bail!("member {m:?} is ambiguous: registered projects {} differ only by case — rename one", projects.join(", ")),
+            Resolution::Unknown { suggestions, .. } => {
+                member_hints.push((m.to_string(), suggestions));
+                m.to_string()
+            }
+        };
+        if !ms.iter().any(|x| x == &m) {
+            ms.push(m);
         }
     }
     let mut cs: Vec<String> = Vec::new();
+    let mut client_hints: Vec<(String, Vec<String>)> = Vec::new();
     for c in clients {
         let c = c.trim();
         valid_name(c).with_context(|| format!("bad client name {c:?}"))?;
-        if !cs.iter().any(|x| x == c) {
-            cs.push(c.to_string());
+        let c = match names::resolve_client(c)? {
+            Resolution::Exact(n) => n,
+            Resolution::Canonical { canonical, typed } => {
+                eprintln!("note: client '{typed}' → client '{canonical}'");
+                canonical
+            }
+            Resolution::Ambiguous(cands) => anyhow::bail!("client {c:?} is ambiguous — registered names differ only by case: {}", cands.join(", ")),
+            Resolution::Unknown { suggestions, .. } => {
+                client_hints.push((c.to_string(), suggestions));
+                c.to_string()
+            }
+        };
+        if !cs.iter().any(|x| x == &c) {
+            cs.push(c);
         }
     }
     let dir = rooms_dir()?.join(name);
@@ -428,15 +443,19 @@ pub fn create(name: &str, members: &[String], clients: &[String]) -> Result<()> 
     })?;
     // Membership is declared data, not gated — but a member that is
     // not a registered project is usually a typo, so say so (the
-    // same row names clients use for the same reason).
+    // same for the client annotations).
     for m in &ms {
-        if registry::load_project(m).is_err() {
-            eprintln!("note: member '{m}' is not a registered project — `project ls` lists what exists");
+        match member_hints.iter().find(|(n, _)| n == m) {
+            Some((_, sugg)) => eprintln!("note: member '{m}' is not a registered project{} — `project ls` lists what exists", names::did_you_mean(sugg)),
+            None if registry::load_project(m).is_err() => eprintln!("note: member '{m}' is not a registered project — `project ls` lists what exists"),
+            None => {}
         }
     }
     for c in &cs {
-        if registry::load_client(c).is_err() {
-            eprintln!("note: client '{c}' is not a registered client — `client ls` lists what exists");
+        match client_hints.iter().find(|(n, _)| n == c) {
+            Some((_, sugg)) => eprintln!("note: client '{c}' is not a registered client{} — `client ls` lists what exists", names::did_you_mean(sugg)),
+            None if registry::load_client(c).is_err() => eprintln!("note: client '{c}' is not a registered client — `client ls` lists what exists"),
+            None => {}
         }
     }
     Ok(())

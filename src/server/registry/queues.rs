@@ -1,5 +1,6 @@
 //! Named queue validation and explicit configuration mutations.
 
+use super::names::{self, Resolution};
 use super::{load_client, save_client, valid_name, ClientEntry, QueueEntry};
 use anyhow::{bail, ensure, Context, Result};
 use std::path::{Component, Path, PathBuf};
@@ -87,17 +88,29 @@ fn execution_view(client: &ClientEntry, name: &str) -> ResolvedQueue {
     ResolvedQueue { name: name.into(), client: execution, workers }
 }
 
+/// `--queue` > configured `default_queue` > sole queue — the picked
+/// name then resolves through the registry name middleware (§4.1):
+/// a case-folded hit substitutes the canonical spelling with a
+/// stderr note, and a miss names the registered queues plus any
+/// did-you-mean suggestions.
 pub fn resolve_queue(client: &ClientEntry, queue: Option<&str>) -> Result<ResolvedQueue> {
     validate_queues(client)?;
-    let names = queue_names(client);
+    let registered = queue_names(client);
     let name = match queue.or(client.default_queue.as_deref()) {
         Some(name) => name,
-        None if names.len() == 1 => &names[0],
-        None => bail!("{}: queue target is ambiguous ({}); pass --queue NAME or run `shunt queue default NAME -c {}`", client.name, names.join(", "), client.name),
+        None if registered.len() == 1 => &registered[0],
+        None => bail!("{}: queue target is ambiguous ({}); pass --queue NAME or run `shunt queue default NAME -c {}`", client.name, registered.join(", "), client.name),
     };
     valid_name(name).context("invalid queue target; pass a registered --queue NAME")?;
-    ensure!(has_queue(client, name), "{}: unknown queue {name:?}; choose --queue from: {} (list with `shunt queue ls -c {}`)", client.name, names.join(", "), client.name);
-    Ok(execution_view(client, name))
+    match names::resolve(name, &registered) {
+        Resolution::Exact(n) => Ok(execution_view(client, &n)),
+        Resolution::Canonical { canonical, typed } => {
+            eprintln!("note: resolved '{typed}' → queue '{canonical}' on client '{}'", client.name);
+            Ok(execution_view(client, &canonical))
+        }
+        Resolution::Unknown { input, suggestions } => bail!("{}: unknown queue {input:?}; choose --queue from: {} (list with `shunt queue ls -c {}`){}", client.name, registered.join(", "), client.name, names::did_you_mean(&suggestions)),
+        Resolution::Ambiguous(cands) => bail!("{}: queue {name:?} is ambiguous — registered names differ only by case: {}", client.name, cands.join(", ")),
+    }
 }
 
 pub fn load_queue(client_name: &str, queue: Option<&str>) -> Result<ResolvedQueue> {
