@@ -216,7 +216,7 @@ pub(crate) fn cmd_room(c: &super::args::RoomCmd) -> Result<()> {
         }
         A::Say { room, body, body_file, source, as_label, json } => {
             let label = room_required_label(as_label.as_deref())?;
-            let body = room_body(body.as_deref(), body_file.as_deref(), source.as_deref())?;
+            let body = room_body("say", body.as_deref(), body_file.as_deref(), source.as_deref())?;
             let (n, member) = room::say(room, &label, &body)?;
             if *json {
                 println!("{}", serde_json::json!({"ok": true, "room": room, "n": n, "member": member}));
@@ -225,22 +225,62 @@ pub(crate) fn cmd_room(c: &super::args::RoomCmd) -> Result<()> {
             }
             Ok(())
         }
-        A::Read { room, as_label, all, json } => {
+        A::Read { room, as_label, all, digest, from, to, json } => {
             let label = room_required_label(as_label.as_deref())?;
-            let msgs = room::read(room, &label, *all)?;
+            let mode = if *all {
+                room::ReadMode::All
+            } else if *digest {
+                room::ReadMode::Digest
+            } else if from.is_some() || to.is_some() {
+                room::ReadMode::Range { from: *from, to: *to }
+            } else {
+                room::ReadMode::Unread
+            };
+            let msgs = room::read(room, &label, mode)?;
             if *json {
-                let msgs: Vec<_> = msgs.iter().map(|(n, m)| serde_json::json!({"n": n, "author": m.author, "ts": m.ts, "body_md": m.body_md, "member": m.member})).collect();
+                let msgs: Vec<_> = msgs.iter().map(|(n, m)| room_msg_json(*n, m)).collect();
                 println!("{}", serde_json::to_string_pretty(&serde_json::json!({"ok": true, "room": room, "messages": msgs}))?);
             } else {
-                for (n, m) in &msgs {
-                    println!("[{n:04}] {} {}{}", m.ts, m.author, if m.member { "" } else { " (non-member)" });
-                    println!("{}\n", m.body_md);
-                }
+                print_room_msgs(&msgs);
                 if msgs.is_empty() {
                     println!("(no new messages)");
                 }
             }
             Ok(())
+        }
+        A::Compact { room, ratio, through, body, body_file, source, as_label, json } => {
+            let label = room_required_label(as_label.as_deref())?;
+            match through {
+                // Plan phase: the digest's coverage is exactly what
+                // the plan picked, so a body source here is a caller
+                // that skipped a step — refuse with the remediation.
+                None => {
+                    anyhow::ensure!(body.is_none() && body_file.is_none() && source.is_none(), "a digest body needs --through N — run `room compact {room}` first to get the split point");
+                    let plan = room::compact_plan(room, &label, ratio.unwrap_or(0.8))?;
+                    if *json {
+                        let msgs: Vec<_> = plan.messages.iter().map(|(n, m)| room_msg_json(*n, m)).collect();
+                        println!("{}", serde_json::to_string_pretty(&serde_json::json!({"ok": true, "room": room, "through": plan.through, "msg_count": plan.msg_count, "total_bytes": plan.total_bytes, "messages": msgs}))?);
+                    } else {
+                        println!("compaction plan for '{room}': {} messages ≤{:04} ({} bytes) — commit with `room compact {room} --through {} (--body|--body-file|-)`", plan.msg_count, plan.through, plan.total_bytes, plan.through);
+                        print_room_msgs(&plan.messages);
+                    }
+                    Ok(())
+                }
+                Some(through) => {
+                    // Commit requires an explicit body source — the
+                    // digest covers exactly what the agent wrote, so
+                    // a bare piped stdin never implies one.
+                    anyhow::ensure!(body.is_some() || body_file.is_some() || source.is_some(), "compaction commit needs a digest body: --body TEXT, --body-file F, or `-`/stdin");
+                    let body = room_body("compact", body.as_deref(), body_file.as_deref(), source.as_deref())?;
+                    let (n_s, member) = room::compact_commit(room, &label, *through, &body)?;
+                    if *json {
+                        println!("{}", serde_json::json!({"ok": true, "room": room, "through": through, "summary_n": n_s, "member": member}));
+                    } else {
+                        println!("compacted ≤{through:04} into summary {n_s:04} in '{room}'{}", if member { "" } else { " (non-member)" });
+                    }
+                    Ok(())
+                }
+            }
         }
         A::Decide { room, note, as_label, json } => {
             let label = room_required_label(as_label.as_deref())?;
@@ -286,10 +326,11 @@ fn room_required_label(as_flag: Option<&str>) -> Result<String> {
     crate::server::room::required_label(as_flag)
 }
 
-/// say body: `--body` > `--body-file` > `-`/stdin, the §14.1
+/// Message body: `--body` > `--body-file` > `-`/stdin, the §14.1
 /// precedence rule. A bare interactive call errors naming its
-/// options rather than hanging on stdin.
-fn room_body(body: Option<&str>, body_file: Option<&str>, source: Option<&str>) -> Result<String> {
+/// options rather than hanging on stdin. `op` names the verb in
+/// errors (say, compact).
+fn room_body(op: &str, body: Option<&str>, body_file: Option<&str>, source: Option<&str>) -> Result<String> {
     use std::io::{IsTerminal, Read};
     if let Some(b) = body {
         return Ok(b.to_string());
@@ -298,15 +339,32 @@ fn room_body(body: Option<&str>, body_file: Option<&str>, source: Option<&str>) 
         return std::fs::read_to_string(f).with_context(|| format!("cannot read body file {f}"));
     }
     if let Some(s) = source {
-        anyhow::ensure!(s == "-", "say takes `-` for stdin, or --body/--body-file — got {s:?}");
+        anyhow::ensure!(s == "-", "{op} takes `-` for stdin, or --body/--body-file — got {s:?}");
     }
     if std::io::stdin().is_terminal() {
-        anyhow::bail!("say needs a body: --body TEXT, --body-file F, or `-`/stdin");
+        anyhow::bail!("{op} needs a body: --body TEXT, --body-file F, or `-`/stdin");
     }
     let mut s = String::new();
     std::io::stdin().read_to_string(&mut s).context("cannot read body from stdin")?;
-    anyhow::ensure!(!s.trim().is_empty(), "say body is empty");
+    anyhow::ensure!(!s.trim().is_empty(), "{op} body is empty");
     Ok(s)
+}
+
+/// One message's wire shape — shared by `read --json` and the
+/// `compact` plan packet. `summary_through` stays explicit (null
+/// when absent) so agents detect digests from JSON.
+fn room_msg_json(n: u32, m: &crate::server::room::Msg) -> serde_json::Value {
+    serde_json::json!({"n": n, "author": m.author, "ts": m.ts, "body_md": m.body_md, "member": m.member, "summary_through": m.summary_through})
+}
+
+/// The human `[NNNN] ts author` rendering shared by `read` and the
+/// `compact` plan packet; a digest header carries `(summary→NNNN)`
+/// the same way a non-member post carries `(non-member)`.
+fn print_room_msgs(msgs: &[(u32, crate::server::room::Msg)]) {
+    for (n, m) in msgs {
+        println!("[{n:04}] {} {}{}{}", m.ts, m.author, if m.member { "" } else { " (non-member)" }, m.summary_through.map(|t| format!(" (summary→{t:04})")).unwrap_or_default());
+        println!("{}\n", m.body_md);
+    }
 }
 
 /// Member list for human output, stale members marked (§17.4).

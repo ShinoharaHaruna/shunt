@@ -39,6 +39,14 @@ fn msg_keep() -> usize {
     std::env::var("SHUNT_ROOM_KEEP").ok().and_then(|s| s.parse().ok()).unwrap_or(500)
 }
 
+/// Compaction floor: a digest over a short stream saves nothing —
+/// plan refuses below this many digestible live messages and points
+/// at the manual `--through` escape. `SHUNT_ROOM_COMPACT_MIN`
+/// overrides (tests).
+fn compact_min() -> usize {
+    std::env::var("SHUNT_ROOM_COMPACT_MIN").ok().and_then(|s| s.parse().ok()).unwrap_or(100)
+}
+
 /// readers/ file cap (§17.4): oldest-mtime evicted past it — a
 /// label gone quiet loses only its read positions, never data.
 /// `SHUNT_ROOM_READERS_MAX` overrides (tests).
@@ -59,6 +67,12 @@ pub struct Meta {
     /// The current agreed state; `decide` overwrites it, latest wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<Decision>,
+    /// Compaction ratchet: the highest N covered by a committed
+    /// digest. Lives in meta, not derivable from the stream — the
+    /// 500-cap can archive the newest summary itself, taking the
+    /// record of what it covered with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compacted_through: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,12 +84,17 @@ pub struct Decision {
 
 /// One stream entry: `msgs/NNNN.json`. `member: false` marks a
 /// post from outside the roster — allowed (open trust), but loud.
+/// `summary_through` presence alone marks an agent-written
+/// compaction digest; its value is the highest covered N (no
+/// separate `kind` field — old binaries just ignore it).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Msg {
     pub author: String,
     pub ts: String,
     pub body_md: String,
     pub member: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_through: Option<u32>,
 }
 
 /// `readers/<label>.json`: the label's high-water mark (§17.5).
@@ -229,11 +248,11 @@ fn save_meta(dir: &Path, meta: &Meta) -> Result<()> {
     atomic_write(&dir.join("meta.json"), serde_json::to_string_pretty(meta)?)
 }
 
-/// Live message numbers, sorted. `msgs/.archive/` is dot-prefixed
-/// and excluded — `read`/`ls` never see archived messages.
-fn msg_numbers(dir: &Path) -> Vec<u32> {
+/// Sorted NNNN files under one message dir (live `msgs/` or
+/// `msgs/.archive/` — same numbering namespace).
+fn msg_numbers_in(msgs_dir: &Path) -> Vec<u32> {
     let mut ns = Vec::new();
-    if let Ok(rd) = fs::read_dir(dir.join("msgs")) {
+    if let Ok(rd) = fs::read_dir(msgs_dir) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             if let Some(n) = name.strip_suffix(".json").and_then(|s| s.parse::<u32>().ok()).filter(|_| name.len() == "0000.json".len()) {
@@ -243,6 +262,12 @@ fn msg_numbers(dir: &Path) -> Vec<u32> {
     }
     ns.sort_unstable();
     ns
+}
+
+/// Live message numbers, sorted. `msgs/.archive/` is dot-prefixed
+/// and excluded — `read`/`ls` never see archived messages.
+fn msg_numbers(dir: &Path) -> Vec<u32> {
+    msg_numbers_in(&dir.join("msgs"))
 }
 
 /// Highest NNNN anywhere in the message namespace — live msgs AND
@@ -432,7 +457,7 @@ pub fn create(name: &str, members: &[String], clients: &[String]) -> Result<()> 
     initialize_room(&dir, |dir| {
         private_dir(&dir.join("msgs"))?;
         private_dir(&dir.join("readers"))?;
-        save_meta(dir, &Meta { created_at: rfc3339_z_now(), members: ms.clone(), clients: cs.clone(), decision: None })
+        save_meta(dir, &Meta { created_at: rfc3339_z_now(), members: ms.clone(), clients: cs.clone(), decision: None, compacted_through: None })
     })?;
     // Membership is declared data, not gated — but a member that is
     // not a registered project is usually a typo, so say so (the
@@ -465,7 +490,7 @@ pub fn say(room: &str, label: &str, body: &str) -> Result<(u32, bool)> {
     let meta = load_meta(&dir)?;
     let member = on_roster(&meta, label);
     warn_non_member(&name, &meta, label, "posting anyway, recorded member:false");
-    let msg = Msg { author: label.to_string(), ts: rfc3339_z_now(), body_md: body.to_string(), member };
+    let msg = Msg { author: label.to_string(), ts: rfc3339_z_now(), body_md: body.to_string(), member, summary_through: None };
     let n = {
         // Mint + install + archive in one hold (the §3.3
         // critical-section shape): concurrent says serialize, so no
@@ -492,38 +517,252 @@ pub fn say(room: &str, label: &str, body: &str) -> Result<(u32, bool)> {
     Ok((n, member))
 }
 
-/// Load one live message by number; corrupt files are skipped with
-/// a warning — one bad write must not blind `read`/`ls` (the
-/// feedback ledger's scan discipline).
-fn load_msgs(dir: &Path) -> Vec<(u32, Msg)> {
+/// Every parseable message under one message dir. Reads happen
+/// outside the lock, so a file that vanished between listing and
+/// reading is a concurrent compact/cap-drain — skip it silently;
+/// a parse failure or other IO error is real damage and stays loud
+/// (the feedback ledger's scan discipline).
+fn load_msgs_from(msgs_dir: &Path) -> Vec<(u32, Msg)> {
     let mut out = Vec::new();
-    for n in msg_numbers(dir) {
-        let p = dir.join("msgs").join(format!("{n:04}.json"));
-        match fs::read_to_string(&p).map(|t| serde_json::from_str::<Msg>(&t)) {
-            Ok(Ok(m)) => out.push((n, m)),
-            _ => eprintln!("warning: skipping unreadable message {}", p.display()),
+    for n in msg_numbers_in(msgs_dir) {
+        let p = msgs_dir.join(format!("{n:04}.json"));
+        match fs::read_to_string(&p) {
+            Ok(t) => match serde_json::from_str::<Msg>(&t) {
+                Ok(m) => out.push((n, m)),
+                Err(_) => eprintln!("warning: skipping unreadable message {}", p.display()),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => eprintln!("warning: skipping unreadable message {}", p.display()),
         }
     }
     out
 }
 
-/// `room read` (§17.2/§17.5): returns messages past the caller's
-/// mark (or the full live stream when `all`). A label off the
-/// roster still gets the stream — open trust — but the roster is
-/// named on stderr, the same warning `say`/`decide` give, so a
-/// wrong-room or mis-cased label is loud instead of silently
-/// reading a foreign channel. Only successfully loaded, returned
-/// messages advance the cursor; concurrent arrivals stay unread.
-pub fn read(room: &str, label: &str, all: bool) -> Result<Vec<(u32, Msg)>> {
+fn load_msgs(dir: &Path) -> Vec<(u32, Msg)> {
+    load_msgs_from(&dir.join("msgs"))
+}
+
+/// The archive loader — range reads and the digest fallback reach
+/// across the cap boundary.
+fn load_archived_msgs(dir: &Path) -> Vec<(u32, Msg)> {
+    load_msgs_from(&dir.join("msgs").join(".archive"))
+}
+
+/// `room read` modes (§17.2): the unread tail, the full live
+/// stream, the compacted catch-up view, or an audit range reaching
+/// into the archive.
+pub enum ReadMode {
+    Unread,
+    All,
+    /// The newest digest plus the raw tail it did not cover — the
+    /// cheap catch-up for a reader who fell behind a compacted
+    /// stream.
+    Digest,
+    /// Inclusive bounds across live + archive (either side open).
+    Range {
+        from: Option<u32>,
+        to: Option<u32>,
+    },
+}
+
+/// `room read` (§17.2/§17.5). A label off the roster still gets the
+/// stream — open trust — but the roster is named on stderr, the
+/// same warning `say`/`decide` give, so a wrong-room or mis-cased
+/// label is loud instead of silently reading a foreign channel.
+/// Only successfully loaded, returned messages advance the cursor;
+/// concurrent arrivals stay unread. `Range` is a pure audit read —
+/// it never marks.
+pub fn read(room: &str, label: &str, mode: ReadMode) -> Result<Vec<(u32, Msg)>> {
     let (name, dir) = resolve(room)?;
     let meta = load_meta(&dir)?;
     warn_non_member(&name, &meta, label, "returning the stream anyway");
-    let msgs = load_msgs(&dir);
-    let mark0 = last_read(&dir, label);
-    let returned: Vec<_> = if all { msgs } else { msgs.into_iter().filter(|(n, _)| *n > mark0).collect() };
-    let through = returned.last().map(|(n, _)| *n).unwrap_or(0);
-    mark(&dir, label, Some(through))?;
-    Ok(returned)
+    match mode {
+        ReadMode::Range { from, to } => {
+            let mut msgs = load_archived_msgs(&dir);
+            msgs.extend(load_msgs(&dir));
+            msgs.sort_by_key(|(n, _)| *n);
+            Ok(msgs.into_iter().filter(|(n, _)| from.is_none_or(|f| *n >= f) && to.is_none_or(|t| *n <= t)).collect())
+        }
+        ReadMode::Digest => {
+            let live = load_msgs(&dir);
+            // The newest summary heads the view; when the cap has
+            // archived it, only the archive still holds one.
+            let summary = match live.iter().filter(|(_, m)| m.summary_through.is_some()).max_by_key(|(n, _)| *n) {
+                Some((n, m)) => Some((*n, m.clone())),
+                None => load_archived_msgs(&dir).into_iter().filter(|(_, m)| m.summary_through.is_some()).max_by_key(|(n, _)| *n),
+            };
+            let Some((n_s, s)) = summary else {
+                eprintln!("note: no compaction yet — showing the full live stream");
+                let through = live.last().map(|(n, _)| *n).unwrap_or(0);
+                mark(&dir, label, Some(through))?;
+                return Ok(live);
+            };
+            let covered = s.summary_through.unwrap_or(0);
+            let mut out: Vec<(u32, Msg)> = live.into_iter().filter(|(n, _)| *n > covered).collect();
+            if !out.iter().any(|(n, _)| *n == n_s) {
+                out.push((n_s, s));
+                out.sort_by_key(|(n, _)| *n);
+            }
+            let through = out.last().map(|(n, _)| *n).unwrap_or(0);
+            mark(&dir, label, Some(through))?;
+            Ok(out)
+        }
+        ReadMode::Unread | ReadMode::All => {
+            let msgs = load_msgs(&dir);
+            let mark0 = last_read(&dir, label);
+            let returned: Vec<_> = if matches!(mode, ReadMode::All) { msgs } else { msgs.into_iter().filter(|(n, _)| *n > mark0).collect() };
+            let through = returned.last().map(|(n, _)| *n).unwrap_or(0);
+            mark(&dir, label, Some(through))?;
+            Ok(returned)
+        }
+    }
+}
+
+/// The packet `room compact` (plan phase) hands an agent to feed
+/// its LLM: the split point to pass back as `--through`, and every
+/// covered message with its number.
+pub struct CompactPlan {
+    pub through: u32,
+    pub msg_count: usize,
+    pub total_bytes: usize,
+    pub messages: Vec<(u32, Msg)>,
+}
+
+/// Pick the eligible index that best cuts the stream at `ratio` of
+/// total body bytes — readability is a byte metric, so the split is
+/// byte-weighted, not count-weighted. Ties take the earlier index.
+fn split_index(bytes: &[usize], ratio: f64) -> usize {
+    let target = ratio * bytes.iter().sum::<usize>() as f64;
+    let (mut best, mut best_d, mut cum) = (0usize, f64::INFINITY, 0f64);
+    for (i, b) in bytes.iter().enumerate() {
+        cum += *b as f64;
+        let d = (cum - target).abs();
+        if d < best_d {
+            best = i;
+            best_d = d;
+        }
+    }
+    best
+}
+
+/// `room compact` plan phase: pick the byte-weighted split and
+/// return the covered messages. Pure audit read — nothing is
+/// written, nothing is marked; the label only drives the
+/// non-member warning, since the stream is content being read.
+pub fn compact_plan(room: &str, label: &str, ratio: f64) -> Result<CompactPlan> {
+    anyhow::ensure!(ratio > 0.0 && ratio < 1.0, "--ratio must be between 0 and 1 exclusive — 0.8 digests the oldest ~80% of eligible bytes");
+    let (name, dir) = resolve(room)?;
+    let meta = load_meta(&dir)?;
+    warn_non_member(&name, &meta, label, "reading the stream anyway");
+    let ratchet = meta.compacted_through.unwrap_or(0);
+    // Digests are never re-digested; `n > ratchet` is defensive —
+    // the ratchet normally tracks exactly what the move archived.
+    let eligible: Vec<(u32, Msg)> = load_msgs(&dir).into_iter().filter(|(n, m)| m.summary_through.is_none() && *n > ratchet).collect();
+    let min = compact_min();
+    anyhow::ensure!(eligible.len() >= min, "only {} non-summary live messages — compaction pays off on long streams (min {min}); `room compact --through M (--body|--body-file|-)` forces it manually", eligible.len());
+    let k = split_index(&eligible.iter().map(|(_, m)| m.body_md.len()).collect::<Vec<_>>(), ratio);
+    let covered: Vec<(u32, Msg)> = eligible.into_iter().take(k + 1).collect();
+    Ok(CompactPlan { through: covered.last().map(|(n, _)| *n).unwrap_or(0), total_bytes: covered.iter().map(|(_, m)| m.body_md.len()).sum(), msg_count: covered.len(), messages: covered })
+}
+
+/// Reader labels whose high-water mark sits below `through` — the
+/// commit warning names them so the digester knows whose next
+/// `read` lands on the summary instead of the originals.
+fn unread_reader_labels(dir: &Path, through: u32) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rd) = fs::read_dir(dir.join("readers")) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(label) = name.strip_suffix(".json").filter(|_| !name.starts_with('.')) else {
+                continue;
+            };
+            let pos = fs::read_to_string(e.path()).ok().and_then(|t| serde_json::from_str::<Reader>(&t).ok()).map(|r| r.last_read_n).unwrap_or(0);
+            if pos < through {
+                out.push(label.to_string());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `room compact --through N` commit phase: archive the covered
+/// originals and mint the agent-written digest as an in-stream
+/// message. Returns the summary's N and the caller's roster flag.
+/// Ordering inside the lock (move → mint → write → meta) is
+/// deliberate: a mid-move failure looks exactly like cap-archival
+/// and re-running the same command converges, while a failure
+/// after the digest write is caught by the idempotency check on
+/// the next attempt.
+pub fn compact_commit(room: &str, label: &str, through: u32, body: &str) -> Result<(u32, bool)> {
+    anyhow::ensure!(body.len() <= MAX_BODY, "body is {} bytes; the cap is {MAX_BODY} — a coordination message carries decisions, not logs", body.len());
+    anyhow::ensure!(through > 0, "--through 0 covers no messages — the plan's split point is at least the first eligible message");
+    let (name, dir) = resolve(room)?;
+    let meta = load_meta(&dir)?;
+    let member = on_roster(&meta, label);
+    anyhow::ensure!(through > meta.compacted_through.unwrap_or(0), "messages ≤{through} are already covered by a previous compaction — choose a later --through");
+    warn_non_member(&name, &meta, label, "posting anyway, recorded member:false");
+    if msg_numbers(&dir).last().is_some_and(|&max| through >= max) {
+        eprintln!("warning: --through covers the newest live message — recent posts may not have been seen by all members");
+    }
+    let unread = unread_reader_labels(&dir, through);
+    if !unread.is_empty() {
+        eprintln!("warning: readers who haven't seen the covered range: {} — their next `read` shows this digest instead of the originals", unread.join(", "));
+    }
+    let n_s = {
+        let _lock = seq_lock(&dir)?;
+        // .seq.lock rides the registry's 0600 discipline too.
+        let _ = fs::set_permissions(dir.join(".seq.lock"), fs::Permissions::from_mode(0o600));
+        let live = load_msgs(&dir);
+        match live.iter().find(|(_, m)| m.summary_through == Some(through)) {
+            // A live digest at exactly this `through` is a committed
+            // compact whose caller died after the write — land the
+            // ratchet and return its n; never mint a duplicate.
+            Some((n_s, _)) => {
+                let n_s = *n_s;
+                let mut meta = load_meta(&dir)?;
+                if meta.compacted_through.unwrap_or(0) < through {
+                    meta.compacted_through = Some(through);
+                    save_meta(&dir, &meta)?;
+                }
+                n_s
+            }
+            None => {
+                // Re-check on fresh meta under the lock: a compact
+                // that landed between the pre-lock read and this
+                // hold would otherwise be double-covered.
+                let mut meta = load_meta(&dir)?;
+                anyhow::ensure!(through > meta.compacted_through.unwrap_or(0), "messages ≤{through} are already covered by a previous compaction — choose a later --through");
+                let msgs = dir.join("msgs");
+                for (n, m) in &live {
+                    if *n > through {
+                        break;
+                    }
+                    // Digests stay live — exempt from the compact
+                    // move (not from the cap drain); unparseable
+                    // files never reach this list, and the loader's
+                    // warning already named them.
+                    if m.summary_through.is_some() {
+                        continue;
+                    }
+                    let archive = msgs.join(".archive");
+                    private_dir(&archive)?;
+                    fs::rename(msgs.join(format!("{n:04}.json")), archive.join(format!("{n:04}.json")))?;
+                }
+                private_dir(&msgs)?;
+                let n_s = mint_locked(&dir)?;
+                let summary = Msg { author: label.to_string(), ts: rfc3339_z_now(), body_md: body.to_string(), member, summary_through: Some(through) };
+                atomic_write(&msgs.join(format!("{n_s:04}.json")), serde_json::to_string_pretty(&summary)?)?;
+                meta.compacted_through = Some(through);
+                save_meta(&dir, &meta)?;
+                n_s
+            }
+        }
+    };
+    // mark() takes .seq.lock itself — calling it inside the hold
+    // deadlocks (same shape as say()).
+    mark(&dir, label, None)?;
+    Ok((n_s, member))
 }
 
 /// `room decide` (§17.2): overwrite meta.decision — latest wins.
@@ -658,6 +897,24 @@ pub fn status_rooms(label: Option<&str>) -> Vec<serde_json::Value> {
         out.push(serde_json::json!({"name": name, "members": meta.members, "unread_msgs": label.map(|l| unread_count(&rd, l)), "decision": meta.decision}));
     }
     out
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::*;
+
+    #[test]
+    fn split_index_weights_bytes_not_count() {
+        // A fat first message pulls the cut early: count-80% of 4
+        // would land on the last index, byte-80% lands on index 1.
+        assert_eq!(split_index(&[50, 10, 10, 10], 0.8), 1);
+        // An exact byte hit splits there.
+        assert_eq!(split_index(&[10, 10, 10, 10, 10], 0.8), 3);
+        // Equal distance to the target takes the earlier index.
+        assert_eq!(split_index(&[10, 10], 0.75), 0);
+        // A single message can only split at itself.
+        assert_eq!(split_index(&[100], 0.5), 0);
+    }
 }
 
 #[cfg(test)]

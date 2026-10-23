@@ -579,16 +579,56 @@ pub enum RoomAction {
         json: bool,
     },
     /// Print messages past the caller's mark, or the full stream
-    /// with --all; either way marks them read for --as
+    /// with --all; either way marks them read for --as. --digest is
+    /// the compacted catch-up view (newest digest + the raw tail
+    /// after it); --from/--to give an inclusive audit range across
+    /// live + archived messages that never marks.
     Read {
         /// Room name or unique prefix
         room: String,
         /// Reader label (default `admin`)
         #[arg(long = "as")]
         as_label: Option<String>,
-        /// Full stream instead of unread-only
-        #[arg(long)]
+        /// Full live stream instead of unread-only
+        #[arg(long, conflicts_with_all = ["digest", "from", "to"])]
         all: bool,
+        /// Compacted catch-up: newest summary + uncovered tail
+        #[arg(long, conflicts_with_all = ["from", "to"])]
+        digest: bool,
+        /// Range lower bound NNNN (inclusive); reaches the archive
+        #[arg(long)]
+        from: Option<u32>,
+        /// Range upper bound NNNN (inclusive)
+        #[arg(long)]
+        to: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Conversation compaction: bare form picks the byte-weighted
+    /// split and prints the packet an agent feeds its LLM;
+    /// `--through N` plus a body source (--body T | --body-file F |
+    /// `-`) commits that agent-written digest — shunt archives the
+    /// covered originals and never summarizes itself
+    Compact {
+        /// Room name or unique prefix
+        room: String,
+        /// Plan phase: covered-bytes fraction, 0 < r < 1 (default 0.8)
+        #[arg(long, conflicts_with = "through")]
+        ratio: Option<f64>,
+        /// Commit phase: the digest covers messages ≤N
+        #[arg(long)]
+        through: Option<u32>,
+        /// Digest body inline
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read the digest body from a file
+        #[arg(long)]
+        body_file: Option<String>,
+        /// `-` reads the digest body from stdin
+        source: Option<String>,
+        /// Author + read-cursor label (default `admin`)
+        #[arg(long = "as")]
+        as_label: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -1096,6 +1136,35 @@ mod tests {
         assert!(matches!(r.action, RoomAction::Rm { .. }));
 
         assert!(Cli::try_parse_from(["shunt", "room", "create", "x"]).is_err());
+    }
+
+    /// `room compact` is one verb with two phases: no --through is
+    /// the plan, --through + a body source commits. `--ratio` is a
+    /// plan knob and conflicts with --through. `read`'s --all
+    /// conflicts with --digest/--from/--to, and --digest with the
+    /// range bounds; --from/--to may each appear alone.
+    #[test]
+    fn room_compact_and_read_mode_forms() {
+        let cli = parse(&["shunt", "room", "compact", "gpu"]);
+        let Command::Room(r) = cli.command else { panic!() };
+        assert!(matches!(r.action, RoomAction::Compact { through: None, ratio: None, .. }));
+
+        let cli = parse(&["shunt", "room", "compact", "gpu", "--through", "40", "--body", "d", "--as", "p1"]);
+        let Command::Room(r) = cli.command else { panic!() };
+        let RoomAction::Compact { through, body, as_label, .. } = r.action else { panic!() };
+        assert_eq!(through, Some(40));
+        assert_eq!(body.as_deref(), Some("d"));
+        assert_eq!(as_label.as_deref(), Some("p1"));
+
+        assert!(Cli::try_parse_from(["shunt", "room", "compact", "gpu", "--through", "40", "--ratio", "0.5", "--body", "d"]).is_err());
+        assert!(Cli::try_parse_from(["shunt", "room", "compact", "gpu", "-", "--through", "40"]).is_ok());
+
+        for argv in [vec!["shunt", "room", "read", "gpu", "--all", "--digest"], vec!["shunt", "room", "read", "gpu", "--all", "--from", "1"], vec!["shunt", "room", "read", "gpu", "--all", "--to", "9"], vec!["shunt", "room", "read", "gpu", "--digest", "--from", "1"], vec!["shunt", "room", "read", "gpu", "--digest", "--to", "9"]] {
+            assert!(Cli::try_parse_from(&argv).is_err(), "accepted {argv:?}");
+        }
+        for argv in [vec!["shunt", "room", "read", "gpu", "--from", "10", "--to", "20"], vec!["shunt", "room", "read", "gpu", "--from", "10"], vec!["shunt", "room", "read", "gpu", "--to", "20"], vec!["shunt", "room", "read", "gpu", "--digest"]] {
+            parse(&argv);
+        }
     }
 
     /// `status --as` carries the rooms block (§17.5) and only makes
