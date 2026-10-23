@@ -214,7 +214,7 @@ A task may override any of these inside itself. `set -uo pipefail` is part of th
 
 ### 3.13 Task file format and the guard contract
 
-Generated task (single generator — `agent::exec::render_task` — shared by `new`/`mktask` and server-side `submit`):
+Generated task (single generator — `client::exec::render_task` — shared by `new`/`mktask` and server-side `submit`):
 
 ```bash
 #!/usr/bin/env bash
@@ -546,7 +546,7 @@ shunt/
   src/
     main.rs          # clap entry; calls cli::run
     cli/             # clap command tree (args.rs), dispatch (mod.rs,
-                     # server.rs, agent.rs, feedback.rs, upgrade.rs — §16)
+                     # server.rs, local.rs, feedback.rs, upgrade.rs — §16)
     server/          # registry/ (types, paths, state, io),
                      # fsutil (0700/0600 privacy), spool, dispatcher,
                      # tasks (ledger), tunnel, transport/ (ssh + local),

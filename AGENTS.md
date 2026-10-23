@@ -25,8 +25,8 @@ Raw cargo equivalents work too (`cargo build/test/clippy`).
 
 ## Repository structure
 
-- `src/cli/` — full clap command tree (`args.rs`); server vs client subcommand dispatch (`mod.rs`, `server.rs`, `agent.rs`)
-- `src/agent/` — client side: daemon loop, FS queue ops, exec, probe, shutdown
+- `src/cli/` — full clap command tree (`args/`); server vs local-queue subcommand dispatch (`mod.rs`, `server/`, `local/`)
+- `src/client/` — client (box) side: daemon loop, FS queue ops, exec, probe, shutdown
 - `src/server/` — server side: registry CRUD (real; clients own named `[queues.<name>]` subresources — a queue holds qroot/env_setup/shell/exit_on_idle/workers while the client holds the SSH identity, tunnel, billing), spool, dispatcher, ssh transport, SOCKS5 tunnel manager, `room.rs` coordination rooms (design.md §17); `queue_ops.rs` = queue-scoped teardown + shutdown preflight, `registry/queues.rs` = resolution/mutation, `registry/names.rs` = typed-name resolution middleware (exact > case-fold canonical > suggestion-only)
 - `src/feedback/` — GitHub-issue feedback channel: compose + sanitize, persist-first ledger, gh/curl delivery (design.md §14)
 - `src/proto/` — shared types: task format, wire JSON (protocol version 1)

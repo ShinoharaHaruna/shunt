@@ -8,7 +8,7 @@ use anyhow::Result;
 pub(crate) fn cmd_queue(c: &QueueCmd) -> Result<()> {
     match run(c) {
         Ok(()) => Ok(()),
-        Err(e) => super::agent::jfail(c.json, &format!("{e:#}")),
+        Err(e) => super::local::jfail(c.json, &format!("{e:#}")),
     }
 }
 

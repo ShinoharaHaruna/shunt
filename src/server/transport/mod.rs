@@ -147,7 +147,7 @@ pub(crate) fn wait_deadline(mut child: std::process::Child, timeout_s: u64, what
                 // direct child as a belt. The receivers drop and
                 // the reader threads end at pipe EOF: an
                 // out-of-group pipe holder must not delay the bail.
-                let _ = crate::agent::exec::signal_pgid(child.id(), "KILL");
+                let _ = crate::client::exec::signal_pgid(child.id(), "KILL");
                 let _ = child.kill();
                 let _ = child.wait();
                 anyhow::bail!("{what} timed out after {timeout_s}s");

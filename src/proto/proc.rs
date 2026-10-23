@@ -13,7 +13,7 @@
 //! What stays domain-local by design: the pidfile itself (daemon's
 //! `daemon.pid` + TOCTOU re-read before eviction, tunnel's
 //! `tunnels/<name>.pid` + lock ordering) — each side owns its own
-//! file lifecycle. Process-group liveness (`agent::exec::pgid_alive`)
+//! file lifecycle. Process-group liveness (`client::exec::pgid_alive`)
 //! is a different discipline entirely — kill(2) probe on a pgid, no
 //! cmdline — and does not come through here.
 

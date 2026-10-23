@@ -4,9 +4,9 @@
 //! Server handlers dispatch over the ssh/local transports; client
 //! handlers run the filesystem queue state machine (design.md §3).
 
-mod agent;
 mod args;
 mod feedback;
+mod local;
 mod queues;
 mod server;
 mod upgrade;
@@ -16,14 +16,14 @@ use clap::CommandFactory;
 
 pub use args::{Cli, Command};
 
-use agent::*;
 use args::*;
+use local::*;
 use server::*;
 
 /// Shared skeleton for dual-mode commands (`status`, `logs`,
 /// `cancel`, `prio`, `kill`, `workers`, `shutdown`): `-c`/registry
 /// default_client forwards the op over the wire; a local queue in
-/// scope runs the agent handler; neither prints subcommand help.
+/// scope runs the local handler; neither prints subcommand help.
 /// `wire` builds the remote argv lazily so the local path never
 /// loads the client row (shutdown's arm path reads it).
 fn dual_mode<W, L>(client: &Option<String>, root: &Option<String>, queue: &Option<String>, sub: &str, wire: W, local: L) -> Result<()>
@@ -353,8 +353,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 return print_subhelp("init");
             }
             let r = (|| -> Result<std::path::PathBuf> {
-                let root = agent_root(&a.root)?;
-                crate::agent::queue::init(&root)?;
+                let root = local_root(&a.root)?;
+                crate::client::queue::init(&root)?;
                 Ok(root)
             })();
             match r {
@@ -373,7 +373,7 @@ pub fn run(cli: Cli) -> Result<()> {
             if rootless(&a.root) {
                 return print_subhelp("daemon");
             }
-            match agent_root(&a.root).and_then(|root| crate::agent::daemon::run(&root)) {
+            match local_root(&a.root).and_then(|root| crate::client::daemon::run(&root)) {
                 Ok(()) => Ok(()),
                 Err(e) => jfail(a.json, &format!("{e:#}")),
             }
@@ -382,7 +382,7 @@ pub fn run(cli: Cli) -> Result<()> {
             if rootless(&a.root) {
                 return print_subhelp("start");
             }
-            match agent_root(&a.root).and_then(|root| crate::agent::daemon::start(&root)) {
+            match local_root(&a.root).and_then(|root| crate::client::daemon::start(&root)) {
                 Ok(pid) => {
                     if a.json {
                         jprint(jobj(jfields(serde_json::json!({"pid": pid}))));
@@ -398,7 +398,7 @@ pub fn run(cli: Cli) -> Result<()> {
             if rootless(&a.root) {
                 return print_subhelp("stop");
             }
-            match agent_root(&a.root).and_then(|root| crate::agent::daemon::stop(&root)) {
+            match local_root(&a.root).and_then(|root| crate::client::daemon::stop(&root)) {
                 Ok(()) => {
                     if a.json {
                         jprint(jobj(jfields(serde_json::json!({}))));
@@ -428,7 +428,7 @@ pub fn run(cli: Cli) -> Result<()> {
             // (task_meta refuses it before we get here).
             match a.task_meta() {
                 Ok(meta) => {
-                    print!("{}", crate::agent::exec::render_task(&meta));
+                    print!("{}", crate::client::exec::render_task(&meta));
                     Ok(())
                 }
                 Err(e) => jfail(a.json, &format!("{e:#}")),
@@ -510,7 +510,7 @@ pub fn run(cli: Cli) -> Result<()> {
             )
         }
         Command::Probe(a) => {
-            let report = crate::agent::probe::collect(&a.deploy_root);
+            let report = crate::client::probe::collect(&a.deploy_root);
             if a.json {
                 jprint(&report);
             } else {

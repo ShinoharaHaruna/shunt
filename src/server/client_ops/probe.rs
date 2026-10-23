@@ -1,5 +1,5 @@
 //! `client probe` (design.md §4.1, §8). Facts come over the wire
-//! (`shunt probe --json` on the box); `agent::probe` is the single
+//! (`shunt probe --json` on the box); `client::probe` is the single
 //! probe implementation. On an unbootstrapped box the call fails
 //! with the binary-drift guidance from `wire::extract`.
 
