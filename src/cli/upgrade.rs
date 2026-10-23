@@ -6,6 +6,7 @@
 use crate::cli::args::UpgradeArgs;
 use crate::server::client_ops::{self, compat, release};
 use crate::server::registry;
+use crate::server::remote;
 use crate::server::transport::{self, shell_quote, shunt_bin};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -108,12 +109,13 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Re
     // is their call (STOP drains in-flight tasks, never kills them),
     // but staleness must be loud or queue-semantics upgrades (new
     // directives, reschedule) silently don't apply.
-    if let Ok(out) = transport::queue_exec(t.as_ref(), &resolved, &["status", "--json"], None) {
-        if let Ok(rep) = crate::proto::wire::parse::<crate::proto::wire::StatusReport>(&out) {
-            if rep.daemon.alive {
-                let pid = rep.daemon.pid.map(|p| format!(" (pid {p})")).unwrap_or_default();
-                eprintln!("{name}/{queue}: daemon{pid} still runs the OLD binary image — `shunt queue stop {queue} -c {name}` drains and exits, then `shunt queue start {queue} -c {name}` brings the new one up");
-            }
+    // Best-effort staleness hint: every failure below a parsed
+    // report (transport, conn-down, drift) is silently ignored —
+    // the upgrade already happened; this only advises the restart.
+    if let remote::StatusAnswer::Report { report, .. } = remote::remote_status(t.as_ref(), &resolved) {
+        if report.daemon.alive {
+            let pid = report.daemon.pid.map(|p| format!(" (pid {p})")).unwrap_or_default();
+            eprintln!("{name}/{queue}: daemon{pid} still runs the OLD binary image — `shunt queue stop {queue} -c {name}` drains and exits, then `shunt queue start {queue} -c {name}` brings the new one up");
         }
     }
     Ok(())

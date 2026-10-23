@@ -3,7 +3,8 @@
 //! Unreachable clients are reported, never fatal.
 
 use crate::server::registry::{self, ClientEntry};
-use crate::server::transport::{queue_exec, transport_for, Transport};
+use crate::server::remote;
+use crate::server::transport::{transport_for, Transport};
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -96,12 +97,15 @@ pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
     match registry::all_queues(client) {
         Ok(targets) => {
             for queue in targets {
-                let status = match queue_exec(t, &queue, &["status", "--json"], None) {
-                    Ok(out) => match crate::proto::wire::parse::<crate::proto::wire::StatusReport>(&out).and_then(|_| crate::proto::wire::extract(&out)) {
-                        Ok(report) => QueueStatus { qroot: queue.client.qroot, reachable: true, report: Some(report), error: None },
-                        Err(e) => QueueStatus { qroot: queue.client.qroot, reachable: true, report: None, error: Some(format!("bad status JSON: {e:#}")) },
-                    },
-                    Err(e) => QueueStatus { qroot: queue.client.qroot, reachable: false, report: None, error: Some(format!("{e:#}")) },
+                let status = match remote::remote_status(t, &queue) {
+                    // `raw`, not a re-serialized report: remote
+                    // fields this build doesn't model pass through
+                    // to `status -c` verbatim.
+                    remote::StatusAnswer::Report { raw, .. } => QueueStatus { qroot: queue.client.qroot, reachable: true, report: Some(raw), error: None },
+                    // Drift means the box DID answer — reachable
+                    // stays true; only the payload was bad.
+                    remote::StatusAnswer::Drift(e) => QueueStatus { qroot: queue.client.qroot, reachable: true, report: None, error: Some(format!("bad status JSON: {e:#}")) },
+                    remote::StatusAnswer::Transport(e) | remote::StatusAnswer::ConnDown(e) => QueueStatus { qroot: queue.client.qroot, reachable: false, report: None, error: Some(format!("{e:#}")) },
                 };
                 if let Some(error) = &status.error {
                     errors.push(format!("{}: {error}", queue.name));

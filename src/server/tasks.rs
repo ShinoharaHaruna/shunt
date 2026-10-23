@@ -10,9 +10,9 @@
 //! notification system.
 
 use crate::proto::task::SpoolEntry;
-use crate::proto::wire::StatusReport;
 use crate::server::registry::{self, ClientEntry};
-use crate::server::transport::{queue_exec, Transport};
+use crate::server::remote;
+use crate::server::transport::Transport;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -214,13 +214,11 @@ pub fn observe(t: &dyn Transport, client: &ClientEntry, rec: &mut TaskRecord) ->
         rec.qroot = Some(target.client.qroot.clone());
         save(rec)?;
     }
-    let out = match queue_exec(t, &target, &["status", "--json"], None) {
-        Ok(o) => o,
-        Err(e) => return Ok(Observed::Unreachable(format!("{e:#}"))),
-    };
-    let rep: StatusReport = match crate::proto::wire::parse(&out) {
-        Ok(r) => r,
-        Err(e) => return Ok(Observed::Unreachable(format!("{e:#}"))),
+    // Every failure below a parsed report is the same verdict here:
+    // Unreachable carries the reason, whatever its kind.
+    let rep = match remote::remote_status(t, &target) {
+        remote::StatusAnswer::Report { report, .. } => report,
+        remote::StatusAnswer::Transport(e) | remote::StatusAnswer::ConnDown(e) | remote::StatusAnswer::Drift(e) => return Ok(Observed::Unreachable(format!("{e:#}"))),
     };
     let name = &rec.queue_name;
     let obs = if rep.pending.iter().any(|n| n == name) {

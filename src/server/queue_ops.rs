@@ -3,12 +3,19 @@
 
 use crate::proto::wire::StatusReport;
 use crate::server::registry::{self, ClientEntry, ResolvedQueue};
+use crate::server::remote;
 use crate::server::transport::{queue_exec, Transport};
 use anyhow::{Context, Result};
 
 fn status(t: &dyn Transport, queue: &ResolvedQueue) -> Result<StatusReport> {
-    let out = queue_exec(t, queue, &["status", "--json"], None)?;
-    crate::proto::wire::parse(&out).with_context(|| format!("cannot determine {}/{} state; run `shunt status -c {} --queue {}`", queue.client.name, queue.name, queue.client.name, queue.name))
+    match remote::remote_status(t, queue) {
+        remote::StatusAnswer::Report { report, .. } => Ok(*report),
+        // A dead endpoint propagates bare (its error already names
+        // the cause); an answered-but-wrong reply gets the
+        // state-unknown remediation — same split as before.
+        remote::StatusAnswer::Transport(e) | remote::StatusAnswer::ConnDown(e) => Err(e),
+        remote::StatusAnswer::Drift(e) => Err(e).with_context(|| format!("cannot determine {}/{} state; run `shunt status -c {} --queue {}`", queue.client.name, queue.name, queue.client.name, queue.name)),
+    }
 }
 
 /// A stopped sibling still owns its pending work. This preflight is not

@@ -5,6 +5,7 @@ pub mod dispatch;
 pub mod fsutil;
 pub mod queue_ops;
 pub mod registry;
+pub mod remote;
 pub mod room;
 pub mod spool;
 pub mod status;
