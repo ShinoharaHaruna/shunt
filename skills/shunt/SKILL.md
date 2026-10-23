@@ -36,6 +36,17 @@ shunt touches a machine the user may share with other people. Before registering
 
 All commands below run on the dev machine unless marked client.
 
+## Rooms first — check the inbox before acting
+
+Before ANY state-changing action on a box other projects may share — `submit`, `workers`, `kill`, `cancel`, `prio`, `shutdown`, `queue`/`client`/`project` changes — poll the coordination inbox:
+
+```bash
+shunt status --all --json --as <your-project>   # top-level rooms[] carries unread counts
+shunt room read <room> --as <your-project>      # drains unread and marks your cursor
+```
+
+An unread `say` or `decide` is exactly what changes what you were about to do: VRAM budgets, worker caps, GPU splits negotiated while you were away. The poll is a local read — nothing reaches the box — so there is no reason to skip it. No rooms, or all read: proceed. Unread traffic: read it first, then reconsider the planned action against it.
+
 ```bash
 # 1. Register a box. Vendor template seeds defaults; a dedicated
 #    ed25519 keypair is generated at ~/.config/shunt/keys/rw-a and
