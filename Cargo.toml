@@ -3,7 +3,7 @@ name = "shunt"
 version = "0.6.0"
 edition = "2021"
 license = "MIT"
-description = "Zero-dependency experiment queue for hourly-billed GPU boxes"
+description = "Experiment queues, machine management, and agent coordination over SSH or locally"
 
 [dependencies]
 anyhow = "1"

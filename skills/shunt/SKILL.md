@@ -1,11 +1,11 @@
 ---
 name: shunt
-description: Operate shunt, the task-scheduling layer between an agent and hourly-billed cloud GPU boxes. Register clients, bind projects, submit guarded tasks, read queue state and daemon events, arm idle poweroff, and reason about billing. Use whenever the user wants to run experiments on a rented GPU box, manage the queue, or shut a box down when work drains.
+description: Operate shunt to run experiments on local workstations, lab servers, and cloud CPU or GPU machines. Use for shunt client and project setup, named queues, guarded task submission, resource inspection, project coordination rooms, and optional idle shutdown or cost-aware operation.
 ---
 
 # shunt
 
-shunt is a FIFO + priority-band + at-least-once experiment queue for hourly-billed GPU boxes, driven over SSH. One Rust binary runs on both sides: the dev machine is the marshalling yard (registry, spool, dispatcher), each GPU box is a siding with its own four-track filesystem queue (`pending/ running/ done/ failed/` under `qroot`).
+shunt is an experiment operations layer for humans and agents, with FIFO + priority-band + at-least-once queues on local or remote machines. One Rust binary runs on both sides: the dev machine is the marshalling yard (registry, spool, dispatcher, coordination rooms), and each experiment machine is a siding with independent named queues (`pending/ running/ done/ failed/` under each `qroot`). CPU and GPU workloads share the same interface. Billing metadata and idle shutdown are optional deployment features.
 
 Mental model:
 
@@ -14,7 +14,7 @@ Mental model:
 - `localhost` is a peer client using the local transport (execs the `shunt` binary directly — no ssh, no key). Its row `clients/localhost.toml` is written on first use (default queue `~/.config/shunt/queue/`); edit it like any client row — `local_bin`/`timeout_s` tune the loopback transport. `shunt client rm localhost` resets the row to factory defaults (the name is reserved); to actually opt out, write `disabled = true` into the row. Use it for dry runs, integration smoke, and dev-loop tasks on the dev machine itself. `shunt client add <name> --local` creates additional loopback queues.
 - **Operate through the CLI, not the files.** Read state via `status --json` / `logs` / `spool ls` / `client show` / `queue ls` / `room read`; change it via `client add|update|env|rename|rm`, `queue …`, `project add|bind`, `submit`, `cancel`, `prio`, `workers`, `shutdown`. Commands carry side effects a hand-edit misses (mux socket, known_hosts, conn-fail streak, spool refs, `.shunt-owner`, tunnel env). Hand-edit only row fields with no setter (`expire`, `env_setup`, `billing`, … — the seeded-row edit after `client add` is exactly this case), and never write machine-owned state at all: `<qroot>` queue tracks, `spool/`, `known_hosts`, `cm/*.sock`, the daemon registry, room ledgers.
 - Execution is at-least-once. Tasks must guard on the artifact they produce so reruns are no-ops.
-- The box powers itself off when the queue drains and `shutdown_on_idle` is armed. Powering on is a human click in the vendor console; shunt never powers a box on.
+- On drain, a daemon stays resident by default, or exits if `exit_on_idle` is configured. The machine powers itself off only when idle shutdown has been explicitly armed; shared clients refuse server-side arming. shunt never powers a machine on — a human or upstream automation makes it available.
 - Submitting while the box is off is normal: tasks wait in the server-side spool until the dispatcher can deliver.
 - The client name is user-supplied, never agent-invented — ask the user what to call the box before `client add`. The name lands in the row filename, every `-c <name>` invocation, and the task/daemon logs; a made-up name puts the registry on a handle nobody recognizes. Same for project names. If a name turns out wrong, fix it with `shunt client rename <old> <new>` — it moves the row, keypair, mux socket, failure streak, spool refs, and project bindings together. Never hand-mv registry files; the sidecar paths keep pointing at the old name.
 
@@ -153,7 +153,7 @@ shunt status --all --json     # same, machine-readable + billing fields
 shunt status -c rw-a --json   # one box
 shunt logs -c rw-a            # daemon log
 shunt logs -c rw-a exp1       # task log (pattern match)
-shunt logs -c rw-a -f exp1    # follow (streamed, not JSON)
+shunt logs --root <qroot> -f exp1  # follow on the client itself; remote follow is unsupported
 ```
 
 ### queue control
@@ -241,27 +241,27 @@ Interpretation cheats: `daemon.alive=false` with nonempty `pending/` means nothi
 
 ## Scheduling objective — the utilization/efficiency Pareto front
 
-The default goal when scheduling on shunt is the Pareto frontier between resource occupancy and task throughput: occupy as much of the paid box as the work can absorb, but never oversubscribe into the regime where tasks stop progressing efficiently. Both directions lose money — a half-idle box burns paid hours on nothing, an oversubscribed one burns them on OOM kills and contention.
+The default goal when scheduling on shunt is the Pareto frontier between resource occupancy and task throughput: use the capacity allocated to your workloads without oversubscribing into the regime where tasks stop progressing efficiently. Respect shared-machine agreements and other workloads. Idle capacity reduces throughput; oversubscription wastes time on OOM kills and contention. On metered machines both also increase cost.
 
 - Keep `pending/` fed. Stage the next batch in the spool before `running/` drains — staging is free even while the box is off; an empty queue on a running box is the most preventable utilization failure.
 - Size the pool to the bottleneck, not the default. `workers -c <box> N` × per-task footprint (GPU VRAM, `TASK_THREADS` cores, RAM — read `facts` in `status --all --json`) should cover the box's capacity without exceeding it. Wall-time rising across similar tasks, or OOM `failed/` entries, means the frontier moved inward: back `workers` off.
 - Prefer many small checkpointable tasks over monoliths: fine-grained work bin-packs the box's gaps and holds occupancy high even as tasks finish unevenly.
-- At true drain the frontier ends — but poweroff is a serious, hard-to-reverse action, so stay conservative: `shutdown on` only when the user has actively opted into idle poweroff (armed it themselves or asked for it). Otherwise surface the drained queue and its idle cost, and let the user decide.
+- At true drain, keep the machine's intended lifecycle: a resident daemon, daemon-only exit, or explicitly authorized poweroff. Use `shutdown on` only when the user has actively opted into idle poweroff (armed it themselves or asked for it). On metered machines, surface idle cost when relevant.
 
-## Cost-aware playbook
+## Cost-aware playbook (metered machines)
 
-1. When the user has opted into idle poweroff, arm it right after enqueueing the last task of a batch: `shunt shutdown -c rw-a on`. The countdown only fires when both `pending/` and `running/` are empty, re-checks every second, and cancels if new work arrives, so arming early is safe — but never arm unprompted; powering off is the user's call. Never arm on a `shared` box — the arm is refused server-side anyway; kill the resident daemon instead with `shunt stop -c`.
+1. When the user has opted into idle poweroff, arm it right after enqueueing the last task of a batch: `shunt shutdown -c rw-a on`. The countdown only fires when both `pending/` and `running/` are empty, re-checks every second, and cancels if new work arrives — but never arm unprompted; powering off is the user's call. Never arm on a `shared` box — the arm is refused server-side anyway. To drain only a queue daemon, use `shunt queue stop <queue> -c <client>`.
 2. Submitting while the box is off costs nothing. The spool holds the task until a human powers the box on and the dispatcher delivers it. Batch overnight submissions; let one power-on drain them.
 3. Read `billing.hourly`/`billing.currency` from `status --all --json` before queueing. On hourly billing, unused paid time is already spent: if the instance has 40 min of paid time left and the next task needs 3 h, hold the long task, run short ones, or warn the user. That decision is yours; shunt only exposes the rate.
 4. Split multi-hour experiments into checkpointable tasks (`--guard runs/epoch10.pt` style) so an at-least-once rerun after a mid-flight death costs minutes, not the whole run. One giant unguarded 12 h task is the expensive failure mode.
-5. When a box is running but `pending/` is empty and you have nothing to add, arm shutdown only if the user opted into idle poweroff — otherwise report the idle spend and let them choose. Paid idle time is the thing shunt exists to kill, but the poweroff decision stays the user's.
+5. When a metered machine is running but `pending/` is empty and you have nothing to add, arm shutdown only if the user opted into idle poweroff — otherwise report relevant idle spend and let them choose. On owned or shared machines, follow the configured daemon lifecycle and resource agreements.
 
 ## Failure semantics
 
-- `failed/` means rc ≠ 0 or killed. The `.exit` file has the rc; the `.log` ends with `=== exit <rc> <iso>`. shunt has no retry backoff: read the log, fix, resubmit.
+- Tasks with an explicit `--retry N` budget can reschedule on rc 75 or recognized OOM signatures after `--retry-delay` seconds (default 60). Failures outside those criteria, timeouts, and exhausted retries land in `failed/` and require inspection before resubmission. Entry directories contain `exit` and `log` sidecars; logs end with `=== exit <rc> <iso>` (legacy flat entries use `.exit`/`.log`).
 - A task that fails rc 97 never ran: the binding's `workdir` was unreachable.
 - Orphan requeue: if the daemon dies with tasks in `running/`, the next start moves each to `pending/0000_requeued_<name>` (front of queue) and the interrupted log to `failed/<name>.interrupted.<ts>.log`. If the task's process group is still alive, the daemon logs a WARNING and requeues anyway. Your guard is what makes that safe: the rerun must no-op or cheaply resume while the zombie finishes.
-- A killed task (via `shunt kill` or daemon TERM forwarding) lands in `failed/` with its recorded rc.
+- `shunt kill` and daemon TERM forwarding target recorded task process groups. The resulting exit follows the same reschedule or terminal-failure rules above; a matching OOM log can still qualify a retry-declared task for rescheduling after a kill.
 
 ## Safety rules
 
@@ -284,6 +284,8 @@ shunt feedback "one-line title" --kind bug --body "what you ran, what happened, 
 - Registry secrets (`ssh.host/port/user/password/key`, `$HOME`) are auto-redacted — still, never paste tokens, passwords, or private data into the body; the issues are public.
 - Include the command you ran and the JSON/log lines that matter; do not attach credentials or hostnames the scrubber cannot know about.
 
+## Dedicated cloud example
+
 ```bash
 # once: register + bootstrap
 shunt client add rw-a --template autodl
@@ -303,9 +305,9 @@ shunt dispatch --once          # or let the dispatcher loop push it
 shunt status -c rw-a --json    # pending → running
 shunt logs -c rw-a exp1        # watch the task log
 
-# drain and walk away
+# Optional: only after the user opts into poweroff on a dedicated machine.
 shunt shutdown -c rw-a on      # fires ~60 s after running+pending empty (dedicated boxes only — refused on `shared` rows or busy sibling queues)
-# box powers off; billing stops at the end of the paid window
+# Whether poweroff stops billing depends on the provider.
 ```
 
 Keeping shunt itself current: `shunt upgrade` self-upgrades the dev binary from the latest GitHub release (`--check`/`--json` read-only, `--force` to reinstall); `shunt upgrade -c rw-a` upgrades the box's binary to the latest musl build through the normal bootstrap path — that is also how wire-protocol drift gets fixed after a dev-side upgrade. `shunt version [-c rw-a]` reports either side's build.

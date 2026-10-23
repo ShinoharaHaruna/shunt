@@ -1,6 +1,8 @@
 # shunt design spec
 
-shunt is the task-scheduling interface layer between an AI agent and hourly-billed cloud GPU instances (AutoDL-style: no systemd, containers that may vanish, billing tied to wall-clock uptime). It exists so that an agent — or a human — can submit an experiment, let a rented box run it, and have the box power itself off when the work is done, without anyone watching the queue.
+shunt is an experiment operations layer for humans and AI agents across local workstations, lab servers, and cloud CPU or GPU machines. It combines machine and project registration, independent named queues, persistent task staging, execution and resource visibility, and project coordination through one CLI. Remote machines use SSH; local clients use direct process execution. Billing metadata and idle shutdown are optional capabilities for deployments that need them.
+
+The queue originated on hourly-billed cloud GPU instances (AutoDL-style: no systemd, containers that may vanish, billing tied to wall-clock uptime). That environment shaped its recovery and shutdown semantics; the current interface also supports owned, shared, and always-on machines.
 
 The name is the rail-yard metaphor: the server is the marshalling yard, each client box is a destination siding, and `pending/`, `running/`, `done/`, `failed/` are the four tracks. Moving a task between tracks is a filesystem `mv`.
 
@@ -8,36 +10,37 @@ This document is the behavioral spec for the Rust rewrite. The proven bash imple
 
 ## 1. Positioning and non-goals
 
-shunt is a FIFO + priority-band + at-least-once experiment queue for rented GPU boxes, operated headlessly by agents over SSH. It is not a CI system, not Slurm, not a task spooler clone.
+shunt provides FIFO + priority-band + at-least-once experiment queues within a machine-management and project-coordination workflow. Humans and agents operate the same CLI, locally or over SSH, with structured state for automation. Named queues separate execution settings on one machine; coordination rooms let projects sharing compute record agreements (§17).
 
 FIFO is the _claim_ order, not the execution shape: the client runs a concurrent worker pool (`workers`, live-tunable), so several tasks run in parallel and the daemon's job is to keep the box saturated, not serialized.
 
 Non-goals, by deliberate exclusion:
 
 - No DAG dependencies between tasks. Use Airflow.
-- No automatic retry of arbitrary failures. A task opts into rescheduling explicitly (rc 75 + `# shunt:retry=N`, §3.9); everything else still lands in `failed/` and the agent decides. Declared resource estimates are annotations for the agent's estimation loop, never admission gates (§3.16).
+- No automatic retry of arbitrary failures. A task opts into bounded rescheduling explicitly (`# shunt:retry=N` for rc 75 or recognized OOM signatures, §3.9); failures outside those criteria, timeouts, and exhausted retries land in `failed/` and the agent decides. Declared resource estimates are annotations for the agent's estimation loop, never admission gates (§3.16).
 - No user-facing HTTP API. The client CLI is the API; SSH carries it.
-- No multi-machine load balancing or automatic client selection. Task submission always names the client explicitly; matching task requirements to machine facts is the agent's job, with facts exposed via `shunt clients --json`.
-- No remote power-on. Billing on AutoDL-class vendors is bound to the console "power on" action a human (or an upstream automation outside shunt's scope) performs. shunt only ever powers a box _off_.
+- No multi-machine load balancing or automatic client selection. Task submission targets a registered client (explicitly or through `default_client`); matching task requirements to machine facts is the operator's or agent's job, with facts exposed via `shunt status --all --json`.
+- No resource reservations or tenant isolation. Declared estimates and room agreements inform participants; the queue does not enforce CPU, RAM, or GPU allocations.
+- No remote power-on. A human or an upstream automation makes the machine available. On AutoDL-class vendors this includes the console "power on" action. Idle poweroff is explicit opt-in and is refused server-side for clients marked `shared`.
 
 ## 2. Architecture
 
 ```text
-dev machine (server, always on)                experiment box (client, on-demand)
+dev machine (server)                         experiment machine (client)
 ┌──────────────────────────────────┐           ┌────────────────────────────────┐
 │ shunt                            │           │ shunt (same binary)            │
-│  registry/  clients + projects   │   SSH     │  pending/ running/ done/       │
+│  registry/  clients + projects   │ SSH/local │  pending/ running/ done/       │
 │  spool/     server-side staging  │ ────────► │  failed/ workers STOP          │
-│  dispatcher spool → client       │  exec +   │  shutdown_on_idle ...          │
-│  status    aggregate --json      │ ◄──────── │  shunt daemon (worker pool,    │
-└──────────────────────────────────┘  JSON     │  idle poweroff, probe)         │
+│  dispatcher spool → client       │  exec +   │  one daemon per named queue    │
+│  rooms/     project coordination │ ◄──────── │  workers, logs, usage, probe   │
+└──────────────────────────────────┘  JSON     │  optional idle lifecycle       │
                                                └────────────────────────────────┘
 ```
 
 - One Rust binary `shunt` runs on both sides. Server subcommands operate the registry and spool; client subcommands operate the local queue.
 - The wire protocol is SSH exec: the server runs `ssh <endpoint> 'shunt <subcmd> --json'`. No agent port, no daemon on the server side beyond the dispatcher loop, no extra process on the client beyond `shuntd` (the queue daemon embedded in `shunt`).
-- Machines ↔ projects is many-to-many. A client (machine) has one queue. A project binds to one or more clients via `[[bind]]` entries. A submitted task names a project and a client; the binding supplies `workdir` and the env overlay applied when the task runs.
-- Client lifecycle: a human pays and powers the box on in the vendor console → `shuntd` starts (dispatcher auto-heal: if SSH is reachable but the daemon pidfile is dead, the server runs `shunt start` before pushing) → tasks are claimed → when the queue drains, the client's own idle-shutdown powers the box off. No server-to-box wake path exists.
+- Machines ↔ projects is many-to-many. A client (machine) owns named queues (§4.1a), each with an independent qroot, worker pool, daemon, binary, shell, and environment setup. A project binds to `(client, queue)` pairs via `[[bind]]` entries; the binding supplies `workdir` and the env overlay applied when a task runs.
+- Client lifecycle: the machine is reachable → the dispatcher revives a stopped queue daemon before delivering work → tasks are claimed → on drain the daemon stays resident, exits if `exit_on_idle` is configured, or powers off the machine if idle shutdown was explicitly armed. No server-to-machine wake path exists.
 
 ## 3. Client queue semantics
 
@@ -453,11 +456,13 @@ Every ssh exec is bounded twice, because `ConnectTimeout` covers only the handsh
 
 ## 7. End-to-end lifecycle
 
+This dedicated-cloud example uses AutoDL paths. Local, owned, or shared machines use the same submit/dispatch flow with their own paths and daemon lifecycle settings.
+
 1. `shunt client add rw-a --template autodl` — edit host/port/key in the row.
 2. `shunt client bootstrap rw-a` — scp the binary, remote `shunt init` + `shunt start`, then wire `shunt probe` (the binary is already on the box, so there is exactly one probe implementation); facts merged into the row.
 3. `shunt project add riboworld` + `shunt project bind riboworld --client rw-a --workdir /root/autodl-tmp/RiboWorld`.
 4. `shunt submit -p riboworld -c rw-a --guard runs/x.json -- uv run python ...` → lands in `spool/`.
-5. Dispatcher pushes when the box is reachable; box runs it; on drain, idle-shutdown powers off. Overnight submissions sit in spool until the human powers the box on; the dispatcher's auto-heal restarts `shuntd` and delivers.
+5. Dispatcher pushes when the machine is reachable; its queue daemon runs the task independently. On drain, the daemon stays resident or exits under `exit_on_idle`; only explicitly armed idle shutdown powers the machine off. Offline submissions stay in spool until the machine is available; the dispatcher's auto-heal restarts `shuntd` and delivers.
 
 ## 8. Probe spec
 

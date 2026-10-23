@@ -2,7 +2,7 @@
 
 ## shunt
 
-Task-scheduling interface layer between AI agents and hourly-billed cloud GPU instances (AutoDL-style). One Rust binary runs on both sides: the dev machine (server: registry + spool + dispatcher) and each GPU box (client: filesystem queue daemon). Wire protocol is `ssh <box> 'shunt <cmd> --json'`.
+Experiment operations layer for humans and AI agents across local workstations, lab servers, and cloud CPU or GPU machines. One Rust binary runs on both sides: the dev machine (server: registry + spool + dispatcher + coordination rooms) and each experiment machine (client: independent named filesystem queues and daemons). Remote wire protocol is `ssh <machine> 'shunt <cmd> --json'`; local clients use direct process execution. Billing metadata and idle shutdown are optional capabilities.
 
 ## Tech stack
 
@@ -38,7 +38,7 @@ Raw cargo equivalents work too (`cargo build/test/clippy`).
 
 ## CI
 
-`.github/workflows/release.yml` runs on pushed SemVer tags (`v0.1.0` or `0.1.0`), validates the tag against `Cargo.toml`, checks formatting and Clippy, tests the musl target, and publishes a Linux x86_64 binary archive with checksums and generated notes. Prerelease tags create GitHub prereleases. Ordinary branch/PR CI is not configured. Git hooks and workflow checks never modify source files.
+`.github/workflows/release.yml` runs on pushed SemVer tags (`v0.1.0` or `0.1.0`), validates the tag against `Cargo.toml`, checks formatting and Clippy, tests both musl and GNU targets, and publishes Linux x86_64 binary archives with per-target checksums and generated notes. Prerelease tags create GitHub prereleases. Ordinary branch/PR CI is not configured. Git hooks and workflow checks never modify source files.
 
 ## Conventions
 

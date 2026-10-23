@@ -1,49 +1,52 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" role="img" aria-labelledby="title description">
-  <title id="title">shunt architecture: one binary on two sides</title>
-  <desc id="description">The dev machine stores the registry and spool and runs the dispatcher. SSH exec sends tasks and commands to the GPU box, which returns JSON. The GPU box runs its filesystem queue, worker pool, and opt-in idle poweroff. Tasks remain staged while the box is unreachable.</desc>
+  <title id="title">shunt architecture: one binary, local or remote experiment machines</title>
+  <desc id="description">The dev machine stores clients, named queues, and projects in the registry, persists tasks in the spool, and dispatches to a pinned queue. Coordination rooms hold project agreements, and the task ledger retains delivery and outcome history. SSH or local exec sends tasks and commands to an experiment machine and returns JSON. Each named queue has its own filesystem tracks, daemon, workers, and environment. Tasks remain staged while the machine is unreachable. Idle daemon exit and idle machine shutdown are optional.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#24776b"/></marker>
     <marker id="return" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#697575"/></marker>
   </defs>
   <rect width="1200" height="600" rx="20" fill="#f8f6f1"/>
   <g font-family="DejaVu Sans, sans-serif" fill="#1d292c">
-    <text x="44" y="60" font-size="32" font-weight="700">One binary. Two sides.</text>
-    <text x="44" y="94" font-size="19" fill="#586565">A persistent staging queue meets a box-local execution queue.</text>
+    <text x="44" y="60" font-size="32" font-weight="700">One binary. Local and remote.</text>
+    <text x="44" y="94" font-size="19" fill="#586565">Persistent staging, explicit routing, and independent execution queues.</text>
     <rect x="44" y="130" width="430" height="354" rx="16" fill="#ffffff" stroke="#d9ddda" stroke-width="2"/>
     <path d="M 60 130 H 458 Q 474 130 474 146 V 194 H 44 V 146 Q 44 130 60 130" fill="#e9edeb"/>
     <text x="72" y="169" font-size="20" font-weight="700">01 / DEV MACHINE</text>
     <rect x="726" y="130" width="430" height="354" rx="16" fill="#ffffff" stroke="#d9ddda" stroke-width="2"/>
     <path d="M 742 130 H 1140 Q 1156 130 1156 146 V 194 H 726 V 146 Q 726 130 742 130" fill="#e3eeea"/>
-    <text x="754" y="169" font-size="20" font-weight="700">02 / GPU BOX</text>
-    <circle cx="80" cy="234" r="5" fill="#bb6238"/>
-    <text x="98" y="242" font-size="23" font-weight="700">Registry</text>
-    <text x="98" y="270" font-size="18" fill="#586565">Clients, projects, and bindings</text>
-    <line x1="72" y1="290" x2="446" y2="290" stroke="#e7eae6"/>
-    <circle cx="80" cy="322" r="5" fill="#bb6238"/>
-    <text x="98" y="330" font-size="23" font-weight="700">Spool</text>
-    <text x="98" y="358" font-size="18" fill="#586565">Persist tasks until acknowledged</text>
-    <line x1="72" y1="378" x2="446" y2="378" stroke="#e7eae6"/>
-    <circle cx="80" cy="410" r="5" fill="#bb6238"/>
-    <text x="98" y="418" font-size="23" font-weight="700">Dispatcher</text>
-    <text x="98" y="446" font-size="18" fill="#586565">Deliver work; restart a dead daemon</text>
-    <circle cx="762" cy="234" r="5" fill="#24776b"/>
-    <text x="780" y="242" font-size="23" font-weight="700">Filesystem queue</text>
-    <text x="754" y="270" font-family="DejaVu Sans Mono, monospace" font-size="17" fill="#586565">pending/ running/ done/ failed/</text>
-    <line x1="754" y1="290" x2="1128" y2="290" stroke="#e7eae6"/>
-    <circle cx="762" cy="322" r="5" fill="#24776b"/>
-    <text x="780" y="330" font-size="23" font-weight="700">Worker pool</text>
-    <text x="780" y="358" font-size="18" fill="#586565">Concurrency + task process groups</text>
-    <line x1="754" y1="378" x2="1128" y2="378" stroke="#e7eae6"/>
-    <circle cx="762" cy="410" r="5" fill="#24776b"/>
-    <text x="780" y="418" font-size="23" font-weight="700">Idle poweroff</text>
-    <text x="780" y="446" font-size="18" fill="#586565">Opt in; count down after drain</text>
-    <text x="600" y="260" font-size="20" font-weight="700" text-anchor="middle" fill="#24776b">SSH exec</text>
+    <text x="754" y="169" font-size="20" font-weight="700">02 / EXPERIMENT MACHINE</text>
+    <circle cx="80" cy="219" r="5" fill="#bb6238"/>
+    <text x="98" y="227" font-size="23" font-weight="700">Registry</text>
+    <text x="98" y="254" font-size="18" fill="#586565">Clients, named queues, and projects</text>
+    <line x1="72" y1="273" x2="446" y2="273" stroke="#e7eae6"/>
+    <circle cx="80" cy="291" r="5" fill="#bb6238"/>
+    <text x="98" y="299" font-size="23" font-weight="700">Spool</text>
+    <text x="98" y="326" font-size="18" fill="#586565">Persist tasks until acknowledged</text>
+    <line x1="72" y1="345" x2="446" y2="345" stroke="#e7eae6"/>
+    <circle cx="80" cy="363" r="5" fill="#bb6238"/>
+    <text x="98" y="371" font-size="23" font-weight="700">Dispatcher</text>
+    <text x="98" y="398" font-size="18" fill="#586565">Deliver and heal each queue daemon</text>
+    <line x1="72" y1="417" x2="446" y2="417" stroke="#e7eae6"/>
+    <circle cx="80" cy="435" r="5" fill="#bb6238"/>
+    <text x="98" y="443" font-size="23" font-weight="700">Rooms + task ledger</text>
+    <text x="98" y="470" font-size="18" fill="#586565">Project agreements and task history</text>
+    <rect x="754" y="212" width="374" height="104" rx="10" fill="#f4f8f5" stroke="#d9e4dd"/>
+    <text x="774" y="243" font-size="22" font-weight="700" fill="#1d665c">Queue / train</text>
+    <text x="774" y="273" font-size="17" fill="#586565">Own qroot, daemon, workers, env</text>
+    <text x="774" y="298" font-family="DejaVu Sans Mono, monospace" font-size="15" fill="#586565">pending/ running/ done/ failed/</text>
+    <rect x="754" y="330" width="374" height="104" rx="10" fill="#f4f8f5" stroke="#d9e4dd"/>
+    <text x="774" y="361" font-size="22" font-weight="700" fill="#1d665c">Queue / eval</text>
+    <text x="774" y="391" font-size="17" fill="#586565">Own qroot, daemon, workers, env</text>
+    <text x="774" y="416" font-family="DejaVu Sans Mono, monospace" font-size="15" fill="#586565">pending/ running/ done/ failed/</text>
+    <text x="941" y="464" font-size="17" text-anchor="middle" fill="#586565">Independent queues, one client identity</text>
+    <text x="600" y="260" font-size="20" font-weight="700" text-anchor="middle" fill="#24776b">SSH / local exec</text>
     <path d="M 492 282 H 708" fill="none" stroke="#24776b" stroke-width="3" marker-end="url(#arrow)"/>
     <text x="600" y="310" font-size="17" text-anchor="middle" fill="#586565">Tasks + commands</text>
     <text x="600" y="363" font-size="20" font-weight="700" text-anchor="middle" fill="#586565">JSON replies</text>
     <path d="M 708 382 H 492" fill="none" stroke="#697575" stroke-width="2.5" marker-end="url(#return)"/>
     <line x1="44" y1="518" x2="1156" y2="518" stroke="#d9ddda"/>
-    <text x="44" y="551" font-size="18" fill="#586565">Box offline? Tasks stay in the spool.</text>
-    <text x="1156" y="551" font-size="18" text-anchor="end" fill="#586565">Power-on stays in the vendor console.</text>
+    <text x="44" y="551" font-size="18" fill="#586565">Workstation · Lab server · Cloud instance · CPU or GPU</text>
+    <text x="44" y="582" font-size="17" fill="#586565">Machine offline? Tasks stay staged.</text>
+    <text x="1156" y="582" font-size="17" text-anchor="end" fill="#586565">Optional: idle daemon exit or machine shutdown.</text>
   </g>
 </svg>

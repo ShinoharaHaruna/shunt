@@ -23,11 +23,11 @@ pub use tasks::{EnqueueArgs, LogsArgs, NewArgs, PatternArgs, PrioArgs, RootArgs,
 #[command(
     name = "shunt",
     version = env!("SHUNT_VERSION"),
-    about = "Experiment queue for hourly-billed GPU boxes: FIFO + at-least-once, per-task process groups, idle auto-shutdown",
+    about = "Experiment queues, machine management, and agent coordination over SSH or locally",
     // Single-line long_about: clap wraps help text to $COLUMNS at
     // render time; baked \n would render the same breaks at every
     // terminal width and fight clap's own wrap.
-    long_about = "shunt runs on both sides. Server subcommands (submit, client, project, spool, dispatch) operate the registry and staging queue on the dev machine. Client subcommands (daemon, enqueue, status, ...) operate the local queue and double as the SSH wire protocol via --json."
+    long_about = "shunt manages experiments on local workstations, lab servers, and cloud CPU or GPU machines. One binary runs on both sides: server commands manage machines, project bindings, staged tasks, and coordination rooms; each machine runs independent named queues with concurrent workers, task logs, and resource telemetry. Use the same CLI locally or over SSH, with --json on status and task queries for agents and scripts. Idle shutdown and billing metadata are optional."
 )]
 pub struct Cli {
     #[command(subcommand)]

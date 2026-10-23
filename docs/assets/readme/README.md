@@ -1,16 +1,18 @@
 # README artwork
 
-These assets support the English project homepage in [README.md](../../../README.md).
+These assets support the English project homepage in [README.md](../../../README.md) and its Simplified Chinese translation in [README.cn.md](../../../README.cn.md).
 
-| Asset                                      | Source                                                                                                                                                                  |
-| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [hero.png](hero.png)                       | Generated with the built-in imagegen tool on 2026-10-21. The generator's model identifier was not exposed. This is a conceptual illustration of the rail-yard metaphor. |
-| [architecture.svg](architecture.svg)       | Hand-authored, editable SVG. Describes the server/client responsibilities and SSH transport in [design spec §2](../../design.md#2-architecture).                        |
-| [queue-lifecycle.svg](queue-lifecycle.svg) | Hand-authored, editable SVG. Summarizes normal task transitions, orphan recovery, and opt-in shutdown from [design spec §3](../../design.md#3-client-queue-semantics).  |
+| Asset                                      | Source                                                                                                                                                                                                                                                   |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [hero.png](hero.png)                       | Generated with the built-in imagegen tool on 2026-10-21. The generator's model identifier was not exposed. This is a conceptual illustration of the rail-yard metaphor.                                                                                  |
+| [architecture.svg](architecture.svg)       | Hand-authored, editable SVG. Describes server/client responsibilities, independent named queues, and SSH/local transport from [design spec §4.1a](../../design.md#41a-named-queues-within-a-managed-instance) and [§5](../../design.md#5-wire-protocol). |
+| [queue-lifecycle.svg](queue-lifecycle.svg) | Hand-authored, editable SVG. Summarizes normal task transitions, orphan recovery, declared retries, and optional drain behavior from [design spec §3](../../design.md#3-client-queue-semantics).                                                         |
 
 Keep technical labels in the SVG sources so they remain editable, searchable, and independent of image generation. Detailed edge cases remain in the design spec. The hero is copied into this directory and requires no external image host.
 
 ## Hero generation prompt
+
+The original prompt below records the artwork's 2026-10-21 provenance. Its rented-GPU framing reflects the brief at that time; current project positioning covers local and remote experiment machines, including owned workstations and lab servers.
 
 ```text
 Use case: stylized-concept

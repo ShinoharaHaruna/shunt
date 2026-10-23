@@ -1,36 +1,39 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="540" viewBox="0 0 1200 540" role="img" aria-labelledby="title description">
-  <title id="title">shunt filesystem task lifecycle and idle shutdown</title>
-  <desc id="description">A pending task is claimed by rename into running, then finishes in done for success or failed for failure, killing, or timeout. On daemon restart, orphaned running tasks return to the front of pending. When armed, idle shutdown waits for pending and running to drain before a grace countdown and a configured poweroff command. New work cancels the countdown and busy sibling queues block poweroff.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title description">
+  <title id="title">shunt per-queue task lifecycle and recovery</title>
+  <desc id="description">Each named queue has independent filesystem tracks. A pending task is claimed by rename into running; successful tasks finish in done and terminal failures finish in failed. A declared retry budget can reschedule rc 75 or recognized out-of-memory failures; ordinary errors outside those criteria and exhausted retry budgets are terminal. The failed track also records timeouts. On daemon restart, orphaned running tasks return to the front of pending. A drained daemon can stay resident or opt into clean exit. Idle machine shutdown is separately armed and waits through a grace countdown. Server-side arming preflights all registered sibling queues and refuses shared clients. Runtime shutdown checks cover live sibling daemons under the same Unix account, not all machine workloads; new work cancels the countdown.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#697575"/></marker>
     <marker id="recover" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#bb6238"/></marker>
   </defs>
-  <rect width="1200" height="540" rx="20" fill="#f8f6f1"/>
+  <rect width="1200" height="620" rx="20" fill="#f8f6f1"/>
   <g font-family="DejaVu Sans, sans-serif" fill="#1d292c">
     <text x="44" y="60" font-size="32" font-weight="700">Every task has a place.</text>
-    <text x="44" y="94" font-size="19" fill="#586565">Four directories, inspectable logs, and explicit recovery.</text>
-    <rect x="44" y="164" width="280" height="112" rx="14" fill="#ffffff" stroke="#cdd4d1" stroke-width="2"/>
-    <text x="68" y="206" font-family="DejaVu Sans Mono, monospace" font-size="28" font-weight="700">pending/</text>
-    <text x="68" y="245" font-size="19" fill="#586565">Waiting to be claimed</text>
-    <rect x="448" y="164" width="280" height="112" rx="14" fill="#e7eeeb" stroke="#24776b" stroke-width="2"/>
-    <text x="472" y="206" font-family="DejaVu Sans Mono, monospace" font-size="28" font-weight="700" fill="#1d665c">running/</text>
-    <text x="472" y="245" font-size="19" fill="#586565">Isolated process group</text>
-    <rect x="904" y="126" width="252" height="100" rx="14" fill="#e7eeeb" stroke="#c5d8ce" stroke-width="2"/>
-    <text x="928" y="165" font-family="DejaVu Sans Mono, monospace" font-size="26" font-weight="700" fill="#1d665c">done/</text>
-    <text x="928" y="200" font-size="18" fill="#586565">Successful exit</text>
-    <rect x="904" y="286" width="252" height="100" rx="14" fill="#f7eae2" stroke="#e2c7b7" stroke-width="2"/>
-    <text x="928" y="325" font-family="DejaVu Sans Mono, monospace" font-size="26" font-weight="700" fill="#9b4a28">failed/</text>
-    <text x="928" y="359" font-size="17" fill="#79594a">Error, kill, or timeout</text>
-    <path d="M 336 220 H 432" fill="none" stroke="#697575" stroke-width="2.5" marker-end="url(#arrow)"/>
-    <text x="384" y="201" font-size="17" text-anchor="middle" fill="#586565">rename</text>
-    <path d="M 740 196 H 816 V 176 H 888" fill="none" stroke="#697575" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#arrow)"/>
-    <text x="812" y="151" font-size="17" text-anchor="middle" fill="#586565">exit 0</text>
-    <path d="M 740 244 H 816 V 336 H 888" fill="none" stroke="#697575" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#arrow)"/>
-    <path d="M 588 290 V 330 Q 588 344 574 344 H 198 Q 184 344 184 330 V 290" fill="none" stroke="#bb6238" stroke-width="2.5" stroke-dasharray="7 6" stroke-linejoin="round" marker-end="url(#recover)"/>
-    <text x="44" y="382" font-size="18" fill="#9b4a28">Daemon restart: requeue orphaned running entries at the front.</text>
-    <line x1="44" y1="422" x2="1156" y2="422" stroke="#d9ddda"/>
-    <circle cx="52" cy="458" r="6" fill="#bb6238"/>
-    <text x="72" y="465" font-size="20" font-weight="700">When armed: queue drained → grace countdown → configured poweroff</text>
-    <text x="72" y="500" font-size="18" fill="#586565">New work cancels the countdown. Busy sibling queues block poweroff.</text>
+    <text x="44" y="94" font-size="19" fill="#586565">Per-queue state, inspectable logs, and explicit recovery.</text>
+    <text x="44" y="142" font-size="18" fill="#9b4a28">Daemon restart: orphaned running entries return to the front.</text>
+    <path d="M 588 196 V 184 Q 588 170 574 170 H 198 Q 184 170 184 184 V 196" fill="none" stroke="#bb6238" stroke-width="2.5" stroke-dasharray="7 6" stroke-linejoin="round" marker-end="url(#recover)"/>
+    <rect x="44" y="210" width="280" height="112" rx="14" fill="#ffffff" stroke="#cdd4d1" stroke-width="2"/>
+    <text x="68" y="252" font-family="DejaVu Sans Mono, monospace" font-size="28" font-weight="700">pending/</text>
+    <text x="68" y="291" font-size="19" fill="#586565">Waiting to be claimed</text>
+    <rect x="448" y="210" width="280" height="112" rx="14" fill="#e7eeeb" stroke="#24776b" stroke-width="2"/>
+    <text x="472" y="252" font-family="DejaVu Sans Mono, monospace" font-size="28" font-weight="700" fill="#1d665c">running/</text>
+    <text x="472" y="291" font-size="19" fill="#586565">Own process group</text>
+    <rect x="904" y="170" width="252" height="100" rx="14" fill="#e7eeeb" stroke="#c5d8ce" stroke-width="2"/>
+    <text x="928" y="209" font-family="DejaVu Sans Mono, monospace" font-size="26" font-weight="700" fill="#1d665c">done/</text>
+    <text x="928" y="244" font-size="18" fill="#586565">Successful exit</text>
+    <rect x="904" y="330" width="252" height="100" rx="14" fill="#f7eae2" stroke="#e2c7b7" stroke-width="2"/>
+    <text x="928" y="369" font-family="DejaVu Sans Mono, monospace" font-size="26" font-weight="700" fill="#9b4a28">failed/</text>
+    <text x="928" y="403" font-size="17" fill="#79594a">Terminal failure</text>
+    <path d="M 336 266 H 432" fill="none" stroke="#697575" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <text x="384" y="247" font-size="17" text-anchor="middle" fill="#586565">rename</text>
+    <path d="M 740 242 H 816 V 220 H 888" fill="none" stroke="#697575" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#arrow)"/>
+    <text x="812" y="195" font-size="17" text-anchor="middle" fill="#586565">exit 0</text>
+    <path d="M 740 290 H 816 V 380 H 888" fill="none" stroke="#697575" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#arrow)"/>
+    <path d="M 588 336 V 368 Q 588 382 574 382 H 198 Q 184 382 184 368 V 336" fill="none" stroke="#bb6238" stroke-width="2.5" stroke-dasharray="7 6" stroke-linejoin="round" marker-end="url(#recover)"/>
+    <text x="44" y="420" font-size="18" fill="#9b4a28">Declared retry budget: rc 75 / recognized OOM → delayed rerun.</text>
+    <line x1="44" y1="468" x2="1156" y2="468" stroke="#d9ddda"/>
+    <circle cx="52" cy="504" r="6" fill="#24776b"/>
+    <text x="72" y="511" font-size="20" font-weight="700">After drain: stay resident, or opt into a clean daemon exit.</text>
+    <text x="72" y="550" font-size="18" fill="#586565">Optional idle shutdown: grace countdown + same-account daemon checks.</text>
+    <text x="72" y="585" font-size="18" fill="#586565">New work cancels the countdown. Shared clients refuse server-side arming.</text>
   </g>
 </svg>

@@ -1,7 +1,7 @@
-//! shunt: FIFO + priority-band + at-least-once experiment queue for
-//! hourly-billed cloud GPU boxes. One binary runs on both sides:
-//! server subcommands operate the registry and spool on the dev
-//! machine; client subcommands operate the local queue on a rented box.
+//! shunt: experiment operations for local and remote CPU or GPU machines.
+//! One binary manages the dev-side registry, spool, and coordination rooms,
+//! and runs independent FIFO + priority-band + at-least-once queues on
+//! experiment machines. Idle shutdown and billing metadata are optional.
 //!
 //! Behavioral spec: docs/design.md.
 
