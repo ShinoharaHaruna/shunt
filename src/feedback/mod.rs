@@ -21,18 +21,28 @@ use std::path::PathBuf;
 /// pending artifact and returns Err (with a JSON error line first
 /// when `json` is set — agents consume this command too).
 pub fn send(kind: &str, title: &str, body: &str, client: Option<&str>, dry_run: bool, json: bool) -> Result<()> {
-    let issue_title = format!("[feedback/{kind}] {title}");
     let body = compose::body(body, client)?;
 
-    // Sanitize before anything is persisted: the artifact on disk is
-    // already the scrubbed text, so a later `retry` can never deliver
-    // a pre-scrub draft.
+    // Sanitize before anything is persisted — this is the boundary:
+    // the ledger artifact and the delivered payload are both the
+    // scrubbed text, so a later `retry` can never deliver a
+    // pre-scrub draft. Two passes over title and body: secret
+    // values (exact match) then registered names (case-insensitive,
+    // kind-tagged placeholders). The composed body carries the
+    // context block, so `--client` facts are covered too. The
+    // `[feedback/<kind>]` prefix is added only after scrubbing —
+    // kind is a fixed enum, nothing user-controlled enters
+    // post-scrub, and a client literally named "bug" cannot eat it.
     let secrets = sanitize::secrets();
-    let (issue_title, n1) = sanitize::scrub(&issue_title, &secrets);
-    let (title, _) = sanitize::scrub(title, &secrets);
-    let (body, n2) = sanitize::scrub(&body, &secrets);
-    if n1 + n2 > 0 {
-        eprintln!("redacted {} sensitive value(s)", n1 + n2);
+    let names = sanitize::names();
+    let (title, n1) = sanitize::scrub(title, &secrets);
+    let (title, n2) = sanitize::scrub_names(&title, &names);
+    let issue_title = format!("[feedback/{kind}] {title}");
+    let (body, n3) = sanitize::scrub(&body, &secrets);
+    let (body, n4) = sanitize::scrub_names(&body, &names);
+    let n = n1 + n2 + n3 + n4;
+    if n > 0 {
+        eprintln!("redacted {n} sensitive value(s)");
     }
 
     if dry_run {
@@ -167,12 +177,15 @@ pub fn retry(id: Option<&str>, json: bool) -> Result<()> {
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         // Re-scrub before re-delivery: the artifact was sanitized at
         // send time, but a client row registered since can have added
-        // secrets the persisted body still carries.
+        // secrets or names the persisted body still carries.
         let secrets = sanitize::secrets();
+        let names = sanitize::names();
         let (b, n1) = sanitize::scrub(&art.body, &secrets);
-        let (t, n2) = sanitize::scrub(&art.title, &secrets);
-        if n1 + n2 > 0 {
-            eprintln!("{stem}: redacted {} new sensitive value(s)", n1 + n2);
+        let (b, n2) = sanitize::scrub_names(&b, &names);
+        let (t, n3) = sanitize::scrub(&art.title, &secrets);
+        let (t, n4) = sanitize::scrub_names(&t, &names);
+        if n1 + n2 + n3 + n4 > 0 {
+            eprintln!("{stem}: redacted {} new sensitive value(s)", n1 + n2 + n3 + n4);
             art.body = b;
             art.title = t;
         }

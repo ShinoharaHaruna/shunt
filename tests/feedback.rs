@@ -111,6 +111,45 @@ fn scrubs_registry_secrets_from_body() {
 }
 
 #[test]
+fn scrubs_registered_names_from_title_body_and_context() {
+    let home = tmpdir("names");
+    std::fs::create_dir_all(home.join("clients")).unwrap();
+    std::fs::create_dir_all(home.join("projects")).unwrap();
+    // A hyphenated client carrying a named queue, the exempt
+    // loopback peer on disk, an exempt generic name, and a
+    // mixed-case project.
+    std::fs::write(home.join("clients/pytorch-7032.toml"), "name = \"pytorch-7032\"\ndeploy_root = \"/root\"\n[queues.gpu-queue]\nqroot = \"/root/q/gpu\"\n").unwrap();
+    std::fs::write(home.join("clients/localhost.toml"), "name = \"localhost\"\ndeploy_root = \"/home/u\"\n").unwrap();
+    std::fs::write(home.join("clients/admin.toml"), "name = \"admin\"\ndeploy_root = \"/root\"\n").unwrap();
+    std::fs::write(home.join("projects/RiboWorld.toml"), "name = \"RiboWorld\"\n").unwrap();
+    let stub = stub_gh(&home);
+    let path = format!("{}:{}", stub.display(), std::env::var("PATH").unwrap());
+    let env = [("PATH", path.as_str()), ("FBSTUB", home.to_str().unwrap())];
+
+    let o = run(&home, &["feedback", "RiboWorld run on pytorch-7032 died", "--body", "PYTORCH-7032 lost gpu-queue for riboworld-waves; localhost and admin stay readable", "-c", "pytorch-7032"], &env);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("redacted"));
+    // Title ships in gh argv — kind-tagged placeholders there too.
+    let args = std::fs::read_to_string(home.join("args.log")).unwrap();
+    assert!(args.contains("[feedback/bug] <PROJECT_NAME> run on <BOX_NAME> died"), "{args}");
+    let body = std::fs::read_to_string(home.join("last_body.txt")).unwrap();
+    let low = body.to_lowercase();
+    for leak in ["pytorch-7032", "riboworld", "gpu-queue"] {
+        assert!(!low.contains(leak), "delivered body leaks {leak}: {body}");
+    }
+    assert!(body.contains("<BOX_NAME> lost <QUEUE_NAME> for <PROJECT_NAME>-waves"), "{body}");
+    // Reserved/generic names pass through untouched.
+    assert!(body.contains("localhost"), "{body}");
+    assert!(body.contains("admin"), "{body}");
+    // The --client context block ships the name redacted as well.
+    assert!(body.contains("\"name\": \"<BOX_NAME>\""), "{body}");
+    // The persisted artifact is the same scrubbed text.
+    let stored = std::fs::read_to_string(&artifacts(&home)[0]).unwrap();
+    assert!(!stored.to_lowercase().contains("pytorch"), "{stored}");
+    assert!(stored.contains("<PROJECT_NAME>"), "{stored}");
+}
+
+#[test]
 fn rate_cap_persists_and_retry_delivers() {
     let home = tmpdir("cap");
     let stub = stub_gh(&home);
