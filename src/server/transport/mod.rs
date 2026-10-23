@@ -11,7 +11,7 @@ mod ssh;
 pub use local::LocalTransport;
 pub use ssh::SshTransport;
 
-use crate::server::registry::ClientEntry;
+use crate::server::registry::{self, ClientEntry};
 use anyhow::Result;
 use std::path::Path;
 
@@ -170,6 +170,17 @@ pub fn transport_for(client: &ClientEntry) -> Box<dyn Transport> {
     } else {
         Box::new(SshTransport)
     }
+}
+
+/// `load_client` + `transport_for`: the pairing every "one op on a
+/// named client" call site spells out. Callers that need only the
+/// row, a resolved queue's execution view (`ResolvedQueue.client`),
+/// a mutated entry, or an injected fake still load and pick
+/// separately — this is the common-case spelling, not the only one.
+pub fn client_transport(name: &str) -> Result<(ClientEntry, Box<dyn Transport>)> {
+    let client = registry::load_client(name)?;
+    let t = transport_for(&client);
+    Ok((client, t))
 }
 
 /// Exec transport over SSH. Tests substitute a fake (canned output or

@@ -51,20 +51,17 @@ fn run(c: &QueueCmd) -> Result<()> {
         QueueAction::Start { name } => return remote_queue(&client_name, Some(name), &["start", "--json"], None, true),
         QueueAction::Stop { name } => return remote_queue(&client_name, Some(name), &["stop", "--json"], None, true),
         QueueAction::Rm { name, purge } => {
-            let client = registry::load_client(&client_name)?;
-            let t = transport::transport_for(&client);
+            let (_, t) = transport::client_transport(&client_name)?;
             crate::server::queue_ops::remove(t.as_ref(), &client_name, name, *purge)?;
             success(c.json, &client_name, name, "removed", None);
         }
         QueueAction::Bootstrap { name, bin_path } => {
-            let client = registry::load_client(&client_name)?;
-            let t = transport::transport_for(&client);
+            let (_, t) = transport::client_transport(&client_name)?;
             client_ops::bootstrap_queue(t.as_ref(), &client_name, name, bin_path.as_deref())?;
             success(c.json, &client_name, name, "bootstrapped", None);
         }
         QueueAction::Env { name } => {
-            let client = registry::load_client(&client_name)?;
-            let t = transport::transport_for(&client);
+            let (_, t) = transport::client_transport(&client_name)?;
             client_ops::push_queue_env(t.as_ref(), &client_name, name)?;
             success(c.json, &client_name, name, "env-pushed", None);
         }

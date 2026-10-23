@@ -10,7 +10,6 @@ use super::print_cols;
 /// outcome live from the box when none is recorded yet (lazy
 /// write-back, design.md §4.5). A unique id prefix is accepted.
 pub(crate) fn task_show(id: &str, json: bool) -> Result<()> {
-    use crate::server::registry;
     use crate::server::tasks::{self, Observed};
     let mut rec = match tasks::load(id) {
         Ok(r) => r,
@@ -26,9 +25,8 @@ pub(crate) fn task_show(id: &str, json: bool) -> Result<()> {
     };
     let mut live: Option<String> = None;
     if rec.outcome.is_none() {
-        match registry::load_client(&rec.client) {
-            Ok(client) => {
-                let t = crate::server::transport::transport_for(&client);
+        match crate::server::transport::client_transport(&rec.client) {
+            Ok((client, t)) => {
                 live = Some(match tasks::observe(t.as_ref(), &client, &mut rec) {
                     Ok(obs) => match obs {
                         Observed::Pending => "pending".into(),

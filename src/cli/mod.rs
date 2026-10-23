@@ -139,15 +139,13 @@ pub fn run(cli: Cli) -> Result<()> {
             let name = required_client(&a.client)?;
             match &a.action {
                 TunnelAction::Up { port } => {
-                    let c = registry::load_client(&name)?;
-                    let t = crate::server::transport::transport_for(&c);
+                    let (c, t) = crate::server::transport::client_transport(&name)?;
                     let pid = tunnel::up(t.as_ref(), &c, *port)?;
                     println!("tunnel up: {} pid {pid}", c.name);
                     Ok(())
                 }
                 TunnelAction::Down => {
-                    let c = registry::load_client(&name)?;
-                    let t = crate::server::transport::transport_for(&c);
+                    let (c, t) = crate::server::transport::client_transport(&name)?;
                     tunnel::down(t.as_ref(), &c)?;
                     println!("tunnel down: {}", c.name);
                     Ok(())
@@ -225,8 +223,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 },
             ),
             ClientAction::Exec { name, cmd } => {
-                let c = registry::load_client(&name)?;
-                let t = crate::server::transport::transport_for(&c);
+                let (c, t) = crate::server::transport::client_transport(&name)?;
                 let out = t.exec(&c, &cmd, None)?;
                 print!("{out}");
                 Ok(())
@@ -277,20 +274,17 @@ pub fn run(cli: Cli) -> Result<()> {
                 crate::server::client_ops::remove(&name, purge)
             }
             ClientAction::Probe { name } => {
-                let c = registry::load_client(&name)?;
-                let t = crate::server::transport::transport_for(&c);
+                let (_, t) = crate::server::transport::client_transport(&name)?;
                 crate::server::client_ops::probe(t.as_ref(), &name)
             }
             ClientAction::Env { name } => {
-                let c = registry::load_client(&name)?;
-                let t = crate::server::transport::transport_for(&c);
+                let (_, t) = crate::server::transport::client_transport(&name)?;
                 crate::server::client_ops::push_env(t.as_ref(), &name)?;
                 println!("env pushed: {}", name);
                 Ok(())
             }
             ClientAction::Bootstrap { name, bin_path } => {
-                let c = registry::load_client(&name)?;
-                let t = crate::server::transport::transport_for(&c);
+                let (_, t) = crate::server::transport::client_transport(&name)?;
                 crate::server::client_ops::bootstrap(t.as_ref(), &name, bin_path.as_deref())
             }
         },
@@ -495,13 +489,12 @@ pub fn run(cli: Cli) -> Result<()> {
                             // Push the row's shutdown_cmd unless --cmd
                             // overrides it; the file it writes is the
                             // daemon's first-choice poweroff command.
-                            let client = registry::load_client(name)?;
+                            let (client, t) = crate::server::transport::client_transport(name)?;
                             // shared = user-consented mark that the
                             // box hosts other people's work; arming
                             // idle poweroff would kill their jobs.
                             anyhow::ensure!(!client.shared, "client '{name}' is marked shared — idle poweroff refused (clear `shared` in clients/{name}.toml only if the user confirms sole use)");
                             let resolved = registry::resolve_queue(&client, a.queue.as_deref())?;
-                            let t = crate::server::transport::transport_for(&client);
                             crate::server::queue_ops::check_shutdown(t.as_ref(), &client, &resolved.name)?;
                             let g = grace_s.map(|n| n.to_string());
                             // --cmd > row.shutdown_cmd > facts.shutdown_cmd

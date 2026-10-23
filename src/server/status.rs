@@ -4,7 +4,7 @@
 
 use crate::server::registry::{self, ClientEntry};
 use crate::server::remote;
-use crate::server::transport::{transport_for, Transport};
+use crate::server::transport::{client_transport, transport_for, Transport};
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -122,8 +122,7 @@ pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
 /// Preserve the single-queue wire surface, but never hide sibling queues
 /// behind a configured execution default when an instance status is requested.
 pub fn run_client(name: &str, json: bool) -> Result<()> {
-    let client = registry::load_client(name)?;
-    let transport = transport_for(&client);
+    let (client, transport) = client_transport(name)?;
     let status = query(transport.as_ref(), &client);
     if status.queues.len() == 1 {
         let queue = status.queues.values().next().unwrap();
