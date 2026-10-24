@@ -20,6 +20,7 @@ Unified entry is `just` (`just --list`):
 - `just test` — cargo test (CI only, not in hooks)
 - `just check` — full gate = fmt-check + lint + test
 - `just web` — pnpm install + build the `serve` dashboard into `web/dist` (embedded at the next cargo build)
+- `just completions <shell> [dest]` — regenerate a shell completion script (stdout, or installed to `dest`); installed files go stale when the CLI grows
 - `just setup` — after clone, points git at the versioned hooks dir (`core.hooksPath = .githooks`)
 
 Raw cargo equivalents work too (`cargo build/test/clippy`).

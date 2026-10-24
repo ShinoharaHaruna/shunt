@@ -28,6 +28,19 @@ web:
     pnpm -C web install
     pnpm -C web build
 
+# Regenerate a shell completion script — the refresh path for
+# installed files that go stale whenever the CLI grows.
+# `just completions <shell> [dest]`: stdout, or install to DEST
+completions shell dest="":
+    #!/usr/bin/env sh
+    set -eu
+    if [ -n "{{dest}}" ]; then
+        cargo run --quiet -- completions "{{shell}}" > "{{dest}}"
+        echo "wrote {{dest}}"
+    else
+        cargo run --quiet -- completions "{{shell}}"
+    fi
+
 # Full CI gate: format + lint + test.
 check: fmt-check lint test
 
