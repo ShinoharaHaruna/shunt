@@ -10,18 +10,18 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use super::store::{last_read, load_meta, mark, mint_locked, msg_numbers, msg_numbers_in, resolve};
-use super::{msg_keep, on_roster, warn_non_member, Msg, MAX_BODY};
+use super::{is_member, msg_keep, warn_non_member, Msg, MAX_BODY};
 
 /// `room say` (§17.2): mint under `.seq.lock`, install
 /// `msgs/NNNN.json` temp-then-rename, archive the oldest past the
 /// cap, then mark the caller's label (a say marks its own message
 /// read — you saw what you posted). Returns the minted N and
-/// whether the author is on the roster.
+/// whether the author is a member (roster, or `admin` implicitly).
 pub fn say(room: &str, label: &str, body: &str) -> Result<(u32, bool)> {
     anyhow::ensure!(body.len() <= MAX_BODY, "body is {} bytes; the cap is {MAX_BODY} — a coordination message carries decisions, not logs", body.len());
     let (name, dir) = resolve(room)?;
     let meta = load_meta(&dir)?;
-    let member = on_roster(&meta, label);
+    let member = is_member(&meta, label);
     warn_non_member(&name, &meta, label, "posting anyway, recorded member:false");
     let msg = Msg { author: label.to_string(), ts: rfc3339_z_now(), body_md: body.to_string(), member, summary_through: None };
     let n = {

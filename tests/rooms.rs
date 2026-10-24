@@ -266,12 +266,14 @@ fn as_label_canonicalizes_to_registered_project() {
 }
 
 /// `admin` is the reserved operator identity (§17.3): no --as means
-/// the operator — exempt from non-member warnings, still recorded
-/// member:false, and rejected as a project name and a roster member.
+/// the operator — an implicit member of every room (member:true
+/// posts, `ls` lists all rooms, no warnings) who can never land on
+/// a roster or become a registered project.
 #[test]
 fn admin_is_the_reserved_operator_identity() {
     let home = tmpdir("admin");
     ok(&home, &["room", "create", "r", "--members", "p1"]);
+    ok(&home, &["room", "create", "r3", "--members", "p2"]);
     ok(&home, &["room", "say", "r", "--body", "m1", "--as", "p1"]);
 
     // No --as: read and decide produce no non-member warning, and
@@ -286,17 +288,24 @@ fn admin_is_the_reserved_operator_identity() {
     let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join("rooms/r/meta.json")).unwrap()).unwrap();
     assert_eq!(meta["decision"]["author"], "admin");
 
-    // Any case variant folds to `admin`: one author, one cursor —
-    // still recorded member:false (honestly not on the roster).
+    // Any case variant folds to `admin`: one author, one cursor.
+    // An implicit member posts member:true — the operator's seat is
+    // real, it just never lands on a roster.
     let o = run(&home, &["room", "say", "r", "--body", "hi", "--as", "Admin", "--json"], &[]);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(!String::from_utf8_lossy(&o.stderr).contains("not a member"));
-    assert_eq!(serde_json::from_slice::<serde_json::Value>(&o.stdout).unwrap()["member"], false);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&o.stdout).unwrap()["member"], true);
     let msg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join("rooms/r/msgs/0002.json")).unwrap()).unwrap();
     assert_eq!(msg["author"], "admin");
     assert!(!home.join("rooms/r/readers/Admin.json").exists());
     let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join("rooms/r/meta.json")).unwrap()).unwrap();
     assert_eq!(meta["members"], serde_json::json!(["p1"]), "admin never lands on a roster");
+
+    // The implicit seat makes admin's `ls` inbox the whole
+    // directory — no --all needed for the overseer.
+    let out = ok(&home, &["room", "ls"]);
+    assert!(out.lines().any(|l| l.split_whitespace().next() == Some("r")), "admin ls sees every room: {out}");
+    assert!(out.lines().any(|l| l.split_whitespace().next() == Some("r3")), "{out}");
 
     // The reserved name is rejected at every intake that could
     // mint it as a project identity.

@@ -203,9 +203,12 @@ fn print_room_msgs(msgs: &[(u32, crate::server::room::Msg)]) {
 }
 
 /// Member list for human output, stale members marked (§17.4).
+/// `admin` never lands on a roster yet is a member of every room
+/// (§17.3) — the suffix keeps the implicit seat visible instead of
+/// leaving it hidden convention.
 fn print_members(v: &crate::server::room::RoomView) {
     let members = v.members.iter().map(|m| if v.stale.contains(m) { format!("{m}(stale)") } else { m.clone() }).collect::<Vec<_>>().join(", ");
-    println!("members: {}", if members.is_empty() { "-".into() } else { members });
+    println!("members: {} (+admin implicit)", if members.is_empty() { "-".into() } else { members });
 }
 
 fn print_room_ls(ls: &crate::server::room::Listings, all: bool) {

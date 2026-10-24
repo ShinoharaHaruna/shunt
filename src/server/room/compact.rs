@@ -12,7 +12,7 @@ use std::path::Path;
 
 use super::msgs::load_msgs;
 use super::store::{load_meta, mark, mint_locked, msg_numbers, resolve, save_meta};
-use super::{compact_min, on_roster, warn_non_member, Msg, Reader, MAX_BODY};
+use super::{compact_min, is_member, warn_non_member, Msg, Reader, MAX_BODY};
 
 /// The packet `room compact` (plan phase) hands an agent to feed
 /// its LLM: the split point to pass back as `--through`, and every
@@ -95,7 +95,7 @@ pub fn compact_commit(room: &str, label: &str, through: u32, body: &str) -> Resu
     anyhow::ensure!(through > 0, "--through 0 covers no messages — the plan's split point is at least the first eligible message");
     let (name, dir) = resolve(room)?;
     let meta = load_meta(&dir)?;
-    let member = on_roster(&meta, label);
+    let member = is_member(&meta, label);
     anyhow::ensure!(through > meta.compacted_through.unwrap_or(0), "messages ≤{through} are already covered by a previous compaction — choose a later --through");
     warn_non_member(&name, &meta, label, "posting anyway, recorded member:false");
     if msg_numbers(&dir).last().is_some_and(|&max| through >= max) {

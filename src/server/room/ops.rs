@@ -13,7 +13,7 @@ use std::path::Path;
 
 use super::labels::resolve_label;
 use super::store::{existing_rooms_dir, load_meta, mark, msg_numbers, resolve, room_names, rooms_dir, save_meta, unknown_room_err, unread_count, ARCHIVE_DIR};
-use super::{on_roster, warn_non_member, Decision, Meta, RoomView, Suggested};
+use super::{is_member, warn_non_member, Decision, Meta, RoomView, Suggested};
 
 /// `room decide` (§17.2): overwrite meta.decision — latest wins.
 /// No stream message: the stream retains HOW agreement was reached;
@@ -83,9 +83,10 @@ fn stale_members(meta: &Meta) -> Vec<String> {
 }
 
 /// The `room ls` report (§17.2/§17.4): the resolved reader label,
-/// that label's member rooms (or every room under `--all`) with
-/// unread counts, suggested same-box project groups, and the
-/// archived room names (cold storage: names only, no cursor work).
+/// that label's member rooms (every room for `admin`; every room
+/// under `--all` for anyone) with unread counts, suggested same-box
+/// project groups, and the archived room names (cold storage:
+/// names only, no cursor work).
 #[derive(Serialize)]
 pub struct Listings {
     pub label: String,
@@ -95,8 +96,10 @@ pub struct Listings {
 }
 
 /// `room ls` (§17.2/§17.4): the caller's member rooms (or every
-/// room under `--all`) with unread counts, plus suggested groups —
-/// same-box project sets with no room yet.
+/// room under `--all` — and every room for `admin`, whose implicit
+/// membership makes its inbox the whole directory) with unread
+/// counts, plus suggested groups — same-box project sets with no
+/// room yet.
 pub fn list(as_flag: Option<&str>, all: bool) -> Result<Listings> {
     let label = resolve_label(as_flag)?;
     let groups = binding_groups();
@@ -118,8 +121,9 @@ pub fn list(as_flag: Option<&str>, all: bool) -> Result<Listings> {
             };
             member_sets.push(meta.members.clone());
             // Default scope is the caller's inbox: rooms the label
-            // belongs to. `--all` widens to the directory.
-            if !all && !on_roster(&meta, &label) {
+            // belongs to. `--all` widens to the directory; `admin`
+            // needs no flag — an implicit member everywhere.
+            if !all && !is_member(&meta, &label) {
                 continue;
             }
             views.push(view(&name, &rd, &meta, Some(&label)));

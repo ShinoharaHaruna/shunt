@@ -84,7 +84,9 @@ pub struct Decision {
 }
 
 /// One stream entry: `msgs/NNNN.json`. `member: false` marks a
-/// post from outside the roster — allowed (open trust), but loud.
+/// post from a non-participant — off the roster AND not `admin`
+/// (an implicit member everywhere) — allowed (open trust), but
+/// loud.
 /// `summary_through` presence alone marks an agent-written
 /// compaction digest; its value is the highest covered N (no
 /// separate `kind` field — old binaries just ignore it).
@@ -137,11 +139,13 @@ pub struct RoomView {
 /// `admin` (case-insensitive in every comparison) is the human
 /// operator's reserved identity (§17.3). No `--as` means the
 /// operator — an agent forgetting `--as` posts as a person, not
-/// under a stray $USER. `admin` is exempt from the non-member
-/// warning (a human reading a foreign room is overseeing, not
-/// leaking) yet still records `member: false` — it is honestly not
-/// on the roster. It can never BECOME a roster member or a
-/// registered project: both are rejected at intake, so no lookup
+/// under a stray $USER. `admin` is an IMPLICIT member of every
+/// room by role — `is_member` answers true for it, so its posts
+/// record `member: true`, its `ls` inbox is the whole directory,
+/// and the non-member warning never fires for the one reader who
+/// is overseeing rather than leaking. The roster itself stays
+/// project-only: `admin` can never BECOME a roster member or a
+/// registered project — both are rejected at intake, so no lookup
 /// can turn the operator into a project.
 pub const ADMIN_LABEL: &str = "admin";
 
@@ -157,12 +161,21 @@ pub(super) fn on_roster(meta: &Meta, label: &str) -> bool {
     meta.members.iter().any(|m| m.eq_ignore_ascii_case(label))
 }
 
+/// Participant membership (§17.3) — what `member:` records and
+/// what `ls` scopes on: the roster, plus `admin`, who holds an
+/// implicit seat in every room without ever being written onto
+/// one. The split is deliberate — the roster names which projects
+/// a room coordinates; `member:` names who legitimately speaks.
+pub(super) fn is_member(meta: &Meta, label: &str) -> bool {
+    is_admin(label) || on_roster(meta, label)
+}
+
 /// Open trust: a non-member op still lands — but name the roster so
 /// a wrong-room typo is loud, not silently leaked into a foreign
-/// channel (§17.3). `admin` is exempt: the operator is the one
-/// reader the warning would be noise for.
+/// channel (§17.3). `admin` never warns: implicit membership makes
+/// the operator a member everywhere.
 pub(super) fn warn_non_member(name: &str, meta: &Meta, label: &str, action: &str) {
-    if !is_admin(label) && !on_roster(meta, label) {
+    if !is_member(meta, label) {
         eprintln!("warning: '{label}' is not a member of room '{name}' (roster: {}) — {action}", meta.members.join(", "));
     }
 }
