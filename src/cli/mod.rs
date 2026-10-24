@@ -80,8 +80,12 @@ pub fn run(cli: Cli) -> Result<()> {
             // same slot (clap already rejects file + trailing argv).
             let file = a.file.as_deref().or(a.file_pos.as_deref());
             let flags = crate::proto::task::TaskFlags { timeout_s: a.timeout, retry: a.retry, retry_delay_s: a.retry_delay_s, gpu_mem_mb: a.gpu_mem_mb, ram_mb: a.ram_mb, cpu_cores: a.cpu_cores, env: crate::proto::task::parse_env_pairs(&a.env)? };
-            let id = crate::server::spool::submit_to(&client, a.queue.as_deref(), a.project.as_deref(), a.guard.as_deref(), a.slug.as_deref(), file, &flags, &a.cmd)?;
-            println!("spooled {id} (queue number is assigned on delivery; track with `shunt task show {id}`)");
+            let id = crate::server::spool::submit_to(&client, a.queue.as_deref(), a.project.as_deref(), a.guard.as_deref(), a.slug.as_deref(), file, &flags, a.hold.clone(), &a.cmd)?;
+            if a.hold.is_some() {
+                println!("spooled {id} HELD — dispatch skips it until `shunt spool release {id}`");
+            } else {
+                println!("spooled {id} (queue number is assigned on delivery; track with `shunt task show {id}`)");
+            }
             Ok(())
         }
         Command::Status(a) => {
@@ -174,11 +178,27 @@ pub fn run(cli: Cli) -> Result<()> {
 
         Command::Spool(c) => match c.action {
             SpoolAction::Ls => {
-                let rows: Vec<Vec<String>> = crate::server::spool::list()?.iter().map(|e| vec![e.id.clone(), e.submitted_at.clone(), e.client.clone(), e.queue.clone(), e.project.clone(), e.meta.slug.clone()]).collect();
+                let rows: Vec<Vec<String>> = crate::server::spool::list()?
+                    .iter()
+                    .map(|e| {
+                        let hold = e.hold.as_ref().map(|r| if r.is_empty() { "held".into() } else { format!("held: {r}") }).unwrap_or_else(|| "-".into());
+                        vec![e.id.clone(), e.submitted_at.clone(), e.client.clone(), e.queue.clone(), e.project.clone(), e.meta.slug.clone(), hold]
+                    })
+                    .collect();
                 print_cols(&rows);
                 Ok(())
             }
             SpoolAction::Remove { task_id } => crate::server::spool::remove(&task_id),
+            SpoolAction::Hold { task_id, reason } => {
+                let id = crate::server::spool::set_hold(&task_id, Some(reason.unwrap_or_default()))?;
+                println!("{id} held — dispatch skips it until `shunt spool release {id}`");
+                Ok(())
+            }
+            SpoolAction::Release { task_id } => {
+                let id = crate::server::spool::set_hold(&task_id, None)?;
+                println!("{id} released — the next dispatch sweep will deliver it");
+                Ok(())
+            }
         },
 
         Command::Task(c) => match c.action {

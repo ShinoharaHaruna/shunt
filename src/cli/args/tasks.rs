@@ -59,6 +59,12 @@ pub struct SubmitArgs {
     /// Named queue on the selected server client
     #[arg(long)]
     pub queue: Option<String>,
+    /// Stage held: the dispatcher skips this task on every sweep
+    /// until `shunt spool release <id>`. Optionally record why
+    /// (`--hold=REASON`; `=` is required so the reason can't be
+    /// mistaken for a file argument)
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "", value_name = "REASON")]
+    pub hold: Option<String>,
 }
 
 #[derive(Args)]

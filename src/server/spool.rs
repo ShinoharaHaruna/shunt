@@ -176,11 +176,11 @@ fn new_task_id(dir: &std::path::Path) -> String {
 /// `shunt submit`: resolve client (+ project binding), build the task
 /// body, stage it. Returns the task id.
 pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slug: Option<&str>, file: Option<&str>, flags: &TaskFlags, cmd: &[String]) -> Result<String> {
-    submit_to(client_name, None, project, guard, slug, file, flags, cmd)
+    submit_to(client_name, None, project, guard, slug, file, flags, None, cmd)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn submit_to(client_name: &str, queue: Option<&str>, project: Option<&str>, guard: Option<&str>, slug: Option<&str>, file: Option<&str>, flags: &TaskFlags, cmd: &[String]) -> Result<String> {
+pub fn submit_to(client_name: &str, queue: Option<&str>, project: Option<&str>, guard: Option<&str>, slug: Option<&str>, file: Option<&str>, flags: &TaskFlags, hold: Option<String>, cmd: &[String]) -> Result<String> {
     let client = registry::load_client(client_name)?;
     // `--project` resolves through the name middleware like `-c` —
     // a case-folded hit substitutes the canonical spelling with a
@@ -272,7 +272,7 @@ pub fn submit_to(client_name: &str, queue: Option<&str>, project: Option<&str>, 
         eprintln!("submit: WARNING: '{}' carries no guard; at-least-once requeue will run it twice (lost ack, orphan requeue). Pass --guard <path> unless the task is naturally idempotent.", meta.slug);
     }
 
-    let entry = SpoolEntry { id: id.clone(), project: project.unwrap_or_default(), client: client.name.clone(), queue: target.name, qroot: Some(target.client.qroot), meta, submitted_at: rfc3339_z_now() };
+    let entry = SpoolEntry { id: id.clone(), project: project.unwrap_or_default(), client: client.name.clone(), queue: target.name, qroot: Some(target.client.qroot), hold, meta, submitted_at: rfc3339_z_now() };
     stage(&entry, &body)?;
     Ok(id)
 }
@@ -393,6 +393,33 @@ pub fn body(task_id: &str) -> Result<String> {
     valid_task_id(task_id)?;
     let path = spool_dir()?.join(format!("{task_id}.sh"));
     fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))
+}
+
+/// Resolve a task-id argument to a staged id: exact match first,
+/// else a unique prefix (same affordance as `task show`).
+fn resolve_id(id_or_prefix: &str) -> Result<String> {
+    valid_task_id(id_or_prefix)?;
+    if spool_dir()?.join(format!("{id_or_prefix}.json")).exists() {
+        return Ok(id_or_prefix.to_string());
+    }
+    let matches: Vec<String> = list()?.into_iter().filter(|e| e.id.starts_with(id_or_prefix)).map(|e| e.id).collect();
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().unwrap()),
+        0 => bail!("no spool entry with id {id_or_prefix:?}"),
+        _ => bail!("id prefix {id_or_prefix:?} matches several spool entries"),
+    }
+}
+
+/// Set or clear an entry's hold flag (design.md §4.4): `Some`
+/// holds it out of every dispatch sweep until released, `None`
+/// releases it. Returns the resolved task id.
+pub fn set_hold(id_or_prefix: &str, hold: Option<String>) -> Result<String> {
+    let id = resolve_id(id_or_prefix)?;
+    let dir = spool_dir()?;
+    let mut entry = read_entry(&dir, &format!("{id}.json"))?;
+    entry.hold = hold;
+    crate::server::fsutil::atomic_write(&dir.join(format!("{id}.json")), serde_json::to_string_pretty(&entry)?)?;
+    Ok(id)
 }
 
 /// Remove an entry after a clean enqueue ack (both files).

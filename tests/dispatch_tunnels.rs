@@ -247,7 +247,7 @@ fn tunnel_workset_isolates_bad_rows_and_preserves_delivery_order() -> Result<()>
     disabled.disabled = true;
     registry::save_client(&disabled)?;
     for (id, client) in [("1", "b"), ("2", "a"), ("3", "b")] {
-        let e = SpoolEntry { id: id.into(), project: "p".into(), client: client.into(), queue: "default".into(), qroot: None, meta: TaskMeta { id: None, slug: format!("task-{id}"), guard: None, workdir: None, env: BTreeMap::new(), cmd: vec!["true".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None }, submitted_at: format!("2024-01-01T00:00:0{id}Z") };
+        let e = SpoolEntry { id: id.into(), project: "p".into(), client: client.into(), queue: "default".into(), qroot: None, hold: None, meta: TaskMeta { id: None, slug: format!("task-{id}"), guard: None, workdir: None, env: BTreeMap::new(), cmd: vec!["true".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None }, submitted_at: format!("2024-01-01T00:00:0{id}Z") };
         spool::stage(&e, id)?;
     }
     let t = Fake { daemon_dead: true, ..Fake::default() };

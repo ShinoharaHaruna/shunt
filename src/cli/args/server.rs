@@ -93,6 +93,12 @@ pub enum SpoolAction {
     /// Remove a staged entry by task id
     #[command(visible_alias = "rm")]
     Remove { task_id: String },
+    /// Hold a staged entry: the dispatcher skips it until released.
+    /// Task id or unique prefix; REASON is a free-form note
+    Hold { task_id: String, reason: Option<String> },
+    /// Release a held entry so the next dispatch sweep delivers it.
+    /// Task id or unique prefix
+    Release { task_id: String },
 }
 
 #[derive(Args)]

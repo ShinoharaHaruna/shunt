@@ -47,7 +47,7 @@ impl Fixture {
     }
 
     fn submit(&self, queue: Option<&str>, project: Option<&str>) -> Result<String> {
-        spool::submit_to("box", queue, project, Some("done.marker"), Some("task"), None, &TaskFlags::default(), &["true".into()])
+        spool::submit_to("box", queue, project, Some("done.marker"), Some("task"), None, &TaskFlags::default(), None, &["true".into()])
     }
 
     fn project(&self, name: &str, queues: &[&str]) -> Result<()> {

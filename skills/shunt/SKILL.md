@@ -172,7 +172,12 @@ shunt shutdown -c rw-a off
 # on test rows so a copied registry can never hit a real poweroff.
 shunt spool ls                   # staged-but-undelivered submissions
 shunt dispatch --once            # one spool sweep (tests, manual push)
+shunt submit -c rw-a --hold="awaiting lease decision" -- python train.py
+shunt spool hold <id> "reason"   # hold an already-staged entry
+shunt spool release <id>         # let the next sweep deliver it
 ```
+
+A held spool entry is skipped by EVERY dispatch sweep — `--once` and the loop alike: no probe, no push. Use it for work staged ahead of a decision (lease approval, quota, a prerequisite run): staging is free, but an unheld entry fires the moment the box answers. Held entries show `held`/`held: <reason>` in `spool ls`. `--hold` takes its reason only via `=` (`--hold=why`), never a bare word — that slot belongs to task files.
 
 `cancel`, `prio`, `kill`, `workers`, `shutdown`, `logs`, `status` all take `-c <client>` on the server side and forward over SSH. Without `-c` they operate on the local queue (client side).
 

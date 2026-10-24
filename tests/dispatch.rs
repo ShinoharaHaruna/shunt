@@ -90,7 +90,7 @@ fn fixture(tag: &str) -> Result<(PathBuf, ClientEntry)> {
 }
 
 fn entry(id: &str, slug: &str) -> SpoolEntry {
-    SpoolEntry { id: id.into(), project: "p".into(), client: "fake-a".into(), queue: "default".into(), qroot: None, meta: TaskMeta { id: None, slug: slug.into(), guard: None, workdir: None, env: BTreeMap::new(), cmd: vec!["echo".into(), "hi".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None }, submitted_at: "2024-01-01T00:00:00Z".into() }
+    SpoolEntry { id: id.into(), project: "p".into(), client: "fake-a".into(), queue: "default".into(), qroot: None, hold: None, meta: TaskMeta { id: None, slug: slug.into(), guard: None, workdir: None, env: BTreeMap::new(), cmd: vec!["echo".into(), "hi".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None }, submitted_at: "2024-01-01T00:00:00Z".into() }
 }
 
 #[test]
@@ -396,6 +396,77 @@ fn submit_rejects_dash_slug() -> Result<()> {
     assert!(e.is_err(), "dash slug spooled");
     assert!(e.unwrap_err().to_string().contains("bad slug"));
     assert!(spool::list()?.is_empty(), "rejected submit must not stage");
+    Ok(())
+}
+
+/// Issue #13: a held spool entry must never reach the box — the
+/// sweep does not even probe its client — until `spool release`
+/// clears the flag, after which the next sweep delivers normally.
+#[test]
+fn held_entry_skipped_until_released() -> Result<()> {
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, _client) = fixture("hold")?;
+    let pending = home.join("pending");
+    std::fs::create_dir_all(&pending)?;
+
+    // One held entry beside a live one: only the live one pushes,
+    // the held one stays staged untouched.
+    let mut e = entry("h1", "deferred-h1");
+    e.hold = Some("awaiting lease".into());
+    spool::stage(&e, "echo deferred\n")?;
+    spool::stage(&entry("t1", "a-t1"), "echo t1\n")?;
+
+    let t = fake(&pending);
+    assert_eq!(dispatch::sweep_with(&t)?, 1);
+    let left = spool::list()?;
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, "h1");
+    assert_eq!(left[0].hold.as_deref(), Some("awaiting lease"));
+
+    // Sweep 2: with only the held entry staged, the client's box is
+    // not even probed — a held task owes the box nothing.
+    let t2 = fake(&pending);
+    assert_eq!(dispatch::sweep_with(&t2)?, 0);
+    assert!(t2.calls.lock().unwrap().is_empty(), "held entry must not probe its client");
+
+    // Release by unique prefix (task-show affordance), then the next
+    // sweep delivers it.
+    assert_eq!(spool::set_hold("h", Some("r".into()))?, "h1");
+    assert_eq!(spool::set_hold("h1", None)?, "h1");
+    assert_eq!(dispatch::sweep_with(&t)?, 1);
+    assert!(spool::list()?.is_empty());
+    assert_eq!(std::fs::read_to_string(pending.join("0100_task/task.sh"))?, "echo deferred\n");
+
+    // Ambiguous prefix and unknown id are honest errors.
+    assert!(spool::set_hold("nope", None).is_err());
+
+    std::fs::remove_dir_all(&home).ok();
+    Ok(())
+}
+
+/// `submit --hold` stages the flag on the entry; the pre-hold JSON
+/// format (no `hold` key) still parses as unheld, and a non-held
+/// entry serializes without the key — wire/disk format unchanged
+/// for the common case.
+#[test]
+fn submit_hold_round_trip_and_backward_compat() -> Result<()> {
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, _c) = fixture("holdfmt")?;
+    let flags: shunt::proto::task::TaskFlags = Default::default();
+
+    let id = spool::submit_to("fake-a", None, None, None, None, None, &flags, Some("lease pending".into()), &["true".into()])?;
+    let staged = spool::list()?.into_iter().find(|e| e.id == id).unwrap();
+    assert_eq!(staged.hold.as_deref(), Some("lease pending"));
+
+    let id2 = spool::submit_to("fake-a", None, None, None, None, None, &flags, None, &["true".into()])?;
+    let raw = std::fs::read_to_string(spool::spool_dir()?.join(format!("{id2}.json")))?;
+    assert!(!raw.contains("\"hold\""), "non-held entry must serialize without the key: {raw}");
+
+    // A pre-hold entry (JSON with no `hold` field) parses unheld.
+    let legacy: SpoolEntry = serde_json::from_str(&raw.replace(&id2, "legacy1"))?;
+    assert!(legacy.hold.is_none());
+
+    std::fs::remove_dir_all(&home).ok();
     Ok(())
 }
 

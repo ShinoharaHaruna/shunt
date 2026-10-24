@@ -116,6 +116,14 @@ pub fn sweep_at(t: &dyn Transport, idx: u64) -> Result<usize> {
 /// `dispatch --once`, tests) always probes.
 fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
     let entries = spool::list()?;
+    // Held entries are staged but deliberately undelivered (§4.4):
+    // no probe, no push — the box owes them nothing until release.
+    let (held, ready): (Vec<_>, Vec<_>) = entries.into_iter().partition(|e| e.hold.is_some());
+    for e in &held {
+        let reason = e.hold.as_deref().unwrap_or_default();
+        eprintln!("dispatch: {} held{} — skipped", e.id, if reason.is_empty() { String::new() } else { format!(": {reason}") });
+    }
+    let entries = ready;
     let mut clients: BTreeMap<String, registry::ClientEntry> = BTreeMap::new();
     let mut reach: BTreeMap<(String, String), Reach> = BTreeMap::new();
     let mut checked = BTreeSet::new();

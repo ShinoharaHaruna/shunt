@@ -97,6 +97,7 @@ export interface SpoolEntry {
   client: string
   queue: string
   qroot?: string | null
+  hold?: string | null
   meta: { slug: string; [k: string]: unknown }
   submitted_at: string
 }

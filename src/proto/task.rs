@@ -102,6 +102,13 @@ pub struct SpoolEntry {
     pub queue: String,
     #[serde(default)]
     pub qroot: Option<String>,
+    /// `Some` = staged but held: the dispatcher skips the entry on
+    /// every sweep until `spool release` clears it (design.md §4.4).
+    /// The string is an optional free-form reason ("" = held, no
+    /// reason). `skip_serializing_if` keeps non-held entries'
+    /// JSON identical to the pre-hold format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<String>,
     pub meta: TaskMeta,
     pub submitted_at: String,
 }

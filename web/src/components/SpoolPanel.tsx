@@ -42,7 +42,14 @@ export function SpoolPanel({ spool }: { spool: { entries?: SpoolEntry[]; error?:
                     <td className={`${td} font-num text-xs`}>
                       {e.client}→{e.queue}
                     </td>
-                    <td className={`${td} font-num text-xs text-ink-3`}>{e.meta.slug}</td>
+                    <td className={`${td} font-num text-xs text-ink-3`}>
+                      {e.meta.slug}
+                      {e.hold != null && (
+                        <span className="ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-amber-400">
+                          held{e.hold ? `: ${e.hold}` : ''}
+                        </span>
+                      )}
+                    </td>
                     <td className={`${td} font-num text-xs text-ink-4`}>
                       {shortTs(e.submitted_at)}
                     </td>
