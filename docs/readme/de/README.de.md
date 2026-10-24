@@ -49,9 +49,16 @@ Die Maschinensteuerung umfasst verwaltete SSH-Ausführung, Bootstrap und Upgrade
 
 ## Schnellstart
 
-### 1. Installation aus dem Quellcode
+### 1. Installation
 
 Benötigt werden Linux mit einer stabilen Rust-Toolchain, einem System-Linker und Bash. Für den Remote-Betrieb braucht die Dev-Maschine außerdem OpenSSH-Werkzeuge (`ssh`, `scp` und `ssh-keygen`).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ShinoharaHaruna/shunt/main/install.sh | sh
+shunt --help
+```
+
+Das Skript installiert das neueste Release-Binary (statischer musl-Build, Dashboard enthalten) nach `~/.local/bin`; übergib `--gnu` für den dynamisch gelinkten Build, `--dir` für ein anderes Verzeichnis oder `uninstall`, um das Binary zu entfernen. Baue stattdessen aus dem Quellcode mit der Rust-Toolchain:
 
 ```bash
 git clone https://github.com/ShinoharaHaruna/shunt.git

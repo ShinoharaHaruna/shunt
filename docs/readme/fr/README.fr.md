@@ -49,9 +49,16 @@ Les contrôles machine incluent l'exécution SSH managée, le bootstrap et les m
 
 ## Démarrage rapide
 
-### 1. Installation depuis les sources
+### 1. Installation
 
 Utilisez Linux avec une toolchain Rust stable, un linker système et Bash. L'exploitation à distance requiert aussi les outils OpenSSH (`ssh`, `scp` et `ssh-keygen`) sur la machine de dev.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ShinoharaHaruna/shunt/main/install.sh | sh
+shunt --help
+```
+
+Le script installe le binaire de la dernière release (build musl statique, dashboard inclus) dans `~/.local/bin` ; passez `--gnu` pour le build à liaison dynamique, `--dir` pour un autre emplacement, ou `uninstall` pour supprimer le binaire. Pour un build depuis les sources avec une toolchain Rust :
 
 ```bash
 git clone https://github.com/ShinoharaHaruna/shunt.git

@@ -49,9 +49,16 @@ I controlli delle macchine includono esecuzione SSH gestita, bootstrap e upgrade
 
 ## Avvio rapido
 
-### 1. Installa dai sorgenti
+### 1. Installazione
 
 Serve Linux con una toolchain Rust stable, un linker di sistema e Bash. L'operatività remota richiede anche gli strumenti OpenSSH (`ssh`, `scp` e `ssh-keygen`) sulla macchina dev.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ShinoharaHaruna/shunt/main/install.sh | sh
+shunt --help
+```
+
+Lo script installa il binario dell'ultima release (build musl statica, dashboard inclusa) in `~/.local/bin`; passa `--gnu` per la build a link dinamico, `--dir` per un percorso diverso, oppure `uninstall` per rimuovere il binario. Per una build dai sorgenti con la toolchain Rust:
 
 ```bash
 git clone https://github.com/ShinoharaHaruna/shunt.git

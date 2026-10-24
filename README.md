@@ -51,7 +51,7 @@ Machine controls include managed SSH execution, bootstrap and upgrade, an option
 
 ## Quick start
 
-### 1. Install from source
+### 1. Install
 
 Use Linux with a stable Rust toolchain, a system linker, and Bash. Remote operation also needs OpenSSH tools (`ssh`, `scp`, and `ssh-keygen`) on the dev machine.
 

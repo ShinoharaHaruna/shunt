@@ -49,9 +49,16 @@
 
 ## Быстрый старт
 
-### 1. Установка из исходного кода
+### 1. Установка
 
 Требуются Linux со стабильным toolchain Rust, системный компоновщик и Bash. Для удалённой работы на dev-машине также нужны инструменты OpenSSH (`ssh`, `scp` и `ssh-keygen`).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ShinoharaHaruna/shunt/main/install.sh | sh
+shunt --help
+```
+
+Скрипт устанавливает бинарный файл последнего релиза (статическая сборка musl, dashboard включён) в `~/.local/bin`; передайте `--gnu` для динамически слинкованной сборки, `--dir` для другого расположения или `uninstall` для удаления бинарного файла. Для сборки из исходного кода с помощью toolchain Rust вместо этого:
 
 ```bash
 git clone https://github.com/ShinoharaHaruna/shunt.git

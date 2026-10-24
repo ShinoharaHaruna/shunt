@@ -49,9 +49,16 @@
 
 ## 快速上手
 
-### 1. 從原始碼安裝
+### 1. 安裝
 
 需要 Linux、stable Rust 工具鏈、系統連結器與 Bash。遠端操作還需要開發機上裝有 OpenSSH 工具（`ssh`、`scp` 與 `ssh-keygen`）。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ShinoharaHaruna/shunt/main/install.sh | sh
+shunt --help
+```
+
+此腳本會將最新 release 執行檔（靜態 musl 建置，內含儀表板）安裝到 `~/.local/bin`；傳入 `--gnu` 改用動態連結建置、`--dir` 指定其他安裝位置，或 `uninstall` 移除執行檔。若要改用 Rust 工具鏈從原始碼建置：
 
 ```bash
 git clone https://github.com/ShinoharaHaruna/shunt.git

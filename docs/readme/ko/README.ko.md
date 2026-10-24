@@ -49,9 +49,16 @@
 
 ## 빠른 시작
 
-### 1. 소스에서 설치
+### 1. 설치
 
 Linux와 stable Rust 툴체인, 시스템 링커, Bash가 필요하다. 원격 작업에는 개발 머신에 OpenSSH 도구(`ssh`, `scp`, `ssh-keygen`)도 필요하다.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ShinoharaHaruna/shunt/main/install.sh | sh
+shunt --help
+```
+
+이 스크립트는 최신 릴리스 바이너리(정적 musl 빌드, 대시보드 포함)를 `~/.local/bin`에 설치한다. 동적 링크 빌드는 `--gnu`를, 다른 위치에 설치하려면 `--dir`을, 바이너리를 제거하려면 `uninstall`을 전달한다. 대신 Rust 툴체인으로 소스에서 빌드하려면:
 
 ```bash
 git clone https://github.com/ShinoharaHaruna/shunt.git

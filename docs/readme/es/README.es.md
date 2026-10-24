@@ -49,9 +49,16 @@ Los controles de máquina incluyen ejecución SSH gestionada, bootstrap y actual
 
 ## Inicio rápido
 
-### 1. Instalar desde el código fuente
+### 1. Instalación
 
 Necesitas Linux con una toolchain stable de Rust, un enlazador del sistema y Bash. La operación remota también requiere herramientas OpenSSH (`ssh`, `scp` y `ssh-keygen`) en la máquina de desarrollo.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ShinoharaHaruna/shunt/main/install.sh | sh
+shunt --help
+```
+
+El script instala el binario del último release (build estático musl, dashboard incluido) en `~/.local/bin`; pasa `--gnu` para la build enlazada dinámicamente, `--dir` para otra ubicación, o `uninstall` para eliminar el binario. Para compilar desde el código fuente con una toolchain de Rust:
 
 ```bash
 git clone https://github.com/ShinoharaHaruna/shunt.git

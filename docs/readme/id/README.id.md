@@ -49,9 +49,16 @@ Kendali mesin mencakup eksekusi SSH terkelola, bootstrap dan upgrade, proxy SOCK
 
 ## Mulai cepat
 
-### 1. Instal dari sumber
+### 1. Instalasi
 
 Gunakan Linux dengan toolchain Rust stable, linker sistem, dan Bash. Operasi remote juga memerlukan OpenSSH (`ssh`, `scp`, dan `ssh-keygen`) di mesin dev.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ShinoharaHaruna/shunt/main/install.sh | sh
+shunt --help
+```
+
+Skrip ini menginstal biner rilis terbaru (build musl statik, dashboard termasuk) ke `~/.local/bin`; berikan `--gnu` untuk build dynamic-linked, `--dir` untuk lokasi lain, atau `uninstall` untuk menghapus biner. Untuk build dari sumber dengan toolchain Rust:
 
 ```bash
 git clone https://github.com/ShinoharaHaruna/shunt.git

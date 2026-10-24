@@ -49,9 +49,16 @@
 
 ## クイックスタート
 
-### 1. ソースからインストール
+### 1. インストール
 
 Linux、stable な Rust ツールチェイン、システムリンカー、Bash を使う。リモート操作には開発マシン側の OpenSSH ツール（`ssh`、`scp`、`ssh-keygen`）も必要。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ShinoharaHaruna/shunt/main/install.sh | sh
+shunt --help
+```
+
+このスクリプトは最新リリースのバイナリ（静的 musl ビルド、ダッシュボード同梱）を `~/.local/bin` にインストールする。動的リンクビルドには `--gnu`、別の場所にインストールするには `--dir`、バイナリを削除するには `uninstall` を渡す。代わりに Rust ツールチェインでソースからビルドする場合:
 
 ```bash
 git clone https://github.com/ShinoharaHaruna/shunt.git

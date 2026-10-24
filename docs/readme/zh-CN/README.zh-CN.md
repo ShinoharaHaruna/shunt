@@ -49,9 +49,16 @@
 
 ## 快速上手
 
-### 1. 从源码安装
+### 1. 安装
 
 需要 Linux、stable Rust 工具链、系统链接器和 Bash。远程操作还需要开发机上装有 OpenSSH 工具（`ssh`、`scp` 和 `ssh-keygen`）。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ShinoharaHaruna/shunt/main/install.sh | sh
+shunt --help
+```
+
+该脚本会把最新 release 二进制（静态 musl 构建，含 dashboard）安装到 `~/.local/bin`；传入 `--gnu` 使用动态链接构建，`--dir` 指定其他安装位置，或 `uninstall` 移除该二进制。若要改用 Rust 工具链从源码构建：
 
 ```bash
 git clone https://github.com/ShinoharaHaruna/shunt.git
