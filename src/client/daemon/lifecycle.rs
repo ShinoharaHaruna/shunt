@@ -122,7 +122,11 @@ pub fn start(root: &Path) -> Result<u32> {
     queue::init(root)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(root.join("daemon.log"))?;
     let err = log.try_clone()?;
-    let exe = std::env::current_exe()?;
+    // self_exe, not current_exe: inside a just-self-upgraded
+    // process /proc/self/exe reads `<path> (deleted)`, and spawning
+    // that literal name is the ENOENT — the canonical path is where
+    // the new image sits.
+    let exe = crate::handoff::self_exe()?;
     let mut child = Command::new(exe);
     child.arg("daemon").arg("--root").arg(root).stdin(Stdio::null()).stdout(log).stderr(err).process_group(0);
     let mut spawned = child.spawn().context("cannot spawn daemon")?;

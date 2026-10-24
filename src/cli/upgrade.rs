@@ -93,6 +93,15 @@ fn handoff_local_daemons() {
         let Ok(qroot) = std::fs::read_to_string(ent.path()).map(|s| PathBuf::from(s.trim().to_string())) else {
             continue;
         };
+        // A registered qroot that no longer exists is unambiguously
+        // dead — the daemon re-registers on start — so sweep the
+        // entry instead of letting restart's start-fallthrough
+        // spawn into a ghost dir.
+        if !qroot.is_dir() {
+            let _ = std::fs::remove_file(ent.path());
+            eprintln!("daemon at {} not handed off: qroot missing — swept its stale registry entry", qroot.display());
+            continue;
+        }
         match crate::client::daemon::restart(&qroot) {
             Ok(crate::client::daemon::Restart::HandedOff { pid, from_ver }) => println!("daemon at {} handed off (pid {pid}, was {from_ver})", qroot.display()),
             Ok(crate::client::daemon::Restart::Started { pid }) => println!("daemon at {} was dead; started fresh (pid {pid})", qroot.display()),
