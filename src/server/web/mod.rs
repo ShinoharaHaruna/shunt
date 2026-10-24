@@ -100,6 +100,11 @@ pub fn up(opts: &ServeOpts) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(log_file()?)?;
     let err = log.try_clone()?;
+    // serve.log accumulates one banner per start — without a
+    // delimiter a restart loop and a week of up/down cycles look
+    // identical. Timestamp each launch.
+    use std::io::Write as _;
+    writeln!(&err, "--- serve up {} ({}:{}) ---", crate::proto::time::rfc3339_z_now(), opts.bind, opts.port).ok();
     let exe = std::env::current_exe()?;
     let mut child = Command::new(exe);
     child.args(["serve", "run", "--bind", &opts.bind, "--port", &opts.port.to_string(), "--interval-s", &opts.interval_s.to_string()]);
