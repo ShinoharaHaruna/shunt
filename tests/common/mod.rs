@@ -8,6 +8,8 @@
 //! poll interval shortened via `POLL`. Every wait is
 //! condition-based with a timeout; no fixed sleeps are relied on.
 
+pub mod room;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
