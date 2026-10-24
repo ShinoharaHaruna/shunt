@@ -10,14 +10,16 @@ import { QueuesPage } from './components/QueuesPage'
 import { SpoolPanel } from './components/SpoolPanel'
 import { TasksPanel } from './components/TasksPanel'
 import { RoomsPanel } from './components/RoomsPanel'
+import { LANGS, useI18n } from './i18n'
+import type { Lang } from './i18n'
 
 type Conn = 'connecting' | 'open' | 'reconnecting'
 type Theme = 'system' | 'light' | 'dark'
 
-const connMeta: Record<Conn, { tone: 'signal' | 'amber' | 'rose'; label: string }> = {
-  connecting: { tone: 'amber', label: 'connecting' },
-  open: { tone: 'signal', label: 'live' },
-  reconnecting: { tone: 'amber', label: 'reconnecting' },
+const connTone: Record<Conn, 'signal' | 'amber' | 'rose'> = {
+  connecting: 'amber',
+  open: 'signal',
+  reconnecting: 'amber',
 }
 
 const THEME_KEY = 'shunt-theme'
@@ -39,27 +41,105 @@ function useTheme(): [Theme, (t: Theme) => void] {
 }
 
 function ThemeSwitch({ theme, setTheme }: { theme: Theme; setTheme: (t: Theme) => void }) {
+  const { t } = useI18n()
   const opts: Theme[] = ['system', 'light', 'dark']
   return (
     <div
       className="flex items-center rounded-full border border-edge bg-hover p-0.5"
       role="group"
-      aria-label="theme"
+      aria-label={t('theme.aria')}
     >
-      {opts.map((t) => (
+      {opts.map((o) => (
         <button
-          key={t}
-          onClick={() => setTheme(t)}
-          aria-pressed={theme === t}
-          className={`rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide transition-all duration-200 ${
-            theme === t
+          key={o}
+          onClick={() => setTheme(o)}
+          aria-pressed={theme === o}
+          className={`shrink-0 whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide transition-all duration-200 ${
+            theme === o
               ? 'bg-[var(--seg-active)] text-ink-1 shadow-sm'
               : 'text-ink-3 hover:text-ink-2'
           }`}
         >
-          {t === 'system' ? 'auto' : t}
+          {t(`theme.${o}`)}
         </button>
       ))}
+    </div>
+  )
+}
+
+/** Globe icon + hover popover — a segmented switch grows with every
+ *  language added and already overflows the sidebar next to the
+ *  theme switch. `dir` controls which way the popover opens:
+ *  'up' for the sidebar footer, 'down' for the mobile top bar. */
+function LangMenu({ dir }: { dir: 'up' | 'down' }) {
+  const { lang, setLang, t } = useI18n()
+  const [open, setOpen] = useState(false)
+  return (
+    <div
+      className="relative"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      {/* a tap fires mouseenter before click, so click only ever
+          opens — toggling here would instantly undo the open */}
+      <button
+        onClick={() => setOpen(true)}
+        aria-label={t('lang.aria')}
+        aria-expanded={open}
+        className={`flex h-6 w-6 items-center justify-center rounded-full transition-colors ${
+          open ? 'bg-hover-2 text-ink-1' : 'text-ink-3 hover:bg-hover-2 hover:text-ink-2'
+        }`}
+      >
+        <svg
+          viewBox="0 0 16 16"
+          className="h-3.5 w-3.5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.2"
+          aria-hidden
+        >
+          <circle cx="8" cy="8" r="6.4" />
+          <path d="M1.6 8h12.8" />
+          <path d="M8 1.6c-1.9 1.9-2.9 4-2.9 6.4s1 4.5 2.9 6.4c1.9-1.9 2.9-4 2.9-6.4S9.9 3.5 8 1.6z" />
+        </svg>
+      </button>
+      {/* tap-outside to close — hover users get mouseleave instead */}
+      {open && <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />}
+      {/* the offset is padding on the hoverable wrapper, not margin —
+          a margin gap would close the menu before the pointer arrives */}
+      {open && (
+        <div
+          className={`absolute z-20 ${dir === 'up' ? 'bottom-full left-0 pb-1.5' : 'right-0 top-full pt-1.5'}`}
+        >
+          <div
+            role="menu"
+            className="min-w-28 overflow-hidden rounded-xl border border-edge py-1 shadow-lg backdrop-blur-xl"
+            style={{ background: 'var(--header-bg)' }}
+          >
+            {(Object.keys(LANGS) as Lang[]).map((l) => (
+              <button
+                key={l}
+                role="menuitemradio"
+                aria-checked={lang === l}
+                onClick={() => {
+                  setLang(l)
+                  setOpen(false)
+                }}
+                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors ${
+                  lang === l ? 'text-ink-1' : 'text-ink-3 hover:bg-hover-2 hover:text-ink-2'
+                }`}
+              >
+                <span
+                  className={`w-3 text-[10px] ${lang === l ? 'text-signal-fg' : 'text-transparent'}`}
+                >
+                  ✓
+                </span>
+                {LANGS[l]}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -205,6 +285,7 @@ function FleetStat({
 }
 
 function MachinesSection({ clients }: { clients: Snapshot['clients'] }) {
+  const { t } = useI18n()
   const count = clients ? Object.keys(clients).length : 0
   const rows = Object.values(clients ?? {})
   const reachable = rows.filter((c) => c.reachable).length
@@ -228,25 +309,29 @@ function MachinesSection({ clients }: { clients: Snapshot['clients'] }) {
   )
   return (
     <div>
-      <SectionHeading title="Machines" count={count || undefined} />
+      <SectionHeading title={t('nav.machines')} count={count || undefined} />
       {count > 0 && (
         <div className="mb-6 flex items-end gap-8">
           {count - reachable > 0 ? (
-            <FleetStat n={count - reachable} label="down" accent="amber" />
+            <FleetStat n={count - reachable} label={t('machines.down')} accent="amber" />
           ) : (
-            <FleetStat n={reachable} label="up" accent="signal" />
+            <FleetStat n={reachable} label={t('machines.up')} accent="signal" />
           )}
-          <FleetStat n={running} label="running" />
-          <FleetStat n={pending} label="pending" accent={pending > 0 ? 'amber' : undefined} />
+          <FleetStat n={running} label={t('machines.running')} />
+          <FleetStat
+            n={pending}
+            label={t('machines.pending')}
+            accent={pending > 0 ? 'amber' : undefined}
+          />
         </div>
       )}
       {clients === null ? (
         <Card>
-          <Empty>waiting for first sweep</Empty>
+          <Empty>{t('state.waitingSweep')}</Empty>
         </Card>
       ) : count === 0 ? (
         <Card>
-          <Empty>no clients registered</Empty>
+          <Empty>{t('machines.noClients')}</Empty>
         </Card>
       ) : (
         <div className="grid gap-4 xl:grid-cols-2">
@@ -260,18 +345,21 @@ function MachinesSection({ clients }: { clients: Snapshot['clients'] }) {
 }
 
 function WaitCard() {
+  const { t } = useI18n()
   return (
     <Card>
-      <Empty>waiting for first sweep</Empty>
+      <Empty>{t('state.waitingSweep')}</Empty>
     </Card>
   )
 }
 
 export default function App() {
+  const { t } = useI18n()
   const { snap, snapAt, conn } = useSnapshot()
   const [theme, setTheme] = useTheme()
   const route = useHashRoute()
-  const cm = connMeta[conn]
+  const tone = connTone[conn]
+  const connLabel = t(conn === 'open' ? 'conn.live' : `conn.${conn}`)
   const local = snap?.local ?? null
 
   const rooms = local && !('error' in local.rooms) ? local.rooms : null
@@ -338,21 +426,21 @@ export default function App() {
           </span>
         </div>
         <nav className="mt-6 space-y-0.5">
-          <NavItem label="Machines" href="#/machines" active={route.page === 'machines'} />
+          <NavItem label={t('nav.machines')} href="#/machines" active={route.page === 'machines'} />
           <NavItem
-            label="Queues"
+            label={t('nav.queues')}
             href="#/queues"
             active={route.page === 'queues'}
             badge={runningTotal}
           />
           <NavItem
-            label="Tasks"
+            label={t('nav.tasks')}
             href="#/tasks"
             active={route.page === 'tasks'}
             badge={spoolCount}
           />
           <NavItem
-            label="Rooms"
+            label={t('nav.rooms')}
             href="#/rooms"
             active={route.page === 'rooms'}
             badge={unreadTotal}
@@ -361,11 +449,14 @@ export default function App() {
         </nav>
         <div className="mt-auto space-y-2 px-3">
           <div className="flex items-center gap-1.5 text-[11px] text-ink-3">
-            <Dot tone={cm.tone} pulse={conn === 'open'} />
-            {cm.label}
+            <Dot tone={tone} pulse={conn === 'open'} />
+            {connLabel}
             {snap?.ts && <span className="font-num ml-auto text-ink-4">{hhmm(snap.ts)}</span>}
           </div>
-          <ThemeSwitch theme={theme} setTheme={setTheme} />
+          <div className="flex items-center gap-2">
+            <ThemeSwitch theme={theme} setTheme={setTheme} />
+            <LangMenu dir="up" />
+          </div>
         </div>
       </aside>
 
@@ -381,27 +472,32 @@ export default function App() {
             </span>
             <span className="flex-1" />
             <span className="flex items-center gap-1.5 text-[11px] text-ink-3">
-              <Dot tone={cm.tone} pulse={conn === 'open'} />
-              {cm.label}
+              <Dot tone={tone} pulse={conn === 'open'} />
+              {connLabel}
             </span>
+            <LangMenu dir="down" />
             <ThemeSwitch theme={theme} setTheme={setTheme} />
           </div>
           <nav className="flex gap-1 px-4 pb-2">
-            <NavItem label="Machines" href="#/machines" active={route.page === 'machines'} />
             <NavItem
-              label="Queues"
+              label={t('nav.machines')}
+              href="#/machines"
+              active={route.page === 'machines'}
+            />
+            <NavItem
+              label={t('nav.queues')}
               href="#/queues"
               active={route.page === 'queues'}
               badge={runningTotal}
             />
             <NavItem
-              label="Tasks"
+              label={t('nav.tasks')}
               href="#/tasks"
               active={route.page === 'tasks'}
               badge={spoolCount}
             />
             <NavItem
-              label="Rooms"
+              label={t('nav.rooms')}
               href="#/rooms"
               active={route.page === 'rooms'}
               badge={unreadTotal}

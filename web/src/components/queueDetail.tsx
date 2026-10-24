@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { EntryDetail, ExitRecord, StatusReport } from '../types'
-import { coreTime, mibToGib } from '../fmt'
+import { mibToGib } from '../fmt'
 import { fetchLogs } from '../api'
 import { Bar, CopyText, Dot, Empty, Muted, Pill } from './ui'
 import type { Tone } from './ui'
+import { useI18n } from '../i18n'
 
 function barTone(pct: number): Tone {
   return pct > 95 ? 'rose' : pct > 80 ? 'amber' : 'signal'
@@ -20,6 +21,7 @@ function GaugeRow({ label, pct, display }: { label: string; pct: number | null; 
 }
 
 export function ResourceBlock({ report, cores }: { report: StatusReport; cores?: number }) {
+  const { t } = useI18n()
   const r = report.resources
   if (!r) return null
   const ramPct =
@@ -42,13 +44,13 @@ export function ResourceBlock({ report, cores }: { report: StatusReport; cores?:
               </span>
             </div>
             <GaugeRow
-              label="GPU Util"
+              label={t('res.gpuUtil')}
               pct={g.util_pct}
               display={g.util_pct != null ? `${g.util_pct}%` : '—'}
             />
             {g.mem_total_mb != null && (
               <GaugeRow
-                label="vRAM"
+                label={t('res.vram')}
                 pct={vramPct}
                 display={
                   vramUsed != null ? `${mibToGib(vramUsed)}/${mibToGib(g.mem_total_mb)}G` : '—'
@@ -60,7 +62,7 @@ export function ResourceBlock({ report, cores }: { report: StatusReport; cores?:
       })}
       {r.ram_total_mb != null && (
         <GaugeRow
-          label="RAM"
+          label={t('res.ram')}
           pct={ramPct}
           display={
             r.ram_free_mb != null
@@ -71,15 +73,12 @@ export function ResourceBlock({ report, cores }: { report: StatusReport; cores?:
       )}
       {r.load1 != null && (
         <div className="flex items-center gap-3">
-          <span
-            className="w-16 shrink-0 text-[11px] text-ink-4"
-            title="1-min system load average — runnable + uninterruptible tasks competing for CPU; above core count means queueing"
-          >
-            Load avg
+          <span className="w-16 shrink-0 text-[11px] text-ink-4" title={t('res.loadAvgTitle')}>
+            {t('res.loadAvg')}
           </span>
           <span className="num-display text-base text-ink-1">
             {r.load1.toFixed(1)}
-            {cores != null && <span className="text-ink-4"> / {cores} cores</span>}
+            {cores != null && <span className="text-ink-4"> {t('res.cores', { n: cores })}</span>}
           </span>
         </div>
       )}
@@ -88,45 +87,51 @@ export function ResourceBlock({ report, cores }: { report: StatusReport; cores?:
 }
 
 function DeclaredChips({ d }: { d: EntryDetail['declared'] }) {
+  const { t } = useI18n()
   return (
     <>
-      {d.gpu_mem_mb != null && <Pill>gpu {mibToGib(d.gpu_mem_mb)}G</Pill>}
-      {d.ram_mb != null && <Pill>ram {mibToGib(d.ram_mb)}G</Pill>}
-      {d.cpu_cores != null && <Pill>cpu {d.cpu_cores}</Pill>}
-      {d.retry != null && <Pill>retry {d.retry}</Pill>}
+      {d.gpu_mem_mb != null && <Pill>{t('decl.gpu', { v: mibToGib(d.gpu_mem_mb) })}</Pill>}
+      {d.ram_mb != null && <Pill>{t('decl.ram', { v: mibToGib(d.ram_mb) })}</Pill>}
+      {d.cpu_cores != null && <Pill>{t('decl.cpu', { n: d.cpu_cores })}</Pill>}
+      {d.retry != null && <Pill>{t('decl.retry', { n: d.retry })}</Pill>}
     </>
   )
 }
 
 function UsageChips({ u }: { u: NonNullable<EntryDetail['usage']> }) {
+  const { t } = useI18n()
   return (
     <>
       {Object.entries(u.peak_vram_mb).map(([k, v]) => (
-        <Pill key={k} tone="zinc" title={`peak vram ${k}`}>
-          <span className="font-num">vram {mibToGib(v)}G</span>
+        <Pill key={k} tone="zinc" title={t('res.peakVram', { gpu: k })}>
+          <span className="font-num">{t('res.vramOf', { v: mibToGib(v) })}</span>
         </Pill>
       ))}
-      <Pill tone="zinc" title="peak ram">
-        <span className="font-num">ram {mibToGib(u.peak_ram_mb)}G</span>
+      <Pill tone="zinc" title={t('res.peakRam')}>
+        <span className="font-num">{t('res.ramOf', { v: mibToGib(u.peak_ram_mb) })}</span>
       </Pill>
       <Pill tone="zinc">
-        <span className="font-num">{coreTime(u.cpu_seconds)}</span>
+        <span className="font-num">{t('res.coreTime', { m: Math.floor(u.cpu_seconds / 60) })}</span>
       </Pill>
     </>
   )
 }
 
 /** Expandable pending/running entry list with declared+usage chips
- *  and a per-entry logs hook (running entries have live logs to tail). */
+ *  and a per-entry logs hook (running entries have live logs to tail).
+ *  `openName` marks the entry whose log pane is currently shown. */
 export function EntryList({
   label,
   entries,
   onLogs,
+  openName,
 }: {
   label: string
   entries: EntryDetail[]
   onLogs?: (name: string) => void
+  openName?: string | null
 }) {
+  const { t } = useI18n()
   if (entries.length === 0) return null
   return (
     <details className="group">
@@ -153,9 +158,11 @@ export function EntryList({
                       }
                     : undefined
                 }
-                className={`group/entry rounded-lg bg-hover px-2.5 py-1.5 ring-1 ring-edge-soft transition-all duration-150 ${
-                  onLogs ? 'cursor-pointer hover:bg-hover-2 hover:ring-edge' : ''
-                }`}
+                className={`group/entry rounded-lg px-2.5 py-1.5 ring-1 transition-all duration-150 ${
+                  openName === e.name
+                    ? 'bg-hover-2 ring-signal-bd'
+                    : `bg-hover ring-edge-soft ${onLogs ? 'hover:bg-hover-2 hover:ring-edge' : ''}`
+                } ${onLogs ? 'cursor-pointer' : ''}`}
               >
                 <div className="flex items-center gap-1">
                   {/* name stays a copy button — stop the click from
@@ -168,8 +175,14 @@ export function EntryList({
                   </span>
                   <span className="flex-1" />
                   {onLogs && (
-                    <span className="text-[10px] text-ink-4 transition-colors group-hover/entry:text-signal-fg">
-                      log ▸
+                    <span
+                      className={`text-[10px] transition-colors ${
+                        openName === e.name
+                          ? 'text-signal-fg'
+                          : 'text-ink-4 group-hover/entry:text-signal-fg'
+                      }`}
+                    >
+                      {openName === e.name ? `${t('common.log')} ▾` : `${t('common.log')} ▸`}
                     </span>
                   )}
                 </div>
@@ -191,11 +204,13 @@ export function RecentList({
   tone,
   items,
   onLogs,
+  openName,
 }: {
   label: string
   tone: 'emerald' | 'rose'
   items: ExitRecord[]
   onLogs?: (name: string) => void
+  openName?: string | null
 }) {
   if (items.length === 0) return null
   return (
@@ -218,8 +233,8 @@ export function RecentList({
               : undefined
           }
           className={`group/x inline-flex items-center gap-1 rounded-md px-1 -mx-1 transition-colors ${
-            onLogs ? 'cursor-pointer hover:bg-hover-2' : ''
-          }`}
+            openName === x.name ? 'bg-hover-2' : onLogs ? 'hover:bg-hover-2' : ''
+          } ${onLogs ? 'cursor-pointer' : ''}`}
         >
           <span onClick={(ev) => ev.stopPropagation()} onKeyDown={(ev) => ev.stopPropagation()}>
             <CopyText text={x.name} className="max-w-36 text-ink-3" />
@@ -228,8 +243,12 @@ export function RecentList({
             <span className="font-num">rc={x.rc}</span>
           </Pill>
           {onLogs && (
-            <span className="text-[10px] text-ink-4 opacity-0 transition-opacity group-hover/x:opacity-100">
-              ▸
+            <span
+              className={`text-[10px] text-ink-4 transition-opacity ${
+                openName === x.name ? 'opacity-100' : 'opacity-0 group-hover/x:opacity-100'
+              }`}
+            >
+              {openName === x.name ? '▾' : '▸'}
             </span>
           )}
         </span>
@@ -255,6 +274,7 @@ export function LogPane({
   snapAt: number
   onClose: () => void
 }) {
+  const { t } = useI18n()
   const [tail, setTail] = useState(200)
   const [text, setText] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -270,7 +290,7 @@ export function LogPane({
           setText(r.text ?? '')
           setErr(null)
         } else {
-          setErr(r.error ?? 'unknown error')
+          setErr(r.error ?? t('probe.unknownError'))
         }
       })
       .catch((e: unknown) => {
@@ -297,8 +317,8 @@ export function LogPane({
     <div className="mt-3 rounded-xl border border-edge bg-canvas/60 p-3">
       <div className="mb-2 flex items-center gap-2 text-[11px]">
         <Dot tone="signal" pulse />
-        <span className="font-num text-ink-2">{pattern ?? 'daemon'}</span>
-        <Muted>log tail</Muted>
+        <span className="font-num text-ink-2">{pattern ?? t('common.daemon')}</span>
+        <Muted>{t('common.logTail')}</Muted>
         <span className="flex-1" />
         {[100, 200, 500, 1000].map((n) => (
           <button
@@ -327,9 +347,9 @@ export function LogPane({
         {err ? (
           <Empty>{err}</Empty>
         ) : text === null ? (
-          <Empty>loading…</Empty>
+          <Empty>{t('state.loading')}</Empty>
         ) : text === '' ? (
-          <Empty>log empty</Empty>
+          <Empty>{t('state.logEmpty')}</Empty>
         ) : (
           <pre className="font-num whitespace-pre-wrap text-[11px] leading-relaxed">
             {text.split('\n').map((l, i) => (

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { useI18n } from '../i18n'
 
 export type Tone = 'emerald' | 'amber' | 'rose' | 'zinc' | 'signal'
 
@@ -183,13 +184,14 @@ export function Sparkline({
 
 /** Click-to-copy mono text — ids and names are meant to be grabbed. */
 export function CopyText({ text, className = '' }: { text: string; className?: string }) {
+  const { t } = useI18n()
   const [copied, setCopied] = useState(false)
   const timer = useRef<number | undefined>(undefined)
   useEffect(() => () => window.clearTimeout(timer.current), [])
   return (
     <button
       type="button"
-      title="copy"
+      title={t('common.copy')}
       onClick={() => {
         void navigator.clipboard?.writeText(text)
         setCopied(true)
@@ -198,7 +200,7 @@ export function CopyText({ text, className = '' }: { text: string; className?: s
       }}
       className={`font-num inline-flex cursor-copy items-center gap-1 rounded px-1 -mx-1 text-left transition-colors duration-150 hover:bg-hover-2 hover:text-ink-1 ${copied ? 'text-signal-fg' : ''} ${className}`}
     >
-      <span className="min-w-0 truncate">{copied ? 'copied' : text}</span>
+      <span className="min-w-0 truncate">{copied ? t('common.copied') : text}</span>
     </button>
   )
 }

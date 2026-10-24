@@ -3,6 +3,7 @@ import type { ClientStatus, QueueStatus, StatusReport } from '../types'
 import { postExec } from '../api'
 import { Card, CopyText, Dot, Empty, Muted, Pill, SectionHeading } from './ui'
 import { EntryList, LogPane, RecentList, ResourceBlock } from './queueDetail'
+import { useI18n } from '../i18n'
 
 interface Sel {
   client: string
@@ -30,6 +31,7 @@ function QueueRow({
   q: QueueStatus
   active: boolean
 }) {
+  const { t } = useI18n()
   const rep = q.report
   const pend = rep?.pending_detail?.length ?? rep?.pending?.length ?? 0
   const run = rep?.running_detail?.length ?? rep?.running?.length ?? 0
@@ -37,6 +39,7 @@ function QueueRow({
   return (
     <a
       href={`#/queues/${encodeURIComponent(client)}/${encodeURIComponent(queue)}`}
+      title={queue}
       className={`relative block w-full rounded-xl border px-3 py-2 pl-4 text-left transition-all duration-200 ${
         active
           ? 'border-edge bg-hover-2 before:absolute before:left-0 before:top-2 before:bottom-2 before:w-[2px] before:rounded-full before:bg-signal'
@@ -46,47 +49,62 @@ function QueueRow({
       <div className="flex items-center gap-2">
         <Dot tone={up ? 'signal' : q.reachable === false ? 'rose' : 'zinc'} />
         <span className="font-num truncate text-[13px] text-ink-2">{queue}</span>
-        <span className="flex-1" />
-        <span className={`font-num text-[11px] ${run > 0 ? 'text-signal-fg' : 'text-ink-4'}`}>
-          r{run}
-        </span>
-        <span className={`font-num text-[11px] ${pend > 0 ? 'text-[var(--c-amb)]' : 'text-ink-4'}`}>
-          p{pend}
-        </span>
       </div>
-      <Muted className="mt-0.5 block truncate text-[11px]">
-        {rep
-          ? rep.daemon.alive
-            ? `daemon · ${rep.workers.value}w`
-            : 'daemon down'
-          : (q.error ?? '…')}
-      </Muted>
+      {/* the status dot already says daemon-up; line 2 carries only
+          what the dot can't — failure text or live count badges */}
+      {(() => {
+        const status = !rep ? (q.error ?? '…') : rep.daemon.alive ? null : t('common.daemonDown')
+        if (status === null && run === 0 && pend === 0) return null
+        return (
+          <div className="mt-1 flex items-center gap-1">
+            {status !== null && <Muted className="truncate text-[11px]">{status}</Muted>}
+            {run > 0 && (
+              <Pill tone="signal">
+                <span className="font-num">{t('common.running', { n: run })}</span>
+              </Pill>
+            )}
+            {pend > 0 && (
+              <Pill tone="amber">
+                <span className="font-num">{t('common.pending', { n: pend })}</span>
+              </Pill>
+            )}
+          </div>
+        )
+      })()}
     </a>
   )
 }
 
 function CompatPill({ compat }: { compat: string | null | undefined }) {
+  const { t } = useI18n()
   if (!compat) return null
   return (
-    <Pill tone={compat === 'ok' ? 'emerald' : 'amber'}>compat {compat.replace(/^[^\w]*/, '')}</Pill>
+    <Pill tone={compat === 'ok' ? 'emerald' : 'amber'}>
+      {t('common.compat', { v: compat.replace(/^[^\w]*/, '') })}
+    </Pill>
   )
 }
 
 function StatusChips({ rep, compat }: { rep: StatusReport; compat?: string | null }) {
+  const { t } = useI18n()
   return (
     <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
       <Pill tone={rep.daemon.alive ? 'emerald' : 'zinc'}>
-        {rep.daemon.alive ? `daemon · pid ${rep.daemon.pid ?? '?'}` : 'daemon down'}
+        {rep.daemon.alive
+          ? t('common.daemonPid', { pid: rep.daemon.pid ?? '?' })
+          : t('common.daemonDown')}
       </Pill>
       <Pill>
-        <span className="font-num">w={rep.workers.value}</span>
+        <span className="font-num">{t('common.workers', { n: rep.workers.value })}</span>
       </Pill>
-      {rep.needs_glibc && <Pill tone="amber">needs glibc {rep.needs_glibc}</Pill>}
+      {rep.needs_glibc && (
+        <Pill tone="amber">{t('common.needsGlibc', { v: rep.needs_glibc })}</Pill>
+      )}
       <CompatPill compat={compat} />
-      {rep.stop && <Pill tone="amber">stop</Pill>}
+      {rep.stop && <Pill tone="amber">{t('common.stop')}</Pill>}
       {rep.shutdown.armed && (
         <Pill tone="rose">
-          <span className="font-num">shutdown {rep.shutdown.grace_s}s</span>
+          <span className="font-num">{t('common.shutdownGrace', { s: rep.shutdown.grace_s })}</span>
         </Pill>
       )}
     </div>
@@ -105,6 +123,7 @@ const PROBES: [string, string][] = [
  *  a time. Output is verbatim; the transport timeout caps runaway
  *  commands the same way the CLI does. */
 function ProbeSection({ client }: { client: string }) {
+  const { t } = useI18n()
   const [cmd, setCmd] = useState('')
   const [out, setOut] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -117,7 +136,7 @@ function ProbeSection({ client }: { client: string }) {
     postExec(client, c)
       .then((r) => {
         if (r.ok) setOut(r.out ?? '')
-        else setErr(r.error ?? 'unknown error')
+        else setErr(r.error ?? t('probe.unknownError'))
       })
       .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)))
       .finally(() => setBusy(false))
@@ -126,7 +145,7 @@ function ProbeSection({ client }: { client: string }) {
   return (
     <div className="mt-4 border-t border-edge-soft pt-3">
       <div className="mb-2 flex items-center gap-2 text-[11px]">
-        <Muted>probe · {client}</Muted>
+        <Muted>{t('probe.label', { client })}</Muted>
         {PROBES.map(([label, c]) => (
           <button
             key={label}
@@ -150,7 +169,7 @@ function ProbeSection({ client }: { client: string }) {
         <input
           value={cmd}
           onChange={(e) => setCmd(e.target.value)}
-          placeholder={`sh -c "…" on ${client}`}
+          placeholder={t('probe.placeholder', { client })}
           spellCheck={false}
           className="font-num min-w-0 flex-1 rounded-lg border border-edge bg-hover px-2.5 py-1 text-[12px] text-ink-2 placeholder:text-ink-4 focus:border-edge focus:outline-none"
         />
@@ -159,7 +178,7 @@ function ProbeSection({ client }: { client: string }) {
           disabled={busy || !cmd.trim()}
           className="rounded-lg border border-edge px-2.5 text-[11px] text-ink-2 transition-all duration-150 hover:bg-hover active:scale-[0.97] disabled:opacity-40"
         >
-          {busy ? '…' : 'run'}
+          {busy ? '…' : t('probe.run')}
         </button>
       </form>
       {(err !== null || out !== null) && (
@@ -167,7 +186,7 @@ function ProbeSection({ client }: { client: string }) {
           {err !== null ? (
             <span className="text-[var(--c-rse)]">{err}</span>
           ) : out === '' ? (
-            '(no output)'
+            t('state.noOutput')
           ) : (
             out
           )}
@@ -190,10 +209,33 @@ function QueueDetail({
   snapAt: number
   facts?: Record<string, unknown>
 }) {
-  const [logPattern, setLogPattern] = useState<string | null | 'daemon'>(null)
+  // Which section's log is open, and for which entry. Clicking the
+  // same entry again toggles it closed; the pane renders inline
+  // right under its owning section, not at the foot of the card.
+  const [log, setLog] = useState<{
+    kind: 'running' | 'done' | 'failed' | 'daemon'
+    pattern: string | null
+  } | null>(null)
   const rep = q.report
-  const pattern = logPattern === null ? null : logPattern === 'daemon' ? null : logPattern
-  const logOpen = logPattern !== null
+  const toggle = (kind: 'running' | 'done' | 'failed' | 'daemon', pattern: string | null) =>
+    setLog((prev) =>
+      prev && prev.kind === kind && prev.pattern === pattern ? null : { kind, pattern },
+    )
+  const pane = (kind: 'running' | 'done' | 'failed' | 'daemon') =>
+    log?.kind === kind ? (
+      <div key={`${kind}:${log.pattern ?? ''}`} className="rise">
+        <LogPane
+          client={client}
+          queue={queue}
+          pattern={log.pattern}
+          snapAt={snapAt}
+          onClose={() => setLog(null)}
+        />
+      </div>
+    ) : null
+  const openName = (kind: 'running' | 'done' | 'failed') =>
+    log?.kind === kind ? log.pattern : null
+  const { t } = useI18n()
   return (
     <div>
       <div className="flex min-w-0 items-baseline gap-2.5">
@@ -213,49 +255,47 @@ function QueueDetail({
           />
           <div className="mt-4 space-y-3">
             <EntryList
-              label="running"
+              label={t('queue.running')}
               entries={rep.running_detail}
-              onLogs={(n) => setLogPattern(n)}
+              onLogs={(n) => toggle('running', n)}
+              openName={openName('running')}
             />
-            <EntryList label="pending" entries={rep.pending_detail} />
+            {pane('running')}
+            <EntryList label={t('queue.pending')} entries={rep.pending_detail} />
             <RecentList
-              label="done"
+              label={t('queue.done')}
               tone="emerald"
               items={rep.done_recent}
-              onLogs={(n) => setLogPattern(n)}
+              onLogs={(n) => toggle('done', n)}
+              openName={openName('done')}
             />
+            {pane('done')}
             <RecentList
-              label="failed"
+              label={t('queue.failed')}
               tone="rose"
               items={rep.failed_recent}
-              onLogs={(n) => setLogPattern(n)}
+              onLogs={(n) => toggle('failed', n)}
+              openName={openName('failed')}
             />
+            {pane('failed')}
           </div>
         </>
       ) : (
-        <Empty>{q.error ?? (q.reachable ? 'waiting for first probe' : 'unreachable')}</Empty>
+        <Empty>
+          {q.error ?? (q.reachable ? t('queue.waitingFirstProbe') : t('state.unreachable'))}
+        </Empty>
       )}
       <div className="mt-3">
-        {logOpen ? (
-          <div key={logPattern} className="rise">
-            <LogPane
-              client={client}
-              queue={queue}
-              pattern={pattern}
-              snapAt={snapAt}
-              onClose={() => setLogPattern(null)}
-            />
-          </div>
-        ) : (
-          rep && (
-            <button
-              onClick={() => setLogPattern('daemon')}
-              className="font-num rounded px-1.5 text-[10px] text-ink-4 transition-colors hover:bg-hover-2 hover:text-ink-2"
-            >
-              daemon log
-            </button>
-          )
-        )}
+        {log?.kind === 'daemon'
+          ? pane('daemon')
+          : rep && (
+              <button
+                onClick={() => toggle('daemon', null)}
+                className="font-num rounded px-1.5 text-[10px] text-ink-4 transition-colors hover:bg-hover-2 hover:text-ink-2"
+              >
+                {t('common.daemonLog')}
+              </button>
+            )}
       </div>
       <ProbeSection client={client} />
     </div>
@@ -271,13 +311,14 @@ export function QueuesPage({
   snapAt: number
   sel: Sel | null
 }) {
+  const { t } = useI18n()
   // Reset nothing here — QueueDetail remounts per selection via key.
   if (clients === null) {
     return (
       <div>
-        <SectionHeading title="Queues" />
+        <SectionHeading title={t('nav.queues')} />
         <Card>
-          <Empty>waiting for first sweep</Empty>
+          <Empty>{t('state.waitingSweep')}</Empty>
         </Card>
       </div>
     )
@@ -292,7 +333,7 @@ export function QueuesPage({
   }
   return (
     <div>
-      <SectionHeading title="Queues" count={all.length || undefined} />
+      <SectionHeading title={t('nav.queues')} count={all.length || undefined} />
       <div className="grid gap-6 md:grid-cols-[13rem_1fr]">
         <div className="min-w-0 space-y-4">
           {[...byClient.entries()].map(([client, qs]) => (
@@ -325,11 +366,9 @@ export function QueuesPage({
               facts={clients[sel.client]?.facts ?? undefined}
             />
           ) : sel && !selQ ? (
-            <Empty>
-              queue <span className="font-num">{`${sel.client}/${sel.queue}`}</span> not found
-            </Empty>
+            <Empty>{t('queue.notFound', { name: `${sel.client}/${sel.queue}` })}</Empty>
           ) : (
-            <Empty>select a queue</Empty>
+            <Empty>{t('queue.selectQueue')}</Empty>
           )}
         </Card>
       </div>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#0b0b0e"/>
+  <rect x="0.5" y="0.5" width="63" height="63" rx="13.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+  <!-- shunt glyph: a through-line with a branch diverging off a junction dot -->
+  <path d="M10 42 H54" stroke="#30d158" stroke-width="5" fill="none" stroke-linecap="round"/>
+  <path d="M28 42 C38 42 42 22 54 22" stroke="#30d158" stroke-width="5" fill="none" stroke-linecap="round"/>
+  <circle cx="24" cy="42" r="6.5" fill="#30d158"/>
+  <circle cx="24" cy="42" r="3" fill="#0b0b0e"/>
+</svg>

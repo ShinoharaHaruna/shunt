@@ -1,11 +1,13 @@
 import type { ClientStatus } from '../types'
 import { humanizeSecs } from '../fmt'
 import { Card, CopyText, Dot, Muted, Pill } from './ui'
+import { useI18n } from '../i18n'
 
 /** Fleet-level client card — reachability, facts, expiry, billing,
  *  and queue chips that deep-link into '#/queues/<client>/<queue>'.
  *  Per-queue detail (resources, entries, logs) lives on that page. */
 export function ClientCard({ name, client }: { name: string; client: ClientStatus }) {
+  const { t } = useI18n()
   const up = client.reachable === true
   const down = client.reachable === false
   const facts = client.facts
@@ -32,13 +34,15 @@ export function ClientCard({ name, client }: { name: string; client: ClientStatu
         )}
         {client.expires_in_s != null && (
           <Pill>
-            <span className="font-num">{humanizeSecs(client.expires_in_s)}</span>
+            <span className="font-num">
+              {client.expires_in_s < 0 ? t('state.expired') : humanizeSecs(client.expires_in_s)}
+            </span>
           </Pill>
         )}
-        {client.endpoint_rotates && <Pill>rotating</Pill>}
+        {client.endpoint_rotates && <Pill>{t('common.rotating')}</Pill>}
         {connFail > 0 && (
           <Pill tone="rose">
-            <span className="font-num">conn_fail×{connFail}</span>
+            <span className="font-num">{t('common.connFail', { n: connFail })}</span>
           </Pill>
         )}
       </div>
@@ -48,7 +52,7 @@ export function ClientCard({ name, client }: { name: string; client: ClientStatu
         </p>
       )}
       <div className="mt-3 space-y-1 border-t border-edge-soft pt-2.5">
-        {queues.length === 0 && <Muted className="text-[11px]">no queues</Muted>}
+        {queues.length === 0 && <Muted className="text-[11px]">{t('machines.noQueues')}</Muted>}
         {queues.map(([qn, q]) => {
           const rep = q.report
           const pend = rep?.pending_detail?.length ?? rep?.pending?.length ?? 0
@@ -64,22 +68,24 @@ export function ClientCard({ name, client }: { name: string; client: ClientStatu
               <span className="font-num w-20 shrink-0 uppercase tracking-[0.08em] text-ink-2">
                 {qn}
               </span>
-              <Muted className="text-[11px]">
+              <Muted className="truncate text-[11px]">
                 {rep
                   ? rep.daemon.alive
-                    ? `daemon · pid ${rep.daemon.pid ?? '?'}`
-                    : 'daemon down'
+                    ? t('common.daemonPid', { pid: rep.daemon.pid ?? '?' })
+                    : t('common.daemonDown')
                   : (q.error ?? '…')}
               </Muted>
               <span className="flex-1" />
-              <span className={`font-num text-[11px] ${run > 0 ? 'text-signal-fg' : 'text-ink-4'}`}>
-                r{run}
-              </span>
-              <span
-                className={`font-num w-8 text-right text-[11px] ${pend > 0 ? 'text-[var(--c-amb)]' : 'text-ink-4'}`}
-              >
-                p{pend}
-              </span>
+              {run > 0 && (
+                <Pill tone="signal">
+                  <span className="font-num">{t('common.running', { n: run })}</span>
+                </Pill>
+              )}
+              {pend > 0 && (
+                <Pill tone="amber">
+                  <span className="font-num">{t('common.pending', { n: pend })}</span>
+                </Pill>
+              )}
               <span className="text-[10px] text-ink-4 opacity-0 transition-opacity group-hover:opacity-100">
                 →
               </span>
@@ -87,7 +93,7 @@ export function ClientCard({ name, client }: { name: string; client: ClientStatu
           )
         })}
       </div>
-      {down && <p className="mt-2 text-xs text-ink-4">{client.error ?? 'unreachable'}</p>}
+      {down && <p className="mt-2 text-xs text-ink-4">{client.error ?? t('state.unreachable')}</p>}
     </Card>
   )
 }
