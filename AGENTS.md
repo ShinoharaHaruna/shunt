@@ -37,6 +37,7 @@ Raw cargo equivalents work too (`cargo build/test/clippy`).
 - `docs/design.md` — **authoritative behavioral spec**; when ambiguous, this file wins
 - `etc/vendors/` — client templates (`autodl.toml` seeds AutoDL defaults)
 - `task_template.sh` — guard-pattern task skeleton
+- `install.sh` — curl|sh installer for the server-side binary (latest release; musl default, `--gnu` opt-in, `uninstall` removes only the binary, `upgrade` is a placeholder pointing at `shunt upgrade`)
 - `justfile`, `dprint.json`, `rust-toolchain.toml`, `.githooks/` — toolchain
 - `reference/` — bash prototype oracle (gitignored; contains deployment-specific details, never commit it)
 

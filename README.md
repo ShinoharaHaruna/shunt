@@ -56,6 +56,13 @@ Machine controls include managed SSH execution, bootstrap and upgrade, an option
 Use Linux with a stable Rust toolchain, a system linker, and Bash. Remote operation also needs OpenSSH tools (`ssh`, `scp`, and `ssh-keygen`) on the dev machine.
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/ShinoharaHaruna/shunt/main/install.sh | sh
+shunt --help
+```
+
+The script installs the latest release binary (static musl build, dashboard included) into `~/.local/bin`; pass `--gnu` for the dynamic-linked build, `--dir` for a different location, or `uninstall` to remove the binary. For a Rust toolchain source build instead:
+
+```bash
 git clone https://github.com/ShinoharaHaruna/shunt.git
 cd shunt
 cargo install --path . --locked
