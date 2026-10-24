@@ -142,6 +142,18 @@ fn merge_file_directives(body: &str, meta: &TaskMeta) -> String {
     out
 }
 
+/// Names of projects bound to `(client, queue)` — powers the
+/// submit-time hint when a projectless submit lands on a bound pair
+/// (issue #14). Best-effort: a project file that fails to load is
+/// skipped and registry errors yield no hint rather than breaking a
+/// submission.
+pub fn bound_projects(client_name: &str, queue: &str) -> Vec<String> {
+    let Ok(names) = registry::list_names("projects") else {
+        return Vec::new();
+    };
+    names.into_iter().filter_map(|n| registry::load_project(&n).ok()).filter(|p| p.bind.iter().any(|b| b.client == client_name && b.queue == queue)).map(|p| p.name).collect()
+}
+
 /// New server-side task id: `<unix>-<pidseq>`, deduped against the
 /// spool dir. `pidseq` packs pid<<16 | per-process seq so two
 /// same-second submits still differ in the 8-char tail `submit`
@@ -205,6 +217,18 @@ pub fn submit_to(client_name: &str, queue: Option<&str>, project: Option<&str>, 
     // (and therefore [defaults]) per key, which is how an agent pins
     // e.g. CUDA_VISIBLE_DEVICES onto one submission.
     meta.env.extend(flags.env.clone());
+
+    // A projectless submit to a bound (client, queue) pair stages a
+    // task with no workdir/env at all — the trap behind issue #14:
+    // the staged `--file` body then looks like it dropped the
+    // binding's `# shunt:workdir=` when the real cause is a missing
+    // `-p`. Name the bound projects; the note never gates.
+    if project_entry.is_none() {
+        let bound = bound_projects(client_name, &target.name);
+        if !bound.is_empty() {
+            eprintln!("note: queue '{}' on '{client_name}' is bound by project(s) {}; submit with `-p <name>` to apply its workdir/env (this task carries none)", target.name, bound.join(", "));
+        }
+    }
 
     let body = if let Some(path) = file {
         // The positional file slot means a bare word lands here; the

@@ -362,6 +362,29 @@ fn submit_file_own_directives_win() -> Result<()> {
     Ok(())
 }
 
+/// Issue #14's residual trap: with no `-p` there is no binding, so a
+/// `--file` submit to a bound (client, queue) pair stages without any
+/// workdir — symmetric with argv form. `bound_projects` is what lets
+/// submit name the missing binding on stderr; the submit itself must
+/// still go through workdir-free, hint notwithstanding.
+#[test]
+fn bound_projects_names_binding_for_projectless_submit() -> Result<()> {
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, _c) = fixture("boundlist")?;
+    registry::save_project(&registry::ProjectEntry { name: "p".into(), desc: String::new(), repo: String::new(), defaults: Default::default(), bind: vec![registry::Binding { client: "fake-a".into(), queue: "default".into(), workdir: "/bound/wd".into(), env: BTreeMap::new() }] })?;
+    registry::save_project(&registry::ProjectEntry { name: "other".into(), desc: String::new(), repo: String::new(), defaults: Default::default(), bind: vec![registry::Binding { client: "fake-b".into(), queue: "default".into(), workdir: "/x".into(), env: BTreeMap::new() }] })?;
+
+    assert_eq!(spool::bound_projects("fake-a", "default"), vec!["p".to_string()]);
+    assert!(spool::bound_projects("fake-a", "missing-q").is_empty());
+    assert!(spool::bound_projects("fake-c", "default").is_empty());
+
+    let f = home.join("t.sh");
+    std::fs::write(&f, "echo hi\n")?;
+    let id = spool::submit("fake-a", None, None, None, Some(f.to_str().unwrap()), &Default::default(), &[])?;
+    assert!(!spool::body(&id)?.contains("# shunt:workdir="), "projectless submit must stage no workdir");
+    Ok(())
+}
+
 /// A dash-leading slug must be refused at submit time: on the wire it
 /// parses as a flag, the remote rejects it, and the spool entry would
 /// retry forever.

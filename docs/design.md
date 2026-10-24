@@ -404,6 +404,8 @@ Boxes with poor international connectivity (mainland-China GPU vendors) get thei
 
 **The guard contract is enforced by warning, not by flag.** A staged task whose body carries no guard check (no `--guard`, no embedded `guard hit:` line in a `--file`) triggers a loud stderr warning at submit: at-least-once means a lost ack, an orphan requeue, or a live-pgid requeue reruns the body, and an unguarded task then double-executes (double GPU burn, duplicated result writes). Naturally idempotent tasks are a legitimate unguarded case, so submit still proceeds.
 
+A second advisory fires the same way: a `-p`-less submit aimed at a `(client, queue)` pair that one or more projects bind carries no binding, hence no workdir/env — for `--file` and argv forms alike. Submit names the bound projects on stderr (issue #14's trap: the staged `--file` body then looks like it dropped `# shunt:workdir=` when the real cause is a missing `-p`); the note never gates, and a genuinely unbound pair stays quiet.
+
 Two-phase dispatch, at-least-once end to end:
 
 1. Dispatcher (server-side loop, poll interval from `server.toml`) scans `spool/` oldest-first.
