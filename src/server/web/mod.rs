@@ -48,6 +48,14 @@ fn log_file() -> Result<PathBuf> {
     Ok(crate::server::registry::shunt_home()?.join("serve.log"))
 }
 
+/// `$SHUNT_HOME/serve.ver` — the §3.5a capability gate, same role
+/// as the queue daemon's `daemon.ver`: written only by an image
+/// that HAS the USR2 handler, so `restart` can signal without
+/// default-killing a pre-handler instance.
+fn ver_file() -> Result<PathBuf> {
+    Ok(crate::server::registry::shunt_home()?.join("serve.ver"))
+}
+
 /// Serve identity for `proto::proc::probe`: shunt-family argv[0]
 /// basename + argv[1] == `serve` + argv[2] == `run`. Anchoring the
 /// leaf keeps a recycled pid from false-identifying (§3.4).
@@ -155,10 +163,33 @@ pub fn down() -> Result<()> {
                 std::thread::sleep(Duration::from_millis(50));
             }
             let _ = std::fs::remove_file(&pidf);
+            let _ = std::fs::remove_file(ver_file()?);
             println!("serve down: stopped pid {pid}");
         }
     }
     Ok(())
+}
+
+/// `serve restart`: the §3.5a handoff — verify the pidfile's
+/// identity, then SIGUSR2 the instance; it re-execs its own argv
+/// against its image path. `serve.ver` gates capability: an absent
+/// file means the running image predates the handler and USR2
+/// would default-kill it — refuse with the down+up remediation
+/// instead. Returns the signaled pid, `None` when nothing runs.
+pub fn restart() -> Result<Option<u32>> {
+    let Some(pid) = alive()? else {
+        return Ok(None);
+    };
+    let ver = std::fs::read_to_string(ver_file()?).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let Some(from_ver) = ver else {
+        anyhow::bail!("serve (pid {pid}) predates handoff support — no serve.ver, and SIGUSR2 would kill it; `shunt serve down` then `serve up` to move onto the new binary");
+    };
+    let rc = unsafe { libc::kill(pid as i32, libc::SIGUSR2) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("cannot SIGUSR2 serve pid {pid}"));
+    }
+    println!("serve handed off (pid {pid}, was {from_ver}) — re-execs its own argv on the new image");
+    Ok(Some(pid))
 }
 
 /// Server-local sections refresh at this fixed cadence: fs reads
@@ -215,14 +246,35 @@ pub fn run(opts: ServeOpts) -> Result<()> {
         std::fs::create_dir_all(dir).ok();
     }
     std::fs::write(&pidf, format!("{}", std::process::id()))?;
+    let verf = ver_file()?;
+    std::fs::write(&verf, format!("{}\n", env!("SHUNT_VERSION")))?;
+    // TERM/INT remove the lifecycle files and exit. USR2 re-execs
+    // this image in place (§3.5a): the listener is CLOEXEC, so
+    // execve drops it and the new image rebinds the same port — a
+    // sub-second refusal window plus one dropped WS conn, never a
+    // drain. An exec failure keeps the old image running.
     {
-        let pidf = pidf.clone();
-        let mut sigs = signal_hook::iterator::Signals::new([signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT]).context("cannot install signal handlers")?;
+        let verf = verf.clone();
+        let argv_rest: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        let mut sigs = signal_hook::iterator::Signals::new([signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT, signal_hook::consts::SIGUSR2]).context("cannot install signal handlers")?;
         std::thread::spawn(move || {
-            let _ = sigs.forever().next();
-            let _ = std::fs::remove_file(&pidf);
-            std::process::exit(0);
+            for sig in sigs.forever() {
+                if sig == signal_hook::consts::SIGUSR2 {
+                    eprintln!("serve: SIGUSR2 — re-exec in place");
+                    let Err(e) = crate::handoff::exec_self(&argv_rest);
+                    eprintln!("serve: handoff failed: {e} — continuing on the old image");
+                } else {
+                    let _ = std::fs::remove_file(&pidf);
+                    let _ = std::fs::remove_file(&verf);
+                    std::process::exit(0);
+                }
+            }
         });
+    }
+    crate::handoff::unblock_usr2();
+    if std::env::var_os(crate::handoff::HANDOFF_ENV).is_some() {
+        std::env::remove_var(crate::handoff::HANDOFF_ENV);
+        eprintln!("serve: re-exec'd via handoff");
     }
 
     let auth = Arc::new(opts.token);

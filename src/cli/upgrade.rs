@@ -62,6 +62,12 @@ fn upgrade_local(a: &UpgradeArgs, release: &release::Release) -> Result<()> {
         println!("upgraded {current} → {latest} ({target}) at {}", exe.display());
     }
     handoff_local_daemons();
+    // The dashboard re-execs under the same §3.5a gate: a
+    // pre-handler serve image is refused by web::restart with the
+    // down+up remediation rather than killed by an unhandled USR2.
+    if let Err(e) = crate::server::web::restart() {
+        eprintln!("serve not handed off: {e:#}");
+    }
     // The dispatcher has no pidfile, so its running image is
     // undiscoverable — tell the operator rather than pretend. USR2
     // re-execs it in place; a restart is equally safe (spool + dedup).

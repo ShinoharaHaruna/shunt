@@ -21,6 +21,13 @@ pub fn serve(a: &ServeArgs) -> Result<()> {
         Some(ServeAction::Run(f)) => crate::server::web::run(f.clone().into_opts()),
         Some(ServeAction::Up(f)) => crate::server::web::up(&f.clone().into_opts()),
         Some(ServeAction::Down) => crate::server::web::down(),
+        Some(ServeAction::Restart) => match crate::server::web::restart()? {
+            Some(_) => Ok(()),
+            None => {
+                println!("serve not running — `shunt serve up` starts one");
+                Ok(())
+            }
+        },
     }
 }
 

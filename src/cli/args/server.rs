@@ -28,6 +28,9 @@ pub enum ServeAction {
     /// Stop the background instance (SIGTERM, verifies the pidfile's
     /// cmdline before signaling)
     Down,
+    /// Handoff-restart the background instance (SIGUSR2 re-exec,
+    /// §3.5a; a pre-handler image is refused, not killed)
+    Restart,
 }
 
 #[derive(Args, Clone)]
