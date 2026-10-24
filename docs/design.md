@@ -22,6 +22,7 @@ Non-goals, by deliberate exclusion:
 - No multi-machine load balancing or automatic client selection. Task submission targets a registered client (explicitly or through `default_client`); matching task requirements to machine facts is the operator's or agent's job, with facts exposed via `shunt status --all --json`.
 - No resource reservations or tenant isolation. Declared estimates and room agreements inform participants; the queue does not enforce CPU, RAM, or GPU allocations.
 - No remote power-on. A human or an upstream automation makes the machine available. On AutoDL-class vendors this includes the console "power on" action. Idle poweroff is explicit opt-in and is refused server-side for clients marked `shared`.
+- No non-Linux dev side. The server role is specified against Linux semantics — `/proc` liveness (§3.4), SIGUSR2/SIGTERM lifecycle (§3.5a), unix permission bits, ssh ControlMaster muxing, ETXTBSY-safe self-upgrade — and the single binary also carries the Linux-only client machinery, so a port would mean a platform abstraction plus module-wide `cfg` gating for convenience only. A Windows or macOS operator runs shunt inside WSL2 or on a remote Linux host instead.
 
 ## 2. Architecture
 
