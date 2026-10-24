@@ -110,8 +110,8 @@ export const zhCN: Dict = {
   'rooms.archived': '已归档: {names}',
   'rooms.stats': '{msgs} 条消息 · 创建于 {ts}',
   'rooms.decision': '决议',
-  'rooms.stale': '过期: {names}',
-  'rooms.staleCount': '过期 {n}',
+  'rooms.stale': '游离: {names}',
+  'rooms.staleCount': '游离 {n}',
   'rooms.nonMember': '非成员',
   'rooms.digestThrough': '摘要截至 #{n}',
 }

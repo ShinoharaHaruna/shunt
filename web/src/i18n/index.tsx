@@ -2,14 +2,53 @@ import { createContext, useContext, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { en } from './en'
 import type { Dict, Key } from './en'
+import { fr } from './fr'
+import { de } from './de'
+import { it } from './it'
+import { ja } from './ja'
+import { es } from './es'
+import { ko } from './ko'
 import { zhCN } from './zh-CN'
+import { zhTW } from './zh-TW'
+import { ru } from './ru'
+import { id } from './id'
+import { ptBR } from './pt-BR'
 
-/** code → display label in that language (autonym). */
-export const LANGS = { en: 'EN', 'zh-CN': '中文' } as const
+/** code → display label in that language (autonym). Ordered like the
+ *  README language switcher: English first, then the maintainer's order. */
+export const LANGS = {
+  en: 'English',
+  fr: 'Français',
+  de: 'Deutsch',
+  it: 'Italiano',
+  ja: '日本語',
+  es: 'Español',
+  ko: '한국어',
+  'zh-CN': '简体中文',
+  'zh-TW': '繁體中文',
+  ru: 'Русский',
+  id: 'Bahasa Indonesia',
+  'pt-BR': 'Português (BR)',
+} as const
 export type Lang = keyof typeof LANGS
 
-const dicts: Record<Lang, Dict> = { en, 'zh-CN': zhCN }
+const dicts: Record<Lang, Dict> = {
+  en,
+  fr,
+  de,
+  it,
+  ja,
+  es,
+  ko,
+  'zh-CN': zhCN,
+  'zh-TW': zhTW,
+  ru,
+  id,
+  'pt-BR': ptBR,
+}
 const KEY = 'shunt-lang'
+
+const TAGS = Object.keys(LANGS) as Lang[]
 
 /** stored choice → browser language list → 'en'. The stored value
  *  wins outright — a manual pick is a deliberate override. */
@@ -23,10 +62,16 @@ function detect(): Lang {
   const navs = navigator.languages ?? [navigator.language]
   for (const raw of navs) {
     const l = raw.toLowerCase()
-    if (l in LANGS) return l as Lang
-    if (l.startsWith('zh')) return 'zh-CN' // zh-* variants → the one zh dict
+    const exact = TAGS.find((tag) => l === tag.toLowerCase())
+    if (exact) return exact
+    if (l.startsWith('zh')) {
+      // Traditional-script regions → zh-TW, every other zh-* → zh-CN.
+      return /hant|tw|hk|mo/.test(l) ? 'zh-TW' : 'zh-CN'
+    }
+    // Region-tagged picks (pt-BR) resolve through their base language.
     const base = l.split('-')[0]
-    if (base in LANGS) return base as Lang
+    const sibling = TAGS.find((tag) => tag.toLowerCase().split('-')[0] === base)
+    if (sibling) return sibling
   }
   return 'en'
 }
