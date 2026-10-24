@@ -1,6 +1,6 @@
 use super::logs::{render_dlog_line, tail_bytes};
-use super::{agent_prio, logs_wire_tail, workers_wire_tail};
-use crate::cli::args::{LogsArgs, PrioArgs, WorkerAction, WorkersArgs};
+use super::{agent_cancel, agent_kill, agent_prio, logs_wire_tail, workers_wire_tail};
+use crate::cli::args::{LogsArgs, PatternArgs, PrioArgs, WorkerAction, WorkersArgs};
 
 /// Both the one-shot `dlog` render and `logs -f`'s appended-
 /// line render must go through the same JSONL→text transform
@@ -46,6 +46,70 @@ fn workers_wire_tail_honors_set_subcommand() {
     assert_eq!(workers_wire_tail(&wa(Some(3), None)), vec!["workers", "set", "3"]);
     assert_eq!(workers_wire_tail(&wa(None, Some(WorkerAction::Get))), vec!["workers", "get"]);
     assert_eq!(workers_wire_tail(&wa(None, None)), vec!["workers", "get"]);
+}
+
+fn pat_args(root: &std::path::Path, pattern: &str) -> PatternArgs {
+    PatternArgs { pattern: pattern.into(), client: None, queue: None, root: Some(root.display().to_string()), json: false }
+}
+
+fn tmp_root(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("shunt-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()))
+}
+
+/// A pending miss must name the pattern's hits in the other tracks
+/// and point at the command that reaches them — a task claimed
+/// between submit and `cancel` reads as "no pending task matches"
+/// for every spelling of its name otherwise (issue #15).
+#[test]
+fn cancel_miss_names_other_track_hits() {
+    let root = tmp_root("cancel-miss");
+    for t in ["pending", "running", "done", "failed"] {
+        std::fs::create_dir_all(root.join(t)).unwrap();
+    }
+    std::fs::create_dir_all(root.join("running").join("0107_c10_x")).unwrap();
+    std::fs::create_dir_all(root.join("failed").join("0108_c10_y")).unwrap();
+    let err = agent_cancel(&pat_args(&root, "c10")).unwrap_err().to_string();
+    assert!(err.contains("no pending task matches 'c10'"), "{err}");
+    assert!(err.contains("running: 0107_c10_x"), "{err}");
+    assert!(err.contains("`shunt kill`"), "{err}");
+    assert!(err.contains("failed: 0108_c10_y"), "{err}");
+    std::fs::remove_dir_all(&root).ok();
+
+    // A hit nowhere stays a plain miss — no empty hint appended.
+    let err = agent_cancel(&pat_args(&root, "zzz")).unwrap_err().to_string();
+    assert_eq!(err, "no pending task matches 'zzz'", "{err}");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A real pending hit still cancels — the hint path must not
+/// disturb the one-match fast path.
+#[test]
+fn cancel_matches_pending_substring() {
+    let root = tmp_root("cancel-hit");
+    let pending = root.join("pending");
+    std::fs::create_dir_all(pending.join("0107_c10_x")).unwrap();
+    std::fs::write(pending.join("0107_c10_x").join("task.sh"), "echo hi\n").unwrap();
+    agent_cancel(&pat_args(&root, "0107")).unwrap();
+    assert!(!pending.join("0107_c10_x").exists());
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// `kill`'s own list is pid-gated: a miss must steer to `cancel`
+/// on a pending hit and name a claimed-but-pid-less entry plainly.
+#[test]
+fn kill_miss_names_pending_and_pidless_hits() {
+    let root = tmp_root("kill-miss");
+    for t in ["pending", "running"] {
+        std::fs::create_dir_all(root.join(t)).unwrap();
+    }
+    std::fs::create_dir_all(root.join("pending").join("0107_c10_p")).unwrap();
+    std::fs::create_dir_all(root.join("running").join("0108_c10_r")).unwrap();
+    let err = agent_kill(&pat_args(&root, "c10")).unwrap_err().to_string();
+    assert!(err.contains("no running task matches 'c10'"), "{err}");
+    assert!(err.contains("pending: 0107_c10_p"), "{err}");
+    assert!(err.contains("`shunt cancel`"), "{err}");
+    assert!(err.contains("claimed, no pid yet: 0108_c10_r"), "{err}");
+    std::fs::remove_dir_all(&root).ok();
 }
 
 /// prio must refuse a flat entry renaming onto a same-named

@@ -86,6 +86,47 @@ fn new_impl(a: &NewArgs) -> Result<()> {
     }
 }
 
+/// The 0-match refusal for a pattern op scoped to `track`. A miss
+/// can still be a live task one track over — the daemon's claim
+/// moves pending → running mid-typing, after which every spelling
+/// of the name reads "no pending task matches" (issue #15). Name
+/// the pattern's hits in the OTHER tracks so the refusal steers
+/// to the command that reaches them (`pending` → `cancel`,
+/// `running` → `kill`); a hit nowhere stays a plain miss. For
+/// `kill`, whose own list is pid-gated (§3.9), a claimed but
+/// pid-less running entry is named too — it sits in the searched
+/// track yet cannot be signaled for a moment.
+fn miss_msg(root: &std::path::Path, track: &str, pat: &str) -> String {
+    let names = |t: &str| -> Vec<String> { crate::client::queue::list_entries(root, t).unwrap_or_default().into_iter().filter(|n| n.contains(pat)).collect() };
+    let mut hints = Vec::new();
+    if track == "running" {
+        let starting: Vec<String> = names("running").into_iter().filter(|n| !crate::client::queue::piece_file(root, "running", n, "pid").exists()).collect();
+        if !starting.is_empty() {
+            hints.push(format!("claimed, no pid yet: {}", starting.join(", ")));
+        }
+    }
+    for t in ["pending", "running", "done", "failed"] {
+        if t == track {
+            continue;
+        }
+        let hits = names(t);
+        if hits.is_empty() {
+            continue;
+        }
+        let steer = match t {
+            "pending" => " (`shunt cancel` reaches those)",
+            "running" => " (`shunt kill` reaches those)",
+            _ => "",
+        };
+        hints.push(format!("{t}: {}{steer}", hits.join(", ")));
+    }
+    let mut msg = format!("no {track} task matches '{pat}'");
+    if !hints.is_empty() {
+        msg.push_str(&format!(" — pattern does match {}", hints.join("; ")));
+    }
+    msg
+}
+
 /// Reduce a `match_pending`/`match_running` hit list to the one
 /// task the op acts on: `none` jfails an empty list, `several` a
 /// multi-hit. The wording stays the caller's because the refusals
@@ -106,7 +147,7 @@ pub(crate) fn agent_cancel(a: &PatternArgs) -> Result<()> {
 fn cancel_impl(a: &PatternArgs) -> Result<()> {
     let root = local_root(&a.root)?;
     let m = crate::client::queue::match_pending(&root, &a.pattern)?;
-    let name = one_match(&m, a.json, &format!("no pending task matches '{}'", a.pattern), &format!("pattern matches several tasks, refusing:\n  {}", m.join("\n  ")))?;
+    let name = one_match(&m, a.json, &miss_msg(&root, "pending", &a.pattern), &format!("pattern matches several tasks, refusing:\n  {}", m.join("\n  ")))?;
     crate::client::queue::remove_pending(&root, &name)?;
     if a.json {
         jprint(jobj(jfields(serde_json::json!({"name": name}))));
@@ -126,7 +167,7 @@ fn prio_impl(a: &PrioArgs) -> Result<()> {
         return jfail(a.json, &format!("prio number must be inside the 0000-{:04} priority band, got {:04}", crate::client::queue::PRIORITY_BAND_MAX, a.n));
     }
     let m = crate::client::queue::match_pending(&root, &a.pattern)?;
-    let miss = format!("need exactly one pending match, got {}:\n  {}", m.len(), m.join("\n  "));
+    let miss = if m.is_empty() { miss_msg(&root, "pending", &a.pattern) } else { format!("need exactly one pending match, got {}:\n  {}", m.len(), m.join("\n  ")) };
     let base = one_match(&m, a.json, &miss, &miss)?;
     let rest = base.split_once('_').map(|(_, r)| r).unwrap_or(base.as_str());
     let new = format!("{:04}_{rest}", a.n);
@@ -174,7 +215,7 @@ pub(crate) fn agent_kill(a: &PatternArgs) -> Result<()> {
 fn kill_impl(a: &PatternArgs) -> Result<()> {
     let root = local_root(&a.root)?;
     let m = crate::client::queue::match_running(&root, &a.pattern)?;
-    let name = one_match(&m, a.json, &format!("no running task matches '{}'", a.pattern), &format!("pattern matches several tasks, refusing:\n  {}", m.join("\n  ")))?;
+    let name = one_match(&m, a.json, &miss_msg(&root, "running", &a.pattern), &format!("pattern matches several tasks, refusing:\n  {}", m.join("\n  ")))?;
     match crate::client::exec::kill_task(&root, &name) {
         Ok(crate::client::exec::KillOutcome::Gone) => {
             // Honest report: the recorded pgid no longer names

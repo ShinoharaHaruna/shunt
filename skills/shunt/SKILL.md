@@ -180,7 +180,7 @@ Notes:
 
 - `prio` refuses if the target `NNNN_slug` name already exists. Numbers 0000-0099 are the manual band and always claim ahead of normal sequence numbers (first normal task is 0100).
 - Raising `workers` dispatches immediately; lowering only stops new dispatches. Running tasks drain naturally. To free a slot now, `kill`.
-- `cancel` matches pending (or running) by unique substring; 0 or >1 match is an error.
+- `cancel` matches pending by unique substring, `kill` matches running likewise; 0 or >1 match is an error. A 0-match refusal names the pattern's hits in the other tracks — "already running" means `shunt kill`, and a task claimed between submit and `cancel` is a moved task, not a matching failure.
 
 ### room (coordinate with other projects)
 
