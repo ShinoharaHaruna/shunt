@@ -84,7 +84,7 @@ fn fixture(tag: &str) -> Result<(PathBuf, ClientEntry)> {
     let home = std::env::temp_dir().join(format!("shunt-itest-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&home)?;
     std::env::set_var("SHUNT_HOME", &home);
-    let client = ClientEntry { name: "fake-a".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: "/root/queue".into(), deploy_root: "/root".into(), facts: BTreeMap::new(), billing: None, queues: BTreeMap::new(), default_queue: None };
+    let client = ClientEntry { name: "fake-a".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: "/root/queue".into(), deploy_root: "/root".into(), facts: BTreeMap::new(), billing: None, queues: BTreeMap::new(), default_queue: None };
     registry::save_client(&client)?;
     Ok((home, client))
 }

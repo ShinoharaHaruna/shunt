@@ -187,6 +187,15 @@ pub struct ClientAddArgs {
     /// (§15); stored on the row so re-bootstraps reuse it
     #[arg(long)]
     pub bin_path: Option<String>,
+    /// Dev-machine shell snippet enforcing a reachability
+    /// precondition before ssh (design.md §4.1): runs once per
+    /// call after the first connect failure — or before the first
+    /// attempt while the client is already marked unreachable.
+    /// Must be idempotent and non-interactive (stdin is null);
+    /// resident preconditions hand off to a supervisor — a
+    /// foreground keepalive is killed at the hook deadline
+    #[arg(long)]
+    pub pre_connect: Option<String>,
     /// Box is shared with other people/workloads — server-side
     /// `shutdown on` then refuses to arm idle poweroff
     #[arg(long)]
@@ -245,6 +254,11 @@ pub enum ClientAction {
         /// Clear the endpoint_rotates mark on the row
         #[arg(long, overrides_with = "endpoint_rotates")]
         no_endpoint_rotates: bool,
+        /// Dev-machine reachability hook run before ssh when the
+        /// endpoint is unreachable (design.md §4.1; empty string
+        /// clears)
+        #[arg(long)]
+        pre_connect: Option<String>,
     },
     /// Deregister a box: remote stop + key revocation (best-effort),
     /// then row/keys/mux/state/spool/binding removal locally. On the

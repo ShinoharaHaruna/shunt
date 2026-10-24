@@ -17,6 +17,7 @@ pub struct EndpointUpdate {
     pub port: Option<u16>,
     pub user: Option<String>,
     pub password: Option<String>,
+    pub pre_connect: Option<String>,
     pub endpoint_rotates: Option<bool>,
 }
 
@@ -32,8 +33,8 @@ pub struct EndpointUpdate {
 /// Server-local: no reachability check; verify with `status -c`.
 pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
     let endpoint_moved = u.host.is_some() || u.port.is_some() || u.user.is_some();
-    if !endpoint_moved && u.password.is_none() && u.endpoint_rotates.is_none() {
-        anyhow::bail!("nothing to update — pass --host/--port/--user/--password/--endpoint-rotates (other row fields — qroot, deploy_root, expire, env_setup — are hand-edited in clients/<name>.toml)");
+    if !endpoint_moved && u.password.is_none() && u.pre_connect.is_none() && u.endpoint_rotates.is_none() {
+        anyhow::bail!("nothing to update — pass --host/--port/--user/--password/--pre-connect/--endpoint-rotates (other row fields — qroot, deploy_root, expire, env_setup — are hand-edited in clients/<name>.toml)");
     }
     if u.port == Some(0) {
         anyhow::bail!("--port 0 is not a usable endpoint");
@@ -57,6 +58,14 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
         // Never echo the secret into terminal output or logs.
         changes.push(if pw.is_empty() { "ssh.password: cleared".into() } else { "ssh.password: set".into() });
         e.ssh.password = pw;
+    }
+    if let Some(pc) = u.pre_connect {
+        // Never echo the snippet into terminal output — it can
+        // legitimately carry a credential path or portal URL.
+        if pc != e.pre_connect {
+            changes.push(if pc.is_empty() { "pre_connect: cleared".into() } else { "pre_connect: set".into() });
+            e.pre_connect = pc;
+        }
     }
     if let Some(v) = u.endpoint_rotates {
         if v != e.endpoint_rotates {

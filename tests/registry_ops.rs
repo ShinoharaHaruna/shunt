@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn ssh_entry(name: &str) -> ClientEntry {
-    ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: "/q".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/q".into(), facts: BTreeMap::new(), billing: None }
+    ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: "/q".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/q".into(), facts: BTreeMap::new(), billing: None }
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn client_update_rewrites_endpoint_and_clears_state() -> Result<()> {
     }
     assert_eq!(registry::conn_fail_read("box-u"), 3);
 
-    client_ops::update("box-u", client_ops::EndpointUpdate { host: Some("new.example.invalid".into()), port: Some(4022), user: None, password: Some("pw".into()), endpoint_rotates: Some(true) })?;
+    client_ops::update("box-u", client_ops::EndpointUpdate { host: Some("new.example.invalid".into()), port: Some(4022), user: None, password: Some("pw".into()), pre_connect: None, endpoint_rotates: Some(true) })?;
 
     let back = registry::load_client("box-u")?;
     assert_eq!(back.ssh.host, "new.example.invalid");
@@ -67,15 +67,15 @@ fn client_update_rewrites_endpoint_and_clears_state() -> Result<()> {
 
     // No flags is a usage error, not a silent no-op; port 0 is not
     // an endpoint.
-    let none = client_ops::EndpointUpdate { host: None, port: None, user: None, password: None, endpoint_rotates: None };
+    let none = client_ops::EndpointUpdate { host: None, port: None, user: None, password: None, pre_connect: None, endpoint_rotates: None };
     assert!(client_ops::update("box-u", none).is_err());
-    let p0 = client_ops::EndpointUpdate { host: None, port: Some(0), user: None, password: None, endpoint_rotates: None };
+    let p0 = client_ops::EndpointUpdate { host: None, port: Some(0), user: None, password: None, pre_connect: None, endpoint_rotates: None };
     assert!(client_ops::update("box-u", p0).is_err());
     assert!(registry::load_client("box-u")?.ssh.port == 4022);
 
     // Tri-state endpoint_rotates: Some(false) clears a mislabeled
     // row and alone counts as a real update; None leaves it be.
-    client_ops::update("box-u", client_ops::EndpointUpdate { host: None, port: None, user: None, password: None, endpoint_rotates: Some(false) })?;
+    client_ops::update("box-u", client_ops::EndpointUpdate { host: None, port: None, user: None, password: None, pre_connect: None, endpoint_rotates: Some(false) })?;
     assert!(!registry::load_client("box-u")?.endpoint_rotates);
 
     std::fs::remove_dir_all(&home).ok();

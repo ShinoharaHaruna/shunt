@@ -13,6 +13,7 @@ pub use ssh::SshTransport;
 
 use crate::server::registry::{self, ClientEntry};
 use anyhow::Result;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 
 /// Quote one arg for the remote shell (`%q` equivalent).
@@ -157,6 +158,55 @@ pub(crate) fn wait_deadline(mut child: std::process::Child, timeout_s: u64, what
     }
 }
 
+/// The `pre_connect` hook's own deadline (design.md §4.1): a
+/// bring-up legitimately blocks until connected, so it gets a
+/// separate budget rather than sharing the wire-op ceiling.
+/// `SHUNT_PRE_CONNECT_TIMEOUT_S` overrides (tests).
+const PRE_CONNECT_TIMEOUT_S: u64 = 60;
+
+fn pre_connect_timeout_s() -> u64 {
+    std::env::var("SHUNT_PRE_CONNECT_TIMEOUT_S").ok().and_then(|s| s.parse().ok()).filter(|&n| n > 0).unwrap_or(PRE_CONNECT_TIMEOUT_S)
+}
+
+/// Run the client's `pre_connect` reachability hook on the dev
+/// machine (design.md §4.1): `sh -c`, stdin null, ambient env
+/// inherited, killed as a process group at its deadline. The result
+/// never gates the caller's retries — this returns a short outcome
+/// note for the unreachable error (`rc=1: <stderr tail>` / `timed
+/// out`), or None when no hook is configured. Callers fire it at
+/// most once per call: after the first rc-255, or before the first
+/// attempt when the conn-fail streak is already nonzero.
+pub(crate) fn run_pre_connect(client: &ClientEntry) -> Option<String> {
+    let snippet = client.pre_connect.trim();
+    if snippet.is_empty() {
+        return None;
+    }
+    // process_group(0) so the deadline kill takes grandchildren too
+    // — same discipline as every other spawned child here.
+    let child = std::process::Command::new("sh").arg("-c").arg(snippet).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).process_group(0).spawn();
+    let out = match child {
+        Ok(c) => match wait_deadline(c, pre_connect_timeout_s(), "pre_connect") {
+            Ok(o) => o,
+            Err(e) => return Some(format!("{e:#}")),
+        },
+        Err(e) => return Some(format!("spawn failed: {e:#}")),
+    };
+    let rc = out.status.code().unwrap_or(-1);
+    // Tail: last non-empty stderr lines on one line, capped — the
+    // hook's complaint rides the unreachable error verbatim.
+    let tail = {
+        let s = String::from_utf8_lossy(&out.stderr);
+        let joined = s.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" | ");
+        const CAP: usize = 240;
+        if joined.chars().count() > CAP {
+            format!("…{}", joined.chars().skip(joined.chars().count() - CAP).collect::<String>())
+        } else {
+            joined
+        }
+    };
+    Some(if tail.is_empty() { format!("rc={rc}") } else { format!("rc={rc}: {tail}") })
+}
+
 /// Pick the transport for a client row (design.md §5): local loopback
 /// for `local = true` rows (incl. the built-in `localhost`), SSH else.
 pub fn transport_for(client: &ClientEntry) -> Box<dyn Transport> {
@@ -211,7 +261,7 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn local_client() -> ClientEntry {
     use crate::server::registry::SshEndpoint;
     use std::collections::BTreeMap;
-    ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, bin_path: None, queues: Default::default(), default_queue: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: "/tmp/qt".into(), deploy_root: "/tmp".into(), facts: BTreeMap::new(), billing: None }
+    ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, bin_path: None, queues: Default::default(), default_queue: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: "/tmp/qt".into(), deploy_root: "/tmp".into(), facts: BTreeMap::new(), billing: None }
 }
 
 #[cfg(test)]

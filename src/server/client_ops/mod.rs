@@ -37,5 +37,5 @@ pub use update::{same_queue_peers, update, EndpointUpdate};
 /// every field spelled out so a new field forces one edit, not N.
 #[cfg(test)]
 pub(crate) fn test_entry() -> crate::server::registry::ClientEntry {
-    crate::server::registry::ClientEntry { name: "b".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: Default::default(), qroot: "/q".into(), deploy_root: "/data".into(), facts: Default::default(), billing: None, queues: Default::default(), default_queue: None }
+    crate::server::registry::ClientEntry { name: "b".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: Default::default(), qroot: "/q".into(), deploy_root: "/data".into(), facts: Default::default(), billing: None, queues: Default::default(), default_queue: None }
 }

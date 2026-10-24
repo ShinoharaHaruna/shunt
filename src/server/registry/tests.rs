@@ -15,7 +15,7 @@ fn client_roundtrip() {
     let _g = HOME_LOCK.lock().unwrap();
     let tmp = std::env::temp_dir().join(format!("shunt-test-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
-    let entry = ClientEntry { name: "box-1".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: "/path/to/key".into(), password: String::new() }, qroot: "/root/autodl-tmp/queue".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/root/autodl-tmp".into(), facts: BTreeMap::new(), billing: Some(Billing { hourly: 2.6, currency: "cny".into() }) };
+    let entry = ClientEntry { name: "box-1".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: "/path/to/key".into(), password: String::new() }, qroot: "/root/autodl-tmp/queue".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/root/autodl-tmp".into(), facts: BTreeMap::new(), billing: Some(Billing { hourly: 2.6, currency: "cny".into() }) };
     save_client(&entry).unwrap();
     let back = load_client("box-1").unwrap();
     assert_eq!(back.ssh.port, 22);
@@ -188,7 +188,7 @@ fn empty_qroot_row_is_unusable() {
     let _g = HOME_LOCK.lock().unwrap();
     let tmp = std::env::temp_dir().join(format!("shunt-test-qroot-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
-    let entry = ClientEntry { name: "noq".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: String::new(), queues: BTreeMap::new(), default_queue: None, deploy_root: String::new(), facts: BTreeMap::new(), billing: None };
+    let entry = ClientEntry { name: "noq".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: String::new(), queues: BTreeMap::new(), default_queue: None, deploy_root: String::new(), facts: BTreeMap::new(), billing: None };
     save_client(&entry).unwrap();
 
     let err = load_client("noq").unwrap_err().to_string();

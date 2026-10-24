@@ -44,18 +44,38 @@ pub(super) fn up_locked(dir: &Path, t: &dyn Transport, client: &ClientEntry, por
     // mode(0o600) only applies at creation — re-tighten a pre-existing
     // loose file.
     let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
-    let err = log.try_clone()?;
 
     let args = up_argv(client, port)?;
-    let mut child = Command::new("ssh").args(&args[1..]).stdin(Stdio::null()).stdout(log).stderr(err).process_group(0).spawn().context("spawn ssh tunnel")?;
+    // The tunnel's ssh has no retry loop of its own (design.md §4.1):
+    // a spawn that dies during the setup window gets ONE retry behind
+    // the client's pre_connect hook, and a call that starts on a
+    // nonzero conn-fail streak runs the hook before the first spawn
+    // rather than after another wasted ConnectTimeout — a spawn on
+    // an unreachable endpoint stays "alive" past the window anyway,
+    // so without the eager case the hook would never get its chance.
+    let mut hook_done = client.pre_connect.is_empty();
+    let mut hook_note: Option<String> = None;
+    if !hook_done && crate::server::registry::conn_fail_read(&client.name) > 0 {
+        hook_note = crate::server::transport::run_pre_connect(client);
+        hook_done = true;
+    }
+    let mut child = loop {
+        // ExitOnForwardFailure makes a bad bind exit fast; give it a beat.
+        let mut c = Command::new("ssh").args(&args[1..]).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log.try_clone()?).process_group(0).spawn().context("spawn ssh tunnel")?;
+        std::thread::sleep(Duration::from_millis(500));
+        if c.try_wait().context("check ssh tunnel during setup")?.is_none() {
+            break c;
+        }
+        if hook_done {
+            let note = hook_note.as_deref().map(|n| format!(" (pre_connect {n})")).unwrap_or_default();
+            anyhow::bail!("ssh tunnel exited during setup{note}; see {}", log_path.display());
+        }
+        hook_done = true;
+        hook_note = crate::server::transport::run_pre_connect(client);
+    };
     let pid = child.id();
     let mut publishing = false;
     let setup = (|| -> Result<()> {
-        // ExitOnForwardFailure makes a bad bind exit fast; give it a beat.
-        std::thread::sleep(Duration::from_millis(500));
-        if child.try_wait().context("check ssh tunnel during setup")?.is_some() {
-            anyhow::bail!("ssh tunnel exited during setup; see {}", log_path.display());
-        }
         // Publish the PID last. A failed setup may leave a port-only record
         // for heal, but must never leave a newly spawned untracked process.
         publishing = true;

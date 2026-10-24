@@ -31,7 +31,7 @@ impl Transport for Fake {
 }
 
 fn client(home: &Path) -> ClientEntry {
-    ClientEntry { name: "remote".into(), local: false, disabled: false, local_bin: None, bin_path: None, queues: Default::default(), default_queue: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), user: "test".into(), port: 22, key: String::new(), password: String::new() }, qroot: home.join("queue").display().to_string(), deploy_root: "/".into(), facts: BTreeMap::new(), billing: None }
+    ClientEntry { name: "remote".into(), local: false, disabled: false, local_bin: None, bin_path: None, queues: Default::default(), default_queue: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), user: "test".into(), port: 22, key: String::new(), password: String::new() }, qroot: home.join("queue").display().to_string(), deploy_root: "/".into(), facts: BTreeMap::new(), billing: None }
 }
 
 #[test]

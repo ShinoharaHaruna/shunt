@@ -31,6 +31,7 @@ shunt touches a machine the user may share with other people. Before registering
    - manual: leave `ssh.password` empty; bootstrap prints the generated `.pub` for the user to install via the vendor console.
 3. **qroot — REQUIRED: ask for the exact path, never silently take a default.** The whole footprint — queue, binary, daemon state — lives inside `<qroot>`. Vendor templates seed `<deploy_root>/queue`, which is fine on a dedicated box but can collide with another tenant's queue on a shared one; get the user to name an explicit `--qroot` they own (e.g. under their work dir). Outside qroot, shunt writes only the optional authorized_keys line and a small self-cleaned daemon-registry entry under `$XDG_STATE_HOME`/`/tmp`. shunt also guards collisions itself: bootstrap claims the qroot via `<qroot>/.shunt-owner` (the client's ssh pubkey) and refuses a queue already claimed by a different install.
 4. **Daemon residency.** By default `shuntd` stays resident after the queue drains. `--exit-on-idle` makes it exit cleanly on drain (the next submit revives it automatically) — the polite choice on shared or heavily-monitored boxes.
+5. **Reachability precondition.** Can the dev machine ssh the box directly, or must something local be established first — a VPN, an overlay interface, a port-forward, a gate to open? Record it as `pre_connect = "<cmd>"` (`--pre-connect` at `client add`/`update`): a `sh -c` snippet that fires once per call after the first connect failure — and before the first attempt while the box is already marked unreachable — then the retries ride whatever it set up. The snippet must be idempotent and non-interactive (stdin is null — no prompts). A precondition needing a resident process hands off to a supervisor (`nmcli`, `systemd`, `autossh`, `openconnect -b`): arranging and supervising whatever keeps it alive is the user's own deployment, never shunt's — a foreground keepalive is killed at the hook's deadline and accomplishes nothing. Where the precondition cannot be automated (manual OTP), write a check that fails fast with a remediation message instead; its stderr rides the unreachable error.
 
 **Two shunt users, one box.** If user A and user B each run their own shunt against box X: under the _same_ unix account (the shared-root-container norm) give each its own qroot — the per-user daemon registry (§3.11) already coordinates idle-shutdown between their daemons, and `.shunt-owner` stops them pointing at one queue by accident. Under _different_ unix accounts their registries can't see each other at all — mark the row `shared` and keep idle poweroff off the table.
 
@@ -54,7 +55,8 @@ An unread `say` or `decide` is exactly what changes what you were about to do: V
 shunt client add rw-a --template autodl
 #    then edit ~/.config/shunt/clients/rw-a.toml:
 #      ssh.host, ssh.port (+ ssh.password for unattended key deploy)
-#      expire, env_setup, shell — and optionally billing.hourly/currency
+#      expire, env_setup, shell — and optionally billing.hourly/currency,
+#      pre_connect (reachability precondition, design.md §4.1)
 
 #    `shunt client templates` lists what --template accepts.
 # 2. Bootstrap: deploys the pubkey via sshpass when ssh.password is

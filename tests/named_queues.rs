@@ -59,7 +59,7 @@ fn wire(t: &LocalTransport, name: &str, tail: &[&str]) -> Result<String> {
 
 /// One local client carrying `train` and `eval` queues.
 fn client(home: &Sandbox) -> Result<registry::ClientEntry> {
-    let mut c = registry::ClientEntry { name: "box".into(), local: true, disabled: false, local_bin: Some(env!("CARGO_BIN_EXE_shunt").into()), bin_path: None, timeout_s: Some(60), ssh_timeout_s: None, shutdown_cmd: None, expire: "unlimited".into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: Default::default(), qroot: String::new(), deploy_root: home.root.display().to_string(), facts: Default::default(), billing: None, queues: Default::default(), default_queue: None };
+    let mut c = registry::ClientEntry { name: "box".into(), local: true, disabled: false, local_bin: Some(env!("CARGO_BIN_EXE_shunt").into()), bin_path: None, timeout_s: Some(60), ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: "unlimited".into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: Default::default(), qroot: String::new(), deploy_root: home.root.display().to_string(), facts: Default::default(), billing: None, queues: Default::default(), default_queue: None };
     for name in ["train", "eval"] {
         c.queues.insert(name.into(), registry::QueueEntry { qroot: home.path(&format!("q/{name}")).display().to_string(), env_setup: String::new(), shell: String::new(), exit_on_idle: false, workers: None });
     }
@@ -174,7 +174,7 @@ fn legacy_default_queue_and_queue_selection_rules() -> Result<()> {
     let home = Sandbox::new()?;
 
     // A flat legacy row resolves as a literal `default` queue.
-    let legacy = registry::ClientEntry { name: "old".into(), local: true, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: "export X=1".into(), shell: "zsh".into(), endpoint_rotates: false, shared: false, exit_on_idle: true, ssh: Default::default(), qroot: home.path("legacy-q").display().to_string(), deploy_root: home.root.display().to_string(), facts: Default::default(), billing: None, queues: Default::default(), default_queue: None };
+    let legacy = registry::ClientEntry { name: "old".into(), local: true, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: "export X=1".into(), shell: "zsh".into(), endpoint_rotates: false, shared: false, exit_on_idle: true, ssh: Default::default(), qroot: home.path("legacy-q").display().to_string(), deploy_root: home.root.display().to_string(), facts: Default::default(), billing: None, queues: Default::default(), default_queue: None };
     registry::save_client(&legacy)?;
     let resolved = registry::load_queue("old", None)?;
     assert_eq!(resolved.name, "default");

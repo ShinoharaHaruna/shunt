@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 fn entry(root: &Path) -> ClientEntry {
-    ClientEntry { name: "tun-test".into(), local: true, disabled: false, local_bin: None, bin_path: None, queues: Default::default(), default_queue: None, timeout_s: None, ssh_timeout_s: None, shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: root.display().to_string(), deploy_root: "/".into(), facts: BTreeMap::new(), billing: None }
+    ClientEntry { name: "tun-test".into(), local: true, disabled: false, local_bin: None, bin_path: None, queues: Default::default(), default_queue: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: root.display().to_string(), deploy_root: "/".into(), facts: BTreeMap::new(), billing: None }
 }
 
 fn tmp(tag: &str) -> PathBuf {
@@ -279,6 +279,47 @@ fn tunnel_argv_disables_mux_before_conn_args() {
     assert!(pos("ControlPath=none") < argv.iter().position(|a| a.starts_with("ControlPath=") && *a != "ControlPath=none").unwrap_or(usize::MAX), "{argv:?}");
     assert!(pos("ControlMaster=no") < pos("ControlMaster=auto"), "{argv:?}");
     assert!(argv.contains(&"/k".to_string()) && argv.contains(&"u@h".to_string()), "{argv:?}");
+}
+
+/// `up`'s spawn has no retry loop of its own (design.md §4.1): a
+/// spawn dead inside the setup window gets exactly ONE retry behind
+/// the client's pre_connect hook — the hook fires once, between
+/// the death and the respawn.
+#[test]
+fn up_retries_setup_death_once_behind_pre_connect() {
+    let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+    let _g = crate::server::transport::ENV_LOCK.lock().unwrap();
+    let home = tmp("pc-up-home");
+    let old_home = std::env::var_os("SHUNT_HOME");
+    std::env::set_var("SHUNT_HOME", &home);
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let count = home.join("count");
+    let marker = home.join("hook");
+    let ssh = bin.join("ssh");
+    std::fs::write(&ssh, format!("#!/bin/sh\nn=$(cat {0} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {0}; [ $n -lt 2 ] && exit 1; exec sleep 30\n", count.display())).unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{}:{old_path}", bin.display()));
+    let root = tmp("pc-up-q");
+    let mut c = entry(&root);
+    c.local = false;
+    c.ssh.host = "h".into();
+    c.ssh.user = "u".into();
+    c.ssh.port = 22;
+    c.pre_connect = format!("echo ran >> {}", marker.display());
+    let t = LocalTransport { bin: PathBuf::from("/bin/sh"), timeout_s: Some(10) };
+    let pid = super::up(&t, &c, Some(1080)).unwrap();
+    assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2", "setup death -> hook -> one respawn");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "ran", "hook fired exactly once");
+    let _ = crate::client::exec::signal_pgid(pid, "KILL");
+    std::env::set_var("PATH", old_path);
+    match old_home {
+        Some(h) => std::env::set_var("SHUNT_HOME", h),
+        None => std::env::remove_var("SHUNT_HOME"),
+    }
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&root).ok();
 }
 
 /// A bare `ssh -R` cmdline must NOT pass liveness when the

@@ -4,7 +4,7 @@
 //! plus `scp` for `copy_to`. ControlMaster mux per client under
 //! `$SHUNT_HOME/cm/` (design.md §4.1).
 
-use super::{cm_dir, exec_timeout_s, join_argv, shell_quote, wait_deadline};
+use super::{cm_dir, exec_timeout_s, join_argv, run_pre_connect, shell_quote, wait_deadline};
 use crate::server::registry::ClientEntry;
 use anyhow::{Context, Result};
 use std::io::Write;
@@ -25,8 +25,12 @@ const RETRY: u32 = 3;
 /// the conn_fail streak and appends the endpoint-drift hint at
 /// `CONN_FAIL_ESCALATE`. Shared by exec and copy_to so a flap over
 /// either channel counts the same way.
-fn unreachable_err(client: &ClientEntry, stderr: &str) -> anyhow::Error {
+fn unreachable_err(client: &ClientEntry, stderr: &str, pre_connect: Option<&str>) -> anyhow::Error {
     let n = crate::server::registry::conn_fail_bump(&client.name);
+    // The remediation attempt is reported before the drift hint —
+    // the reader should see hook ran, then the streak story
+    // (design.md §4.1).
+    let hook = pre_connect.map(|note| format!(" [pre_connect {note}]")).unwrap_or_default();
     let hint = if n >= crate::server::registry::CONN_FAIL_ESCALATE {
         if client.endpoint_rotates {
             format!(" [{n} consecutive connect failures — vendor may have reassigned IP/port on restart; check the console, then `shunt client update {} --host … --port …`]", client.name)
@@ -36,7 +40,7 @@ fn unreachable_err(client: &ClientEntry, stderr: &str) -> anyhow::Error {
     } else {
         String::new()
     };
-    anyhow::anyhow!("ssh {}@{}:{} unreachable rc=255: {}{}", client.ssh.user, client.ssh.host, client.ssh.port, stderr, hint)
+    anyhow::anyhow!("ssh {}@{}:{} unreachable rc=255: {}{}{}", client.ssh.user, client.ssh.host, client.ssh.port, stderr, hook, hint)
 }
 
 fn cm_sock(client: &ClientEntry) -> Result<String> {
@@ -100,6 +104,19 @@ impl super::Transport for SshTransport {
         // MaxStartups` flap). Retry a few times inside the call so a
         // single flap never bubbles up; only an exhausted streak
         // bumps the endpoint-drift counter (design.md §4.1).
+        //
+        // pre_connect (§4.1): a call that starts on a nonzero
+        // conn-fail streak already knows the endpoint is down — the
+        // hook runs BEFORE the first attempt rather than after
+        // another wasted ConnectTimeout. Otherwise it fires after
+        // the first rc-255, once per call; its outcome never gates
+        // the retries but rides the final unreachable error.
+        let mut hook_done = client.pre_connect.is_empty();
+        let mut hook_note: Option<String> = None;
+        if !hook_done && crate::server::registry::conn_fail_read(&client.name) > 0 {
+            hook_note = run_pre_connect(client);
+            hook_done = true;
+        }
         for attempt in 1..=RETRY {
             // process_group(0): the child's pgid equals its pid so a
             // wait_deadline timeout can kill the whole group — a bare
@@ -133,8 +150,12 @@ impl super::Transport for SshTransport {
             // hide the dead endpoint from the drift watchdog
             // (design.md §4.1).
             if rc == 255 {
+                if !hook_done {
+                    hook_done = true;
+                    hook_note = run_pre_connect(client);
+                }
                 if attempt == RETRY {
-                    return Err(unreachable_err(client, &stderr));
+                    return Err(unreachable_err(client, &stderr, hook_note.as_deref()));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1500));
                 continue;
@@ -179,6 +200,14 @@ impl super::Transport for SshTransport {
         // streak bump), feed the drift counter only on exhaustion.
         // Bootstrap pushes the binary through here, so a single
         // `Exceeded MaxStartups` flap must not fail the copy.
+        // pre_connect fires identically to exec: eager on a nonzero
+        // streak, else after the first rc-255, once per call.
+        let mut hook_done = client.pre_connect.is_empty();
+        let mut hook_note: Option<String> = None;
+        if !hook_done && crate::server::registry::conn_fail_read(&client.name) > 0 {
+            hook_note = run_pre_connect(client);
+            hook_done = true;
+        }
         for attempt in 1..=RETRY {
             let child = Command::new("scp").args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).spawn().context("spawn scp")?;
             let out = wait_deadline(child, exec_timeout_s(), "scp")?;
@@ -188,9 +217,13 @@ impl super::Transport for SshTransport {
             }
             let rc = out.status.code().unwrap_or(-1);
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if rc == 255 && !hook_done {
+                hook_done = true;
+                hook_note = run_pre_connect(client);
+            }
             if rc != 255 || attempt == RETRY {
                 if rc == 255 {
-                    return Err(unreachable_err(client, &stderr));
+                    return Err(unreachable_err(client, &stderr, hook_note.as_deref()));
                 }
                 anyhow::bail!("scp to {} failed rc={}: {}", client.name, rc, stderr);
             }
@@ -419,6 +452,138 @@ mod tests {
             assert_eq!(out.stdout, format!("{path}\0").as_bytes());
             assert!(!marker.exists(), "remote path executed a shell substitution");
         }
+    }
+
+    /// pre_connect (design.md §4.1): fires once after the first
+    /// rc-255, then the remaining retries ride whatever it
+    /// established.
+    #[test]
+    fn pre_connect_fires_once_on_first_255() {
+        let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-ssh-pc1-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let dir = std::env::temp_dir().join(format!("shunt-pc1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let count = dir.join("count");
+        let marker = dir.join("hook");
+        fake_ssh(&format!("n=$(cat {0} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {0}; [ $n -lt 2 ] && exit 255; exit 0", count.display()));
+        let mut c = ssh_client();
+        c.pre_connect = format!("echo ran >> {}", marker.display());
+        let out = SshTransport.exec(&c, &["status".into()], None).unwrap();
+        assert_eq!(out, "");
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2", "first 255 -> hook -> retry succeeds");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "ran", "hook fired exactly once");
+        std::env::remove_var("SHUNT_HOME");
+        restore_path();
+    }
+
+    /// The eager case: a call that starts on a nonzero conn_fail
+    /// streak runs the hook BEFORE the first attempt — not after
+    /// another wasted ConnectTimeout.
+    #[test]
+    fn pre_connect_runs_eagerly_on_nonzero_streak() {
+        let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-ssh-pc2-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let dir = std::env::temp_dir().join(format!("shunt-pc2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let order = dir.join("order");
+        fake_ssh(&format!("echo ssh >> {}; exit 0", order.display()));
+        let mut c = ssh_client();
+        c.pre_connect = format!("echo hook >> {}", order.display());
+        // Two bumps = streak 2; the success below resets it.
+        crate::server::registry::conn_fail_bump(&c.name);
+        crate::server::registry::conn_fail_bump(&c.name);
+        SshTransport.exec(&c, &["status".into()], None).unwrap();
+        assert_eq!(std::fs::read_to_string(&order).unwrap(), "hook\nssh\n", "hook must precede the first attempt when the streak is nonzero");
+        std::env::remove_var("SHUNT_HOME");
+        restore_path();
+    }
+
+    /// A failing hook never gates the retries, but its rc + stderr
+    /// tail must ride the unreachable error.
+    #[test]
+    fn pre_connect_failure_named_in_unreachable_error() {
+        let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-ssh-pc3-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let dir = std::env::temp_dir().join(format!("shunt-pc3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let count = dir.join("count");
+        fake_ssh(&format!("n=$(cat {0} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {0}; exit 255", count.display()));
+        let mut c = ssh_client();
+        c.pre_connect = "echo 'uplink is down' >&2; exit 1".into();
+        let err = SshTransport.exec(&c, &["status".into()], None).unwrap_err();
+        assert!(err.to_string().contains("pre_connect rc=1: uplink is down"), "{err}");
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "3", "a failed hook must not gate the remaining retries");
+        std::env::remove_var("SHUNT_HOME");
+        restore_path();
+    }
+
+    /// A hook hitting its own deadline is reported as `timed out`,
+    /// not silently dropped.
+    #[test]
+    fn pre_connect_timeout_named_in_unreachable_error() {
+        let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-ssh-pc4-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        std::env::set_var("SHUNT_PRE_CONNECT_TIMEOUT_S", "1");
+        fake_ssh("exit 255");
+        let mut c = ssh_client();
+        c.pre_connect = "sleep 30".into();
+        let err = SshTransport.exec(&c, &["status".into()], None).unwrap_err();
+        assert!(err.to_string().contains("pre_connect timed out"), "{err}");
+        std::env::remove_var("SHUNT_PRE_CONNECT_TIMEOUT_S");
+        std::env::remove_var("SHUNT_HOME");
+        restore_path();
+    }
+
+    /// A wire-level failure (rc 1 + `{"ok":false}`) is a REMOTE
+    /// error, not a reachability one — the hook must stay out of it.
+    #[test]
+    fn wire_error_does_not_trigger_pre_connect() {
+        let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-ssh-pc5-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let dir = std::env::temp_dir().join(format!("shunt-pc5-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("hook");
+        fake_ssh("printf '%s\\n' '{\"protocol\":1,\"ok\":false,\"error\":\"sequence space exhausted\"}'; exit 1");
+        let mut c = ssh_client();
+        c.pre_connect = format!("echo ran >> {}", marker.display());
+        let err = SshTransport.exec(&c, &["enqueue".into()], None).unwrap_err();
+        assert!(err.to_string().contains("sequence space exhausted"), "{err}");
+        assert!(!marker.exists(), "wire errors are remote faults — the reachability hook must not fire");
+        std::env::remove_var("SHUNT_HOME");
+        restore_path();
+    }
+
+    /// A deadline-hit hang is not a flap: the exec bails without
+    /// retry, streak bump — or hook.
+    #[test]
+    fn deadline_hang_does_not_trigger_pre_connect() {
+        let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-ssh-pc6-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        std::env::set_var("SHUNT_SSH_EXEC_TIMEOUT_S", "1");
+        let dir = std::env::temp_dir().join(format!("shunt-pc6-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("hook");
+        fake_ssh("sleep 30");
+        let mut c = ssh_client();
+        c.pre_connect = format!("echo ran >> {}", marker.display());
+        let err = SshTransport.exec(&c, &["status".into()], None).unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert!(!marker.exists(), "a hang is not a reachability failure — the hook must not fire");
+        std::env::remove_var("SHUNT_SSH_EXEC_TIMEOUT_S");
+        std::env::remove_var("SHUNT_HOME");
+        restore_path();
     }
 
     #[test]

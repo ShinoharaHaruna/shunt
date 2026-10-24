@@ -229,18 +229,19 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Queue(c) => queues::cmd_queue(&c),
 
         Command::Client(c) => match c.action {
-            ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { queue: a.queue, host: a.host, port: a.port, user: a.user, key: a.key, password: a.password, qroot: a.qroot, deploy_root: a.deploy_root, local: a.local, expire: a.expire, env_setup: a.env_setup, shell: a.shell, endpoint_rotates: a.endpoint_rotates, bin_path: a.bin_path, shared: a.shared, exit_on_idle: a.exit_on_idle }),
+            ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { queue: a.queue, host: a.host, port: a.port, user: a.user, key: a.key, password: a.password, qroot: a.qroot, deploy_root: a.deploy_root, local: a.local, expire: a.expire, env_setup: a.env_setup, shell: a.shell, endpoint_rotates: a.endpoint_rotates, bin_path: a.bin_path, pre_connect: a.pre_connect, shared: a.shared, exit_on_idle: a.exit_on_idle }),
             ClientAction::Rename { old, new } => crate::server::client_ops::rename(&old, &new),
             // Fold the --endpoint-rotates / --no-endpoint-rotates pair
             // into tri-state: Some(true) sets, Some(false) clears,
             // None leaves the row field untouched.
-            ClientAction::Update { name, host, port, user, password, endpoint_rotates, no_endpoint_rotates } => crate::server::client_ops::update(
+            ClientAction::Update { name, host, port, user, password, endpoint_rotates, no_endpoint_rotates, pre_connect } => crate::server::client_ops::update(
                 &name,
                 crate::server::client_ops::EndpointUpdate {
                     host,
                     port,
                     user,
                     password,
+                    pre_connect,
                     endpoint_rotates: if endpoint_rotates {
                         Some(true)
                     } else if no_endpoint_rotates {

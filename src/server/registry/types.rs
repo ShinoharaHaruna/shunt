@@ -35,6 +35,14 @@ pub struct ClientEntry {
     /// SSH transport: connect timeout override in seconds (default 15).
     #[serde(default)]
     pub ssh_timeout_s: Option<u64>,
+    /// Dev-machine shell snippet enforcing a reachability
+    /// precondition before ssh (design.md §4.1): fires once per call
+    /// after the first rc-255 — or before the first attempt while
+    /// the conn_fail streak is nonzero — and `tunnel up` retries a
+    /// setup-dead spawn once behind it. Its result never gates
+    /// retries; it rides the unreachable error. Empty = no hook.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pre_connect: String,
     /// Command this box execs when idle-shutdown fires. Pushed to
     /// `<qroot>/shutdown_cmd` by `shutdown -c <name> on`; precedence
     /// for the pushed value is `--cmd` flag > this field > the
