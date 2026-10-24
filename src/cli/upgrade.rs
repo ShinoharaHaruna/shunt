@@ -63,9 +63,10 @@ fn upgrade_local(a: &UpgradeArgs, release: &release::Release) -> Result<()> {
     }
     handoff_local_daemons();
     // The dashboard re-execs under the same §3.5a gate: a
-    // pre-handler serve image is refused by web::restart with the
-    // down+up remediation rather than killed by an unhandled USR2.
-    if let Err(e) = crate::server::web::restart() {
+    // pre-handler serve image is refused with the down+up
+    // remediation rather than killed by an unhandled USR2. Signal-
+    // only — a stopped serve must not be started by an upgrade.
+    if let Err(e) = crate::server::web::handoff_if_running() {
         eprintln!("serve not handed off: {e:#}");
     }
     // The dispatcher has no pidfile, so its running image is

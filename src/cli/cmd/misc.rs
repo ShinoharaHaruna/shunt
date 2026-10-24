@@ -18,16 +18,11 @@ pub fn serve(a: &ServeArgs) -> Result<()> {
         // Bare `shunt serve` teaches the subcommands — same
         // lost-user affordance as `dlog`/`init`.
         None => print_subhelp("serve"),
-        Some(ServeAction::Run(f)) => crate::server::web::run(f.clone().into_opts()),
-        Some(ServeAction::Up(f)) => crate::server::web::up(&f.clone().into_opts()),
+        Some(ServeAction::Run(f)) => crate::server::web::run(f.resolve()),
+        Some(ServeAction::Up(f)) => crate::server::web::up(f),
         Some(ServeAction::Down) => crate::server::web::down(),
-        Some(ServeAction::Restart) => match crate::server::web::restart()? {
-            Some(_) => Ok(()),
-            None => {
-                println!("serve not running — `shunt serve up` starts one");
-                Ok(())
-            }
-        },
+        Some(ServeAction::Restart(f)) => crate::server::web::restart(f),
+        Some(ServeAction::Status { json }) => crate::server::web::status(*json),
     }
 }
 

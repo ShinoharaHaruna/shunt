@@ -21,41 +21,27 @@ pub struct ServeArgs {
 #[derive(Subcommand)]
 pub enum ServeAction {
     /// Foreground, blocking — Ctrl-C stops
-    Run(ServeFlags),
+    Run(crate::server::web::ServeFlags),
     /// Detached background start: pidfile + serve.log under
-    /// $SHUNT_HOME; refuse when one is already up
-    Up(ServeFlags),
+    /// $SHUNT_HOME. Converges when one is already up (explicit
+    /// flags that differ from the running argv are refused)
+    Up(crate::server::web::ServeFlags),
     /// Stop the background instance (SIGTERM, verifies the pidfile's
-    /// cmdline before signaling)
+    /// cmdline before signaling; a no-op when nothing runs)
     Down,
     /// Handoff-restart the background instance (SIGUSR2 re-exec,
-    /// §3.5a; a pre-handler image is refused, not killed)
-    Restart,
-}
-
-#[derive(Args, Clone)]
-pub struct ServeFlags {
-    /// Listen address (default 127.0.0.1 — reach a remote dev
-    /// machine with `ssh -L PORT:127.0.0.1:PORT <dev>`)
-    #[arg(long, default_value = "127.0.0.1")]
-    pub bind: String,
-    /// Listen port
-    #[arg(long, default_value_t = 8747)]
-    pub port: u16,
-    /// Access token — REQUIRED when --bind is not loopback. Checked
-    /// as ?token=, the x-shunt-token header, or Authorization: Bearer
-    #[arg(long)]
-    pub token: Option<String>,
-    /// Wire-probe cadence in seconds for the clients section (one
-    /// ssh exec per queue per tick); local state updates every 2s
-    #[arg(long, default_value_t = 10)]
-    pub interval_s: u64,
-}
-
-impl ServeFlags {
-    pub fn into_opts(self) -> crate::server::web::ServeOpts {
-        crate::server::web::ServeOpts { bind: self.bind, port: self.port, token: self.token, interval_s: self.interval_s }
-    }
+    /// §3.5a; a pre-handler image is refused, not killed). Falls
+    /// through to `up` when nothing runs; on a live instance the
+    /// flags are ignored with a warning — re-exec keeps the
+    /// running argv
+    Restart(crate::server::web::ServeFlags),
+    /// Liveness, version, endpoint, and handoff capability of the
+    /// running instance
+    Status {
+        /// JSON output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args)]

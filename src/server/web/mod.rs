@@ -35,6 +35,126 @@ pub struct ServeOpts {
     pub interval_s: u64,
 }
 
+pub const DEFAULT_BIND: &str = "127.0.0.1";
+pub const DEFAULT_PORT: u16 = 8747;
+pub const DEFAULT_INTERVAL_S: u64 = 10;
+
+/// `run`/`up`/`restart` flags. All-Option fields: `None` = not
+/// passed on the command line, so `up`/`restart` can tell an
+/// explicit flag from a built-in default when converging against
+/// a live instance's own argv.
+#[derive(clap::Args, Clone)]
+pub struct ServeFlags {
+    /// Listen address (default 127.0.0.1 — reach a remote dev
+    /// machine with `ssh -L PORT:127.0.0.1:PORT <dev>`)
+    #[arg(long)]
+    pub bind: Option<String>,
+    /// Listen port (default 8747)
+    #[arg(long)]
+    pub port: Option<u16>,
+    /// Access token — REQUIRED when --bind is not loopback. Checked
+    /// as ?token=, the x-shunt-token header, or Authorization: Bearer
+    #[arg(long)]
+    pub token: Option<String>,
+    /// Wire-probe cadence in seconds for the clients section (one
+    /// ssh exec per queue per tick); local state updates every 2s
+    /// (default 10)
+    #[arg(long)]
+    pub interval_s: Option<u64>,
+}
+
+impl ServeFlags {
+    /// Effective options for actually launching: explicit flags
+    /// over the built-in defaults. The converge paths in
+    /// `up`/`restart` compare the explicit subset against the
+    /// running argv instead.
+    pub fn resolve(&self) -> ServeOpts {
+        ServeOpts { bind: self.bind.clone().unwrap_or_else(|| DEFAULT_BIND.to_string()), port: self.port.unwrap_or(DEFAULT_PORT), token: self.token.clone(), interval_s: self.interval_s.unwrap_or(DEFAULT_INTERVAL_S) }
+    }
+}
+
+/// Flag values recovered from a live `serve run` argv — what the
+/// instance was actually started with. `None` marks a flag absent
+/// from the argv (hand-typed `run`), which reads as the built-in
+/// default everywhere it matters.
+#[derive(Default)]
+struct LiveFlags {
+    bind: Option<String>,
+    port: Option<u16>,
+    token: Option<String>,
+    interval_s: Option<u64>,
+}
+
+/// Pull `--bind/--port/--token/--interval-s` out of a `serve run`
+/// argv — both `--flag v` (`up` generates this) and `--flag=v`.
+fn live_flags(argv: &[&[u8]]) -> LiveFlags {
+    let mut lf = LiveFlags::default();
+    let mut i = 0;
+    while i < argv.len() {
+        let a = std::str::from_utf8(argv[i]).unwrap_or("");
+        let (flag, inline) = match a.split_once('=') {
+            Some((k, v)) => (k, Some(v.to_string())),
+            None => (a, None),
+        };
+        if matches!(flag, "--bind" | "--port" | "--token" | "--interval-s") {
+            let v = match inline {
+                Some(v) => Some(v),
+                None => {
+                    i += 1;
+                    argv.get(i).and_then(|e| std::str::from_utf8(e).ok()).map(str::to_string)
+                }
+            };
+            match flag {
+                "--bind" => lf.bind = v,
+                "--port" => lf.port = v.and_then(|s| s.parse().ok()),
+                "--interval-s" => lf.interval_s = v.and_then(|s| s.parse().ok()),
+                _ => lf.token = v,
+            }
+        }
+        i += 1;
+    }
+    lf
+}
+
+/// Explicitly-passed flags vs the live instance's argv — the diffs
+/// a converge must not silently drop. Token diffs never print the
+/// value.
+fn flag_mismatches(explicit: &ServeFlags, live: &LiveFlags) -> Vec<String> {
+    let mut out = vec![];
+    if let Some(b) = &explicit.bind {
+        let cur = live.bind.as_deref().unwrap_or(DEFAULT_BIND);
+        if b != cur {
+            out.push(format!("--bind {cur} → {b}"));
+        }
+    }
+    if let Some(p) = explicit.port {
+        let cur = live.port.unwrap_or(DEFAULT_PORT);
+        if p != cur {
+            out.push(format!("--port {cur} → {p}"));
+        }
+    }
+    if let Some(i) = explicit.interval_s {
+        let cur = live.interval_s.unwrap_or(DEFAULT_INTERVAL_S);
+        if i != cur {
+            out.push(format!("--interval-s {cur} → {i}"));
+        }
+    }
+    if explicit.token.is_some() && explicit.token != live.token {
+        out.push("--token differs".to_string());
+    }
+    out
+}
+
+/// The live instance's pid plus its argv-derived flags, or None.
+/// Shared by the converge paths (`up`/`restart`) and `status`.
+fn running_instance() -> Result<Option<(u32, LiveFlags)>> {
+    let Some(pid) = alive()? else {
+        return Ok(None);
+    };
+    let live = crate::proto::proc::read_cmdline(pid).ok().map(|raw| live_flags(&crate::proto::proc::split_argv(&raw))).unwrap_or_default();
+    Ok(Some((pid, live)))
+}
+
 // ---- lifecycle (`serve up` / `serve down`) ----
 // Same discipline as the queue daemon's §3.4: a pidfile under
 // $SHUNT_HOME + a /proc cmdline identity check, never pgrep; the
@@ -97,13 +217,21 @@ fn ensure_bind_allowed(opts: &ServeOpts) -> Result<()> {
 }
 
 /// `serve up`: detach `serve run …` as a background child — its
-/// stdio lands in serve.log, its pid in serve.pid. Idempotent-refuse
-/// when one is already alive.
-pub fn up(opts: &ServeOpts) -> Result<()> {
-    if let Some(pid) = alive()? {
-        anyhow::bail!("already running (pid {pid}) — `shunt serve down` first");
+/// stdio lands in serve.log, its pid in serve.pid. Converges when
+/// one is already up, but an explicitly-passed flag that differs
+/// from the running argv is refused — converging would silently
+/// drop the intent.
+pub fn up(flags: &ServeFlags) -> Result<()> {
+    if let Some((pid, live)) = running_instance()? {
+        let miss = flag_mismatches(flags, &live);
+        if miss.is_empty() {
+            println!("already up (pid {pid} — http://{}:{})", live.bind.as_deref().unwrap_or(DEFAULT_BIND), live.port.unwrap_or(DEFAULT_PORT));
+            return Ok(());
+        }
+        anyhow::bail!("already running (pid {pid}) on different flags: {} — `serve down` first to change them", miss.join(", "));
     }
-    ensure_bind_allowed(opts)?;
+    let opts = flags.resolve();
+    ensure_bind_allowed(&opts)?;
     let dir = crate::server::registry::shunt_home()?;
     std::fs::create_dir_all(&dir)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(log_file()?)?;
@@ -145,7 +273,10 @@ pub fn up(opts: &ServeOpts) -> Result<()> {
 pub fn down() -> Result<()> {
     use crate::proto::proc::{self, ProcProbe};
     let pidf = pid_file()?;
-    let pid: u32 = std::fs::read_to_string(&pidf).ok().and_then(|s| s.trim().parse().ok()).context("not running — no serve.pid under $SHUNT_HOME")?;
+    let Some(pid) = std::fs::read_to_string(&pidf).ok().and_then(|s| s.trim().parse::<u32>().ok()) else {
+        println!("serve not running");
+        return Ok(());
+    };
     match proc::probe(pid, proc::read_cmdline, is_serve_cmdline) {
         ProcProbe::Dead => {
             let _ = std::fs::remove_file(&pidf);
@@ -170,14 +301,12 @@ pub fn down() -> Result<()> {
     Ok(())
 }
 
-/// `serve restart`: the §3.5a handoff — verify the pidfile's
-/// identity, then SIGUSR2 the instance; it re-execs its own argv
-/// against its image path. `serve.ver` gates capability: an absent
-/// file means the running image predates the handler and USR2
-/// would default-kill it — refuse with the down+up remediation
-/// instead. Returns the signaled pid, `None` when nothing runs.
-pub fn restart() -> Result<Option<u32>> {
-    let Some(pid) = alive()? else {
+/// The §3.5a signal half of `restart`: `serve.ver` gate + USR2 +
+/// report on a live instance, `None` when nothing runs. `upgrade`
+/// calls this directly — it must hand off a live serve but never
+/// start one.
+pub(crate) fn handoff_if_running() -> Result<Option<u32>> {
+    let Some((pid, _)) = running_instance()? else {
         return Ok(None);
     };
     let ver = std::fs::read_to_string(ver_file()?).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
@@ -190,6 +319,51 @@ pub fn restart() -> Result<Option<u32>> {
     }
     println!("serve handed off (pid {pid}, was {from_ver}) — re-execs its own argv on the new image");
     Ok(Some(pid))
+}
+
+/// `serve restart`: converge on a running new-image instance.
+/// Nothing live → fall through to `up` (`queue restart` → `start`
+/// is the same posture). Live → SIGUSR2 handoff; explicit flags
+/// warn rather than apply, because re-exec preserves the running
+/// argv and only down+up can change them.
+pub fn restart(flags: &ServeFlags) -> Result<()> {
+    let Some((_pid, live)) = running_instance()? else {
+        return up(flags);
+    };
+    let miss = flag_mismatches(flags, &live);
+    if !miss.is_empty() {
+        eprintln!("note: running instance keeps its own flags ({}); `serve down`+`serve up` to change them", miss.join(", "));
+    }
+    handoff_if_running().map(|_| ())
+}
+
+/// `serve status`: liveness, recorded version, endpoint parsed out
+/// of the running argv, handoff capability (`serve.ver` present),
+/// and the log path — one human line or `--json`.
+pub fn status(json: bool) -> Result<()> {
+    match running_instance()? {
+        None => {
+            if json {
+                println!("{}", json!({"running": false}));
+            } else {
+                println!("serve: not running");
+            }
+        }
+        Some((pid, live)) => {
+            let ver = std::fs::read_to_string(ver_file()?).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            let handoff = ver.is_some();
+            let bind = live.bind.unwrap_or_else(|| DEFAULT_BIND.to_string());
+            let port = live.port.unwrap_or(DEFAULT_PORT);
+            if json {
+                println!("{}", json!({"running": true, "pid": pid, "ver": ver, "bind": bind, "port": port, "handoff": handoff, "log": log_file()?.display().to_string()}));
+            } else {
+                let v = ver.unwrap_or_else(|| "unknown".into());
+                let hf = if handoff { "handoff-capable" } else { "pre-handoff image — restart refuses; `serve down`+`serve up` to upgrade" };
+                println!("serve up: pid {pid} — http://{bind}:{port} — {v} — {hf} — log {}", log_file()?.display());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Server-local sections refresh at this fixed cadence: fs reads
