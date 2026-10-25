@@ -120,6 +120,30 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Re
     let resolved = registry::load_queue(name, a.queue.as_deref())?;
     let queue = &resolved.name;
     let c = &resolved.client;
+    // A local row has no box binary: its daemon is spawned from the
+    // dev machine's own image and re-execs self_exe() on restart, so
+    // <qroot>/bin/shunt is never deployed. Smoking that missing path
+    // misreports "compat error", and shipping the musl asset would
+    // install an orphan nothing execs — `shunt upgrade` (no -c) is
+    // the verb that upgrades the shared binary.
+    if c.local {
+        let cur = env!("CARGO_PKG_VERSION");
+        let newer = release::semver_newer(latest, cur);
+        if a.check || a.json {
+            let j = serde_json::json!({"action": "check", "client": name, "queue": queue, "local": true, "current": cur, "latest": latest, "newer": newer});
+            if a.json {
+                println!("{j}");
+                return Ok(());
+            }
+        }
+        if a.check {
+            let state = if newer { format!("new release available: {cur} → {latest} — `shunt upgrade` (no -c) upgrades it") } else { "up to date".into() };
+            println!("{name}/{queue}: local row — daemon runs the dev machine's binary ({cur}); {state}");
+            return Ok(());
+        }
+        println!("{name}/{queue}: local row — daemon runs the dev machine's binary ({cur}); nothing to upgrade — `shunt upgrade` (no -c) covers it");
+        return Ok(());
+    }
     let t = transport::transport_for(c);
     let bin = shunt_bin(c);
     // The remote --version doubles as the §15 compat smoke: loader
