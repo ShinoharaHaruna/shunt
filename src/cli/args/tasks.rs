@@ -253,6 +253,36 @@ pub struct PrioArgs {
 }
 
 #[derive(Args)]
+pub struct CleanArgs {
+    /// Remove every pending entry
+    #[arg(long)]
+    pub pending: bool,
+    /// Remove the live done/ listing
+    #[arg(long)]
+    pub done: bool,
+    /// Remove the live failed/ listing
+    #[arg(long)]
+    pub failed: bool,
+    /// Empty done/.archive/ and failed/.archive/ — the §3.9 cap
+    /// overflow no other verb reaches
+    #[arg(long)]
+    pub archive: bool,
+    /// All four sets; running/ is never a clean target (§3.9b)
+    #[arg(long)]
+    pub all: bool,
+    /// Forward to a client over SSH (server side)
+    #[arg(short, long)]
+    pub client: Option<String>,
+    #[arg(long)]
+    pub root: Option<String>,
+    #[arg(long)]
+    pub json: bool,
+    /// Named queue on the selected server client
+    #[arg(long, conflicts_with = "root")]
+    pub queue: Option<String>,
+}
+
+#[derive(Args)]
 pub struct WorkersArgs {
     /// New pool size; omitted = report current resolved value
     pub n: Option<u32>,

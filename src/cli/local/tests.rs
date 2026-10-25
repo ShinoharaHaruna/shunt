@@ -1,7 +1,7 @@
 use super::logs::{render_dlog_line, tail_bytes};
 use super::tasks::find_task;
-use super::{agent_cancel, agent_cat, agent_kill, agent_prio, logs_wire_tail, workers_wire_tail};
-use crate::cli::args::{CatArgs, LogsArgs, PatternArgs, PrioArgs, WorkerAction, WorkersArgs};
+use super::{agent_cancel, agent_cat, agent_clean, agent_kill, agent_prio, logs_wire_tail, workers_wire_tail};
+use crate::cli::args::{CatArgs, CleanArgs, LogsArgs, PatternArgs, PrioArgs, WorkerAction, WorkersArgs};
 
 /// Both the one-shot `dlog` render and `logs -f`'s appended-
 /// line render must go through the same JSONL→text transform
@@ -179,5 +179,34 @@ fn prio_refuses_cross_shape_target() {
     let args = PrioArgs { pattern: "0001_b".into(), n: 2, client: None, queue: None, root: Some(root.display().to_string()), json: false };
     let err = agent_prio(&args).unwrap_err().to_string();
     assert!(err.contains("target name exists"), "dir->flat not refused: {err}");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// §3.9b: bare `clean` must refuse with per-track counts — a silent
+/// no-op would read as success and a default-on verb would be a
+/// footgun. The counts tell the operator what each flag would take.
+#[test]
+fn clean_bare_refuses_with_track_counts() {
+    let root = tmp_root("clean-bare");
+    for t in ["pending", "running", "done", "failed"] {
+        std::fs::create_dir_all(root.join(t)).unwrap();
+    }
+    std::fs::create_dir_all(root.join("pending").join("0100_a")).unwrap();
+    std::fs::create_dir_all(root.join("running").join("0101_r")).unwrap();
+    std::fs::create_dir_all(root.join("done/.archive/0090_z")).unwrap();
+    let a = CleanArgs { pending: false, done: false, failed: false, archive: false, all: false, client: None, queue: None, root: Some(root.display().to_string()), json: false };
+    let err = agent_clean(&a).unwrap_err().to_string();
+    assert!(err.contains("nothing selected"), "{err}");
+    assert!(err.contains("pending:1"), "{err}");
+    assert!(err.contains("archive:1"), "{err}");
+    assert!(err.contains("shunt kill"), "{err}");
+    // Nothing moved.
+    assert!(root.join("pending/0100_a").exists());
+
+    // A selected flag runs the sweep.
+    let a = CleanArgs { pending: true, ..a };
+    agent_clean(&a).unwrap();
+    assert!(!root.join("pending/0100_a").exists());
+    assert!(root.join("running/0101_r").exists());
     std::fs::remove_dir_all(&root).ok();
 }

@@ -3,7 +3,7 @@
 use anyhow::{Context as _, Result};
 
 use super::{jfail, jfields, jobj, jprint, local_root, wire};
-use crate::cli::args::{CatArgs, EnqueueArgs, NewArgs, PatternArgs, PrioArgs};
+use crate::cli::args::{CatArgs, CleanArgs, EnqueueArgs, NewArgs, PatternArgs, PrioArgs};
 
 pub(crate) fn agent_enqueue(a: &EnqueueArgs) -> Result<()> {
     wire(a.json, enqueue_impl(a))
@@ -153,6 +153,31 @@ fn cancel_impl(a: &PatternArgs) -> Result<()> {
         jprint(jobj(jfields(serde_json::json!({"name": name}))));
     } else {
         println!("cancelled: {name}");
+    }
+    Ok(())
+}
+
+pub(crate) fn agent_clean(a: &CleanArgs) -> Result<()> {
+    wire(a.json, clean_impl(a))
+}
+
+fn clean_impl(a: &CleanArgs) -> Result<()> {
+    let root = local_root(&a.root)?;
+    let sets = crate::client::queue::CleanSets { pending: a.pending || a.all, done: a.done || a.all, failed: a.failed || a.all, archive: a.archive || a.all };
+    if !sets.any() {
+        // Refuse with the per-track counts — the operator should
+        // see what each flag would take, not a bare error (§3.9b).
+        let n = |d: &str| crate::client::queue::list_entries(&root, d).map(|v| v.len()).unwrap_or(0);
+        return jfail(a.json, &format!("nothing selected — queue holds pending:{} running:{} done:{} failed:{} archive:{}; pass --pending/--done/--failed/--archive/--all (running/ is never a clean target — `shunt kill` reaches those)", n("pending"), n("running"), n("done"), n("failed"), n("done/.archive") + n("failed/.archive")));
+    }
+    let r = crate::client::queue::clean(&root, &sets);
+    if a.json {
+        jprint(jobj(jfields(serde_json::json!({"cleaned": {"pending": r.pending, "done": r.done, "failed": r.failed, "archive": r.archive}, "skipped": r.skipped, "errors": r.errors}))));
+    } else {
+        println!("cleaned: pending={} done={} failed={} archive={} skipped={}", r.pending, r.done, r.failed, r.archive, r.skipped);
+        for e in &r.errors {
+            eprintln!("error: {e}");
+        }
     }
     Ok(())
 }

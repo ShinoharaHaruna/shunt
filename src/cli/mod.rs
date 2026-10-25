@@ -99,6 +99,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Cancel(a) => cmd::cancel(&a),
         Command::Prio(a) => cmd::prio(&a),
         Command::Kill(a) => cmd::kill(&a),
+        Command::Clean(a) => cmd::clean(&a),
         Command::Workers(a) => cmd::workers(&a),
         Command::Shutdown(a) => cmd::shutdown(&a),
         Command::Probe(a) => cmd::probe(&a),

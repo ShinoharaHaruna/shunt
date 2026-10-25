@@ -231,3 +231,95 @@ fn next_seq_corrupt_counter_bails() {
     assert_eq!(next_seq(&root).unwrap(), SEQ_INIT + 1);
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// §3.9b: a clean sweep removes only the selected sets — pending
+/// and archive here — while running/, the live terminal listings,
+/// and every sidecar story stay untouched.
+#[test]
+fn clean_selected_sets_only() {
+    let root = tmp_root("cleansets");
+    for n in ["0100_a", "0101_b"] {
+        std::fs::create_dir_all(root.join(format!("pending/{n}"))).unwrap();
+        std::fs::write(root.join(format!("pending/{n}/task.sh")), "echo hi\n").unwrap();
+    }
+    std::fs::write(root.join("pending/0102_c.sh"), "echo c\n").unwrap();
+    std::fs::write(root.join("pending/0102_c.sh.retry_after"), "9999999999\n").unwrap();
+    std::fs::create_dir_all(root.join("running/0103_r")).unwrap();
+    std::fs::create_dir_all(root.join("done/0090_d")).unwrap();
+    std::fs::create_dir_all(root.join("failed/0091_f")).unwrap();
+    std::fs::create_dir_all(root.join("done/.archive/0001_anc")).unwrap();
+    std::fs::create_dir_all(root.join("done/.archive/0002_anc")).unwrap();
+    std::fs::create_dir_all(root.join("failed/.archive/0003_anc")).unwrap();
+
+    let r = clean(&root, &CleanSets { pending: true, archive: true, ..Default::default() });
+    assert_eq!((r.pending, r.archive, r.done, r.failed, r.skipped), (3, 3, 0, 0, 0));
+    assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+    assert!(pending_list(&root).unwrap().is_empty());
+    // Flat entry's sidecars went with it — no `.sh.*` residue.
+    let leftovers: Vec<_> = std::fs::read_dir(root.join("pending")).unwrap().flatten().collect();
+    assert!(leftovers.is_empty());
+    assert_eq!(running_list(&root).unwrap(), vec!["0103_r".to_string()]);
+    assert_eq!(list_entries(&root, "done").unwrap(), vec!["0090_d".to_string()]);
+    assert_eq!(list_entries(&root, "failed").unwrap(), vec!["0091_f".to_string()]);
+    assert!(list_entries(&root, "done/.archive").unwrap().is_empty());
+    assert!(list_entries(&root, "failed/.archive").unwrap().is_empty());
+    // The run's own trash dir must not survive.
+    let stray: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".clean-")).collect();
+    assert!(stray.is_empty());
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// `--all` clears every non-running set; running/ is never a
+/// clean target — it answers to `kill` (§3.9a), not janitorial.
+#[test]
+fn clean_all_leaves_running_untouched() {
+    let root = tmp_root("cleanall");
+    std::fs::create_dir_all(root.join("pending/0100_a")).unwrap();
+    std::fs::create_dir_all(root.join("running/0101_r")).unwrap();
+    std::fs::write(root.join("done/0102_d.sh"), "echo d\n").unwrap();
+    std::fs::write(root.join("done/0102_d.sh.log"), "log\n").unwrap();
+    std::fs::write(root.join("done/0102_d.sh.exit"), "0\n").unwrap();
+    std::fs::create_dir_all(root.join("failed/.archive/0103_f")).unwrap();
+
+    let r = clean(&root, &CleanSets { pending: true, done: true, failed: true, archive: true });
+    assert_eq!((r.pending, r.done, r.failed, r.archive), (1, 1, 0, 1));
+    assert_eq!(running_list(&root).unwrap(), vec!["0101_r".to_string()]);
+    assert!(pending_list(&root).unwrap().is_empty());
+    assert!(list_entries(&root, "done").unwrap().is_empty());
+    let leftovers: Vec<_> = std::fs::read_dir(root.join("done")).unwrap().flatten().filter(|e| e.file_name() != ".archive").collect();
+    assert!(leftovers.is_empty());
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Stale `.clean-*` trash (dead owner pid, unparsable name, or
+/// residue of this same pid's earlier run) is swept before the
+/// selected sets — it holds only doomed entries.
+#[test]
+fn clean_sweeps_stale_trash_dirs() {
+    let root = tmp_root("cleantrash");
+    std::fs::create_dir_all(root.join(".clean-notapid/done/0001_x")).unwrap();
+    std::fs::create_dir_all(root.join(format!(".clean-{}/pending/0002_y", std::process::id()))).unwrap();
+    std::fs::create_dir_all(root.join("pending/0100_a")).unwrap();
+    let r = clean(&root, &CleanSets { pending: true, ..Default::default() });
+    assert_eq!(r.pending, 1);
+    assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+    let stray: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".clean-")).collect();
+    assert!(stray.is_empty(), "stale trash survived: {stray:?}");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// An entry claimed by the daemon mid-listing vanishes before our
+/// rename lands: ENOENT maps to `skipped`, never an error and
+/// never a half-deleted running/ entry.
+#[test]
+fn clean_lost_claim_race_counts_skipped() {
+    let root = tmp_root("cleanrace");
+    std::fs::create_dir_all(root.join("pending/0100_a")).unwrap();
+    // The daemon's claim wins before clean() lists: equivalent to
+    // losing the rename race — the name is simply gone.
+    assert!(claim(&root, "0100_a").unwrap());
+    let r = clean(&root, &CleanSets { pending: true, ..Default::default() });
+    assert_eq!((r.pending, r.skipped, r.errors.len()), (0, 0, 0));
+    assert_eq!(running_list(&root).unwrap(), vec!["0100_a".to_string()]);
+    std::fs::remove_dir_all(&root).ok();
+}

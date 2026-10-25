@@ -17,7 +17,7 @@ mod tests;
 pub use misc::{CompletionsArgs, FeedbackAction, FeedbackArgs, ProbeArgs, UpgradeArgs, VersionArgs};
 pub use room::{RoomAction, RoomCmd};
 pub use server::{ClientAction, ClientCmd, DispatchArgs, ProjectAction, ProjectCmd, QueueAction, QueueCmd, ServeAction, ServeArgs, SpoolAction, SpoolCmd, TaskAction, TaskCmd, TunnelAction, TunnelArgs};
-pub use tasks::{CatArgs, EnqueueArgs, LogsArgs, NewArgs, PatternArgs, PrioArgs, RootArgs, ShutdownAction, ShutdownArgs, StatusArgs, SubmitArgs, WorkerAction, WorkersArgs};
+pub use tasks::{CatArgs, CleanArgs, EnqueueArgs, LogsArgs, NewArgs, PatternArgs, PrioArgs, RootArgs, ShutdownAction, ShutdownArgs, StatusArgs, SubmitArgs, WorkerAction, WorkersArgs};
 
 #[derive(Parser)]
 #[command(
@@ -109,6 +109,9 @@ pub enum Command {
     /// Kill a running task's process group
     #[command(arg_required_else_help = true)]
     Kill(PatternArgs),
+    /// Bulk-remove queue entries by set (design.md §3.9b);
+    /// bare invocation refuses with per-track counts
+    Clean(CleanArgs),
     /// Get or set the worker pool size
     Workers(WorkersArgs),
     /// Idle-shutdown control (client) or remote arm via -c (server)

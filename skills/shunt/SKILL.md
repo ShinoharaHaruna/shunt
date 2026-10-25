@@ -12,7 +12,7 @@ Mental model:
 - The wire is `ssh <box> 'shunt <cmd> --json --root <qroot>'`; the registry's `qroot` is authoritative. No ports, no server-side daemon besides the dispatcher, no client process besides `shuntd`.
 - **Client = box, queue = named subresource.** One client row is one managed instance and one SSH identity (endpoint, key, mux, tunnel, billing, facts). Under it, named queues (`[queues.<name>]` in the row) each own an independent qroot, sequence space, worker pool, daemon, env_setup/shell, and binary. Old flat rows keep working as a literal queue named `default`.
 - `localhost` is a peer client using the local transport (execs the `shunt` binary directly — no ssh, no key). Its row `clients/localhost.toml` is written on first use (default queue `~/.config/shunt/queue/`); edit it like any client row — `local_bin`/`timeout_s` tune the loopback transport. `shunt client rm localhost` resets the row to factory defaults (the name is reserved); to actually opt out, write `disabled = true` into the row. Use it for dry runs, integration smoke, and dev-loop tasks on the dev machine itself. `shunt client add <name> --local` creates additional loopback queues.
-- **Operate through the CLI, not the files.** Read state via `status --json` / `logs` / `spool ls` / `client show` / `queue ls` / `room read`; change it via `client add|update|env|rename|rm`, `queue …`, `project add|bind`, `submit`, `cancel`, `prio`, `workers`, `shutdown`. Commands carry side effects a hand-edit misses (mux socket, known_hosts, conn-fail streak, spool refs, `.shunt-owner`, tunnel env). Hand-edit only row fields with no setter (`expire`, `env_setup`, `billing`, … — the seeded-row edit after `client add` is exactly this case), and never write machine-owned state at all: `<qroot>` queue tracks, `spool/`, `known_hosts`, `cm/*.sock`, the daemon registry, room ledgers.
+- **Operate through the CLI, not the files.** Read state via `status --json` / `logs` / `spool ls` / `client show` / `queue ls` / `room read`; change it via `client add|update|env|rename|rm`, `queue …`, `project add|bind`, `submit`, `cancel`, `prio`, `clean`, `workers`, `shutdown`. Commands carry side effects a hand-edit misses (mux socket, known_hosts, conn-fail streak, spool refs, `.shunt-owner`, tunnel env). Hand-edit only row fields with no setter (`expire`, `env_setup`, `billing`, … — the seeded-row edit after `client add` is exactly this case), and never write machine-owned state at all: `<qroot>` queue tracks, `spool/`, `known_hosts`, `cm/*.sock`, the daemon registry, room ledgers.
 - Execution is at-least-once. Tasks must guard on the artifact they produce so reruns are no-ops.
 - On drain, a daemon stays resident by default, or exits if `exit_on_idle` is configured. The machine powers itself off only when idle shutdown has been explicitly armed; shared clients refuse server-side arming. shunt never powers a machine on — a human or upstream automation makes it available.
 - Submitting while the box is off is normal: tasks wait in the server-side spool until the dispatcher can deliver.
@@ -94,7 +94,7 @@ shunt submit -c rw-a --queue train -- ./task.sh
 shunt status -c rw-a --queue eval --json
 ```
 
-- `--queue` exists on `submit`, `status`, `logs`, `cancel`, `prio`, `kill`, `workers`, `shutdown`, `upgrade`, and `project bind`/`unbind`. Without it: configured `default_queue` > the sole queue > ambiguity error — never a guess.
+- `--queue` exists on `submit`, `status`, `logs`, `cancel`, `prio`, `kill`, `clean`, `workers`, `shutdown`, `upgrade`, and `project bind`/`unbind`. Without it: configured `default_queue` > the sole queue > ambiguity error — never a guess.
 - A staged task pins its `(queue, qroot)`: changing `queue default` afterwards does NOT retarget undelivered work. qroot drift is a loud error, not a silent reroute.
 - `client bootstrap`/`client env` cover every registered queue; the `queue` variants scope to one. `upgrade -c` on a multi-queue client requires `--queue` (one binary per qroot).
 - `queue rm` refuses while bound, staged, or running work references it, never revokes the shared client key, and `--purge` deletes only that qroot.
@@ -164,6 +164,9 @@ shunt logs --root <qroot> -f exp1  # follow on the client itself; remote follow 
 shunt cancel -c rw-a exp3        # remove a pending task (unique substring)
 shunt prio -c rw-a exp4 10       # renumber into priority band 0000-0099
 shunt kill -c rw-a exp1          # TERM the running task's pgid, then KILL
+shunt clean -c rw-a --pending    # bulk-remove every pending entry
+shunt clean -c rw-a --done --failed  # clear terminal listings; --archive empties .archive/, --all does all four
+shunt clean -c rw-a              # refuses with per-track counts — never a silent no-op
 shunt workers -c rw-a            # resolved pool size + source
 shunt workers -c rw-a 4          # resize; takes effect next poll
 shunt shutdown -c rw-a on 120    # arm idle poweroff, 120 s grace
@@ -181,13 +184,13 @@ shunt spool release <id>         # let the next sweep deliver it
 
 A held spool entry is skipped by EVERY dispatch sweep — `--once` and the loop alike: no probe, no push. Use it for work staged ahead of a decision (lease approval, quota, a prerequisite run): staging is free, but an unheld entry fires the moment the box answers. Held entries show `held`/`held: <reason>` in `spool ls`. `--hold` takes its reason only via `=` (`--hold=why`), never a bare word — that slot belongs to task files.
 
-`cancel`, `prio`, `kill`, `workers`, `shutdown`, `logs`, `status` all take `-c <client>` on the server side and forward over SSH. Without `-c` they operate on the local queue (client side).
+`cancel`, `prio`, `kill`, `clean`, `workers`, `shutdown`, `logs`, `status` all take `-c <client>` on the server side and forward over SSH. Without `-c` they operate on the local queue (client side).
 
 Notes:
 
 - `prio` refuses if the target `NNNN_slug` name already exists. Numbers 0000-0099 are the manual band and always claim ahead of normal sequence numbers (first normal task is 0100).
 - Raising `workers` dispatches immediately; lowering only stops new dispatches. Running tasks drain naturally. To free a slot now, `kill`.
-- `cancel` matches pending by unique substring, `kill` matches running likewise; 0 or >1 match is an error. A 0-match refusal names the pattern's hits in the other tracks — "already running" means `shunt kill`, and a task claimed between submit and `cancel` is a moved task, not a matching failure.
+- `cancel` matches pending by unique substring, `kill` matches running likewise; 0 or >1 match is an error. For bulk cleanup use `clean`: its flags select whole sets (`--pending`, `--done`, `--failed`, `--archive` for the `<track>/.archive/` overflow, `--all`), `running/` is never a target, and entries claimed mid-sweep are skipped, never half-deleted. A 0-match refusal names the pattern's hits in the other tracks — "already running" means `shunt kill`, and a task claimed between submit and `cancel` is a moved task, not a matching failure.
 
 ### room (coordinate with other projects)
 

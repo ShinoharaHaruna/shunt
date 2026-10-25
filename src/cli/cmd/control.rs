@@ -2,9 +2,9 @@
 //! `workers`, `shutdown`: `-c`/registry default forwards the op
 //! over the wire; a local queue in scope runs the local handler.
 
-use crate::cli::args::{PatternArgs, PrioArgs, ShutdownAction, ShutdownArgs, WorkersArgs};
+use crate::cli::args::{CleanArgs, PatternArgs, PrioArgs, ShutdownAction, ShutdownArgs, WorkersArgs};
 use crate::cli::dual_mode;
-use crate::cli::local::{agent_cancel, agent_kill, agent_prio, agent_shutdown, agent_workers, workers_wire_tail};
+use crate::cli::local::{agent_cancel, agent_clean, agent_kill, agent_prio, agent_shutdown, agent_workers, workers_wire_tail};
 use crate::cli::server::remote_queue;
 use crate::server::registry;
 use anyhow::Result;
@@ -29,6 +29,27 @@ pub fn prio(a: &PrioArgs) -> Result<()> {
 
 pub fn kill(a: &PatternArgs) -> Result<()> {
     dual_mode(&a.client, &a.root, &a.queue, "kill", |name| remote_queue(name, a.queue.as_deref(), &["kill", "--json", "--", &a.pattern], None, true), || agent_kill(a))
+}
+
+pub fn clean(a: &CleanArgs) -> Result<()> {
+    dual_mode(
+        &a.client,
+        &a.root,
+        &a.queue,
+        "clean",
+        |name| {
+            // Forward the selection verbatim — the remote resolves
+            // --all and the empty-selection refusal itself.
+            let mut tail = vec!["clean", "--json"];
+            for (flag, set) in [(a.pending, "--pending"), (a.done, "--done"), (a.failed, "--failed"), (a.archive, "--archive"), (a.all, "--all")] {
+                if flag {
+                    tail.push(set);
+                }
+            }
+            remote_queue(name, a.queue.as_deref(), &tail, None, true)
+        },
+        || agent_clean(a),
+    )
 }
 
 pub fn workers(a: &WorkersArgs) -> Result<()> {
