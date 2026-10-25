@@ -1,6 +1,6 @@
 ---
 name: shunt
-description: Operate shunt to run experiments on local workstations, lab servers, and cloud CPU or GPU machines. Use for shunt client and project setup, named queues, guarded task submission, resource inspection, project coordination rooms, and optional idle shutdown or cost-aware operation.
+description: Operate shunt to run experiments on local workstations, lab servers, and cloud CPU or GPU machines. Use for shunt client and project setup, named queues, guarded task submission, resource inspection, project coordination rooms, the ops dashboard, and optional idle shutdown or cost-aware operation.
 ---
 
 # shunt
@@ -18,25 +18,6 @@ Mental model:
 - Submitting while the box is off is normal: tasks wait in the server-side spool until the dispatcher can deliver.
 - The client name is user-supplied, never agent-invented — ask the user what to call the box before `client add`. The name lands in the row filename, every `-c <name>` invocation, and the task/daemon logs; a made-up name puts the registry on a handle nobody recognizes. Same for project names. If a name turns out wrong, fix it with `shunt client rename <old> <new>` — it moves the row, keypair, mux socket, failure streak, spool refs, and project bindings together. Never hand-mv registry files; the sidecar paths keep pointing at the old name.
 
-## Setup
-
-### Consent before `client add` — ask the user, never assume
-
-shunt touches a machine the user may share with other people. Before registering a box, ask the user these questions — the agent's job is to record the answers, not to choose them:
-
-1. **Is the box shared with other people or workloads?** If yes, register with `--shared`: server-side `shutdown on` then refuses to arm idle poweroff — powering off would kill other users' jobs — and `bootstrap` never auto-deploys the ssh key. On a shared box also prefer `--exit-on-idle` (below) and never suggest `shutdown on` at all.
-2. **SSH identity — three options, let the user pick:**
-   - dedicated shunt keypair + auto-deploy: needs `ssh.password` once; appends one line to `~/.ssh/authorized_keys` on the box (the only write shunt makes outside `<qroot>`). Dedicated boxes only — a `shared` row skips this automatically;
-   - reuse an already-authorized key: `--key ~/.ssh/id_ed25519`, no password, zero `authorized_keys` writes — the recommended choice on a shared box;
-   - manual: leave `ssh.password` empty; bootstrap prints the generated `.pub` for the user to install via the vendor console.
-3. **qroot — REQUIRED: ask for the exact path, never silently take a default.** The whole footprint — queue, binary, daemon state — lives inside `<qroot>`. Vendor templates seed `<deploy_root>/queue`, which is fine on a dedicated box but can collide with another tenant's queue on a shared one; get the user to name an explicit `--qroot` they own (e.g. under their work dir). Outside qroot, shunt writes only the optional authorized_keys line and a small self-cleaned daemon-registry entry under `$XDG_STATE_HOME`/`/tmp`. shunt also guards collisions itself: bootstrap claims the qroot via `<qroot>/.shunt-owner` (the client's ssh pubkey) and refuses a queue already claimed by a different install.
-4. **Daemon residency.** By default `shuntd` stays resident after the queue drains. `--exit-on-idle` makes it exit cleanly on drain (the next submit revives it automatically) — the polite choice on shared or heavily-monitored boxes.
-5. **Reachability precondition.** Can the dev machine ssh the box directly, or must something local be established first — a VPN, an overlay interface, a port-forward, a gate to open? Record it as `pre_connect = "<cmd>"` (`--pre-connect` at `client add`/`update`): a `sh -c` snippet that fires once per call after the first connect failure — and before the first attempt while the box is already marked unreachable — then the retries ride whatever it set up. The snippet must be idempotent and non-interactive (stdin is null — no prompts). A precondition needing a resident process hands off to a supervisor (`nmcli`, `systemd`, `autossh`, `openconnect -b`): arranging and supervising whatever keeps it alive is the user's own deployment, never shunt's — a foreground keepalive is killed at the hook's deadline and accomplishes nothing. Where the precondition cannot be automated (manual OTP), write a check that fails fast with a remediation message instead; its stderr rides the unreachable error.
-
-**Two shunt users, one box.** If user A and user B each run their own shunt against box X: under the _same_ unix account (the shared-root-container norm) give each its own qroot — the per-user daemon registry (§3.11) already coordinates idle-shutdown between their daemons, and `.shunt-owner` stops them pointing at one queue by accident. Under _different_ unix accounts their registries can't see each other at all — mark the row `shared` and keep idle poweroff off the table.
-
-All commands below run on the dev machine unless marked client.
-
 ## Rooms first — check the inbox before acting
 
 Before ANY state-changing action on a box other projects may share — `submit`, `workers`, `kill`, `cancel`, `prio`, `shutdown`, `queue`/`client`/`project` changes — poll the coordination inbox:
@@ -48,243 +29,29 @@ shunt room read <room> --as <your-project>      # drains unread and marks your c
 
 An unread `say` or `decide` is exactly what changes what you were about to do: VRAM budgets, worker caps, GPU splits negotiated while you were away. The poll is a local read — nothing reaches the box — so there is no reason to skip it. No rooms, or all read: proceed. Unread traffic: read it first, then reconsider the planned action against it.
 
-```bash
-# 1. Register a box. Vendor template seeds defaults; a dedicated
-#    ed25519 keypair is generated at ~/.config/shunt/keys/rw-a and
-#    ssh.key is filled automatically — ssh needs no manual keygen.
-shunt client add rw-a --template autodl
-#    then edit ~/.config/shunt/clients/rw-a.toml:
-#      ssh.host, ssh.port (+ ssh.password for unattended key deploy)
-#      expire, env_setup, shell — and optionally billing.hourly/currency,
-#      pre_connect (reachability precondition, design.md §4.1)
+## Consent before `client add` — ask, never assume
 
-#    `shunt client templates` lists what --template accepts.
-# 2. Bootstrap: deploys the pubkey via sshpass when ssh.password is
-#    set (prints the .pub to install once otherwise), probes over raw
-#    SSH, scp's the binary, remote init + start. Host keys are
-#    TOFU-accepted into ~/.config/shunt/known_hosts — no known_hosts
-#    maintenance. All execs ride one muxed connection per client
-#    (~/.config/shunt/cm/<name>.sock) — vendors whose sshd sits behind
-#    a startup-limited proxy flap on back-to-back handshakes
-#    ("Exceeded MaxStartups"); mux + in-call retries absorb that.
-shunt client bootstrap rw-a
+Before registering a box, ask the user — record their answers, don't choose them:
 
-# 3. Register a project and bind it to the box. --repo records the
-#    dev-side checkout (agents know where the code lives); --desc a
-#    one-liner. [defaults].env in the row merges under every binding.
-shunt project add riboworld --repo ~/Code/RiboWorld --desc "RNA-seq pipeline"
-shunt project bind riboworld --client rw-a \
-    --workdir /root/autodl-tmp/RiboWorld --env TASK_THREADS=4
-#   bindings target a (client, queue) pair; --queue NAME selects
-#   a named queue (omitted = the client's configured default).
-```
+1. **Shared?** `yes` → `--shared` (blocks idle poweroff and key auto-deploy); never suggest `shutdown on`.
+2. **SSH identity?** dedicated keypair + auto-deploy (needs `ssh.password`), reuse an authorized key (`--key`, the shared-box choice), or manual `.pub` install.
+3. **qroot?** REQUIRED — ask for the exact path; the whole footprint lives inside it. Templates seed `<deploy_root>/queue`, which can collide on shared boxes.
+4. **Residency?** daemon stays resident by default; `--exit-on-idle` exits on drain — polite on shared boxes.
+5. **Reachability?** VPN/overlay/port-forward first → record `pre_connect` (idempotent, non-interactive; resident parts are the user's supervisor problem).
 
-### named queues on one box
+Full rationale, the two-users-one-box topology rules, and the register → bootstrap → bind walkthrough: `references/setup.md`.
 
-```bash
-# Two independent queues on one rented instance — separate qroots,
-# daemons, seq spaces and worker pools over ONE ssh identity.
-shunt queue add train -c rw-a --qroot /root/autodl-tmp/queue-train
-shunt queue add eval -c rw-a --qroot /root/autodl-tmp/queue-eval
-shunt queue bootstrap train -c rw-a      # installs binary + init + start
-shunt queue bootstrap eval -c rw-a
-shunt queue ls -c rw-a                    # names, qroots, default marker
-shunt queue default eval -c rw-a          # unqualified ops land here
-shunt queue set eval -c rw-a --exit-on-idle  # patch ONE field in place
-shunt queue start|stop|restart eval -c rw-a  # per-queue daemon lifecycle
-shunt submit -c rw-a --queue train -- ./task.sh
-shunt status -c rw-a --queue eval --json
-```
+## Command map — load the reference for the domain you're in
 
-- `--queue` exists on `submit`, `status`, `logs`, `cancel`, `prio`, `kill`, `clean`, `workers`, `shutdown`, `upgrade`, and `project bind`/`unbind`. Without it: configured `default_queue` > the sole queue > ambiguity error — never a guess.
-- A staged task pins its `(queue, qroot)`: changing `queue default` afterwards does NOT retarget undelivered work. qroot drift is a loud error, not a silent reroute.
-- `client bootstrap`/`client env` cover every registered queue; the `queue` variants scope to one. `upgrade -c` on a multi-queue client requires `--queue` (one binary per qroot).
-- `queue add` refuses an existing name; `queue set <NAME>` is the single-field update path — only passed flags change (`--env-setup ""`/`--shell ""` clear, `--no-exit-on-idle`/`--no-workers` clear), the row revalidates before writing, and a no-diff call reports `unchanged`. It is registry-only like `add`: env/shell/residency/workers reach the box on `queue env`, and a changed qroot retargets wire ops while a live daemon and staged work stay pinned to the old root — relocate means stop the old daemon, then `queue bootstrap`.
-- `queue rm` refuses while bound, staged, or running work references it, never revokes the shared client key, and `--purge` deletes only that qroot.
-- One tunnel per box: `tunnel up` writes `ALL_PROXY` into every queue's env; newly added queues reconcile on up/env automatically.
-- `shutdown -c rw-a on` still powers the whole box off — arming refuses while ANY sibling queue is busy or unreachable, including a stopped queue with pending work. This is a preflight, not a lock: an enqueue racing the final poweroff check can still lose (§3.11).
+Everything below runs on the dev machine. Before acting, read the matching file — it carries the flags, output shapes, and follow-up obligations:
 
-Registry files are human-editable TOML under `~/.config/shunt/` (`$SHUNT_HOME` overrides, used by tests). A project binds to many clients; each binding supplies `workdir` and an env overlay. Useful overlay keys: `PATH_PREPEND`, `TASK_THREADS` (`auto` = cgroup probe).
-
-Re-collect facts any time with `shunt client probe <name>`.
-
-## Everyday ops
-
-### submit
-
-```bash
-shunt submit -p riboworld -c rw-a --guard runs/exp1.json -- \
-    uv run python train.py --config exp1.yaml
-
-shunt submit -c rw-a --file ./mytask.sh     # pre-rendered script
-shunt submit -c rw-a --slug exp2 -- python eval.py
-shunt submit -c rw-a --env CUDA_VISIBLE_DEVICES=1 --timeout 7200 \
-    --gpu-mem-mb 20000 -- python eval.py    # per-task env, budget, sizing
-```
-
-`submit` writes a spool entry (`spool/<id>.json` + `<id>.sh`) and returns. Delivery happens when the dispatcher next reaches the box. The binding's `workdir`/`env` travel inside the task body itself, as comment-head directives the runner parses at spawn:
-
-```bash
-# shunt:workdir=/abs/path     # runner cwd for this task
-# shunt-env:KEY=value         # env overlay; beats the queue env file
-```
-
-Other `submit` flags: `--timeout <s>` is a wall-clock budget (TERM at the deadline, KILL after a 10 s grace — the task lands `failed/`); `--retry N [--retry-delay <s>]` reschedules on rc 75 / OOM (see Failure semantics); `--gpu-mem-mb`/`--ram-mb`/`--cpu-cores` are DECLARED sizing estimates recorded in the task head and shown beside measured usage — advisory, never gated on; `--env KEY=value` (repeatable) is a per-task overlay that beats the binding's env per key.
-
-A `--file` script can carry its own directives the same way.
-
-The guard contract is REQUIRED for safe at-least-once execution. The generated task body begins:
-
-```bash
-if [ -e runs/exp1.json ]; then echo "guard hit: runs/exp1.json exists; skipping"; exit 0; fi
-exec uv run python train.py --config exp1.yaml
-```
-
-Guard on the artifact the task produces, relative to the binding's `workdir` (tasks run with `cwd = workdir`, no `cd` needed). If the artifact is only written on success, a rerun after a mid-flight kill recomputes. If the artifact lands early, a rerun exits 0 fast. Never submit an unguarded task that is not naturally idempotent (pure appends, side-effect-free reruns are the exceptions).
-
-### tunnel (outbound proxy)
-
-```bash
-shunt tunnel -c rw-a up              # box-side SOCKS5 on 127.0.0.1:1080,
-                                    # exiting via the dev machine's network
-shunt tunnel -c rw-a up --port 2080  # custom port
-shunt tunnel -c rw-a status
-shunt tunnel -c rw-a down
-```
-
-For boxes behind a hostile/poisoned network (mainland China vendors): `tunnel up` opens `ssh -N -R` remote dynamic forwarding, then writes `ALL_PROXY=socks5h://127.0.0.1:<port>` into the box's `<qroot>/env` — every task after that picks the proxy up transparently (git clone, cargo fetch, curl). `tunnel down` removes both. Tasks keep running through it as long as the tunnel ssh stays alive; check `status` if tasks start failing on network.
-
-### status and logs
-
-```bash
-shunt status --all            # every registered box, human table
-shunt status --all --json     # same, machine-readable + billing fields
-shunt status -c rw-a --json   # one box
-shunt logs -c rw-a            # daemon log
-shunt logs -c rw-a exp1       # task log (pattern match)
-shunt cat -c rw-a exp1        # the task's task.sh verbatim — what was actually submitted
-shunt dlog --root <qroot>     # daemon log only (client convenience)
-shunt logs --root <qroot> -f exp1  # follow on the client itself; remote follow is unsupported
-```
-
-### queue control
-
-```bash
-shunt cancel -c rw-a exp3        # remove a pending task (unique substring)
-shunt prio -c rw-a exp4 10       # renumber into priority band 0000-0099
-shunt kill -c rw-a exp1          # TERM the running task's pgid, then KILL
-shunt clean -c rw-a --pending    # bulk-remove every pending entry
-shunt clean -c rw-a --done --failed  # clear terminal listings; --archive empties .archive/, --all does all four
-shunt clean -c rw-a              # refuses with per-track counts — never a silent no-op
-shunt workers -c rw-a            # resolved pool size + source
-shunt workers -c rw-a 4          # resize; takes effect next poll
-shunt shutdown -c rw-a on 120    # arm idle poweroff, 120 s grace
-shunt shutdown -c rw-a status    # armed state + the command that would fire
-shunt shutdown -c rw-a off
-# the row's `shutdown_cmd` is pushed at every arm; `shutdown on --cmd`
-# overrides it once. Set `shutdown_cmd = "true"` (or a marker script)
-# on test rows so a copied registry can never hit a real poweroff.
-shunt spool ls                   # staged-but-undelivered submissions
-shunt spool remove <id>          # drop a staged entry outright
-shunt dispatch --once            # one spool sweep (tests, manual push)
-shunt submit -c rw-a --hold="awaiting lease decision" -- python train.py
-shunt spool hold <id> "reason"   # hold an already-staged entry
-shunt spool release <id>         # let the next sweep deliver it
-```
-
-A held spool entry is skipped by EVERY dispatch sweep — `--once` and the loop alike: no probe, no push. Use it for work staged ahead of a decision (lease approval, quota, a prerequisite run): staging is free, but an unheld entry fires the moment the box answers. Held entries show `held`/`held: <reason>` in `spool ls`. `--hold` takes its reason only via `=` (`--hold=why`), never a bare word — that slot belongs to task files.
-
-### task ledger — what a spool id became
-
-```bash
-shunt task ls                    # spool id -> client/queue entry + outcome (done rc=0, failed rc=N, ...)
-shunt task show <id>             # one record; a still-open record queries the box live and writes back
-shunt task events                # server-side events.jsonl stream
-```
-
-The ledger is the join between "staged in the spool" and "ran on the box": every submission records its spool id, the queue entry name it became, and the terminal result when known. Reach for `task ls`/`task show` instead of correlating `spool ls` with `status` by hand — `status` answers where it is, `task` answers how it ended.
-
-`cancel`, `prio`, `kill`, `clean`, `workers`, `shutdown`, `logs`, `status` all take `-c <client>` on the server side and forward over SSH. Without `-c` they operate on the local queue (client side).
-
-Notes:
-
-- `prio` refuses if the target `NNNN_slug` name already exists. Numbers 0000-0099 are the manual band and always claim ahead of normal sequence numbers (first normal task is 0100).
-- Raising `workers` dispatches immediately; lowering only stops new dispatches. Running tasks drain naturally. To free a slot now, `kill`.
-- `cancel` matches pending by unique substring, `kill` matches running likewise; 0 or >1 match is an error. For bulk cleanup use `clean`: its flags select whole sets (`--pending`, `--done`, `--failed`, `--archive` for the `<track>/.archive/` overflow, `--all`), `running/` is never a target, and entries claimed mid-sweep are skipped, never half-deleted. A 0-match refusal names the pattern's hits in the other tracks — "already running" means `shunt kill`, and a task claimed between submit and `cancel` is a moved task, not a matching failure.
-
-### serve — the ops dashboard
-
-```bash
-shunt serve up                   # detached dashboard on 127.0.0.1:8747
-shunt serve status               # liveness + endpoint + log path
-shunt serve restart              # SIGUSR2 re-exec handoff (§3.5a)
-shunt serve down
-shunt serve run --port 8799      # foreground (dev loop: just web + vite proxy)
-```
-
-A read-only embedded web UI + websocket snapshots of clients, spool, tasks, and rooms (design.md §18). Loopback-only by default; `--bind` off loopback requires `--token` (`?token=`, `x-shunt-token`, or `Authorization: Bearer`). To watch a remote dev machine, `ssh -L PORT:127.0.0.1:PORT <dev>` — never expose it bare. `--interval-s` sets the wire-probe cadence (one ssh exec per queue per tick; local state refreshes every 2 s).
-
-### room (coordinate with other projects)
-
-When several projects share a box — check `room ls` suggestions, they appear whenever ≥2 projects' bindings land on the same ssh endpoint — negotiate budgets BEFORE burning GPU time on trial-and-error OOMs. Rooms are server-local group chats; nothing reaches the box.
-
-```bash
-shunt room ls --as riboworld                      # your rooms + unread counts + suggested groups
-shunt status --all --json --as riboworld          # poll this — top-level rooms[] carries unread
-shunt room create gpu-vram --members riboworld,gerna --clients rw-a
-shunt room say gpu-vram --as riboworld --body "I need 20G VRAM for 2h starting 14:00Z"
-shunt room read gpu-vram --as riboworld           # unread only; --all for the full stream
-shunt room decide gpu-vram --as gerna --note "riboworld gets GPU0, gerna GPU1, workers cap 2 each"
-shunt room members gpu-vram                       # roster; (stale) marks unbound projects
-shunt room compact gpu-vram --as gerna --through 120 --body "GPU split decided: ..."  # commit a digest covering msgs <=120
-shunt room read gpu-vram --as riboworld --digest  # digests only; --from M --to N reaches .archive/
-shunt room archive gpu-vram                       # cold-store the whole room; unarchive restores it
-shunt room rm gpu-vram                            # delete (live name or unique prefix; archived needs exact)
-```
-
-- Always pass `--as <your project name>` — it is both the author label and your read cursor. `say`/`read`/`decide` mark your position; `ls`/`status` never do.
-- A `decide` is only a record: the agreement takes effect when participants act on it (`workers -c <box> N`, `# shunt-env:CUDA_VISIBLE_DEVICES=`). Nothing enforces it — the queue never reads rooms.
-- `compact` is the long-room tool: plan with `--ratio` (covered-bytes fraction, default 0.8), then commit with `--through <N>` + a `--body` digest — it lands as an ordinary stream item tagged `summary_through` and archives everything it covers. Old messages never disappear: the 500-msg cap and compaction both overflow to `msgs/.archive/`, and `read --from/--to` reaches them.
-- Posting from a label outside the roster still lands (`member:false`, stderr names the roster) — if your say warns, you typed the wrong room.
-
-## Reading state
-
-The client queue is a directory of tracks under `qroot`:
-
-| track      | contents                                                               |
-| ---------- | ---------------------------------------------------------------------- |
-| `pending/` | `NNNN_<slug>/` entry dirs, claimed in `LC_ALL=C` sort                  |
-| `running/` | `NNNN_<slug>/` with `task.sh` + `log` + `pid` (leader pid = task pgid) |
-| `done/`    | `NNNN_<slug>/` with `task.sh` + `log` + `exit` (contains `0`)          |
-| `failed/`  | `NNNN_<slug>/` with `task.sh` + `log` + `exit` (nonzero rc, or killed) |
-
-When a client has named queues, `status -c <client>` (no `--queue`) prints a per-queue block instead of a single wire report; `status --all --json` carries a `queues` map beside the single-queue `report` field. Queue-level runner env lives in the `env` dotenv file under `qroot` (`WORKDIR`, `PATH_PREPEND`, `TASK_THREADS`, plus passthrough keys); per-task `# shunt-env:` directives override it. Values are literal `KEY=value` — no quote stripping or `$` expansion, so write `K=a b`, never `K="a b"` (the quotes would become part of the value).
-
-`status --json` returns `{protocol:1, daemon:{alive,pid}, workers:{value,source}, running[], pending[], done_recent[], failed_recent[], stop, shutdown:{armed,grace_s}}`. On the server side, `status --all --json` merges per-client rows and adds `facts` and `billing` from the registry.
-
-`facts` is probe-collected advisory data: `gpu`, `cuda`, `driver`, `cores`, `mem_gb`, `disk_free_gb`, `python`, and `can_root` (the box is root or has passwordless sudo — i.e. whether it can install packages or power off). Cores and memory are cgroup-aware; `nproc` on AutoDL reports the host, not your quota.
-
-`daemon.log` is JSONL, one `{ts, event, ...}` per line:
-
-| event                                                           | meaning                                                                                                             |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `daemon_start`                                                  | daemon up; orphan requeue ran first                                                                                 |
-| `start`                                                         | task claimed pending → running, pgid + slots recorded                                                               |
-| `finish`                                                        | task finalized (`{task, rc, dest}` → `done`/`failed`); a `timeout` field marks budget death                         |
-| `task_timeout`/`..._kill`                                       | a task exceeded its `# shunt:timeout_s=` budget: TERM at the deadline, KILL after a 10 s grace                      |
-| `orphan_live_pgid`                                              | WARNING: a `running/` entry had a live pgid at startup; requeued anyway and its guard must absorb the duplicate run |
-| `idle_shutdown_armed`                                           | countdown started; `idle_shutdown_cancelled`/`_blocked`/`_exec`/`_exec_failed`/`_aborted` trace how it ended        |
-| `signal` / `stop_drained`                                       | TERM/INT/HUP received (tracked pgids get TERM→KILL) / STOP drain finished, daemon exiting                           |
-| `claim_failed`/`finalize_failed`/`requeue_failed`/`ghost_entry` | entry move/quarantine failures — anything persistent here means a permissions or disk problem on the box            |
-
-Interpretation cheats: `daemon.alive=false` with nonempty `pending/` means nothing will run until the dispatcher auto-heals or someone runs `shunt start` on the box. `stop=true` means draining. A task absent from all lists but present in `spool ls` has not been delivered yet.
-
-3. Ask the billing model at registration and write it into the row's `expire` field: owned or lab boxes (and `localhost`) get `expire = "unlimited"`; pay-as-you-go gets `expire = "metered"` (no deadline — it burns until the balance does, so keep an eye on spend anyway); subscription boxes get the deadline (`expire = "2026-02-01T00:00:00+08:00"`, keep the offset so `status` can compute `expires_in_s`). The vendor console shows the expiry — ask the user for it; don't guess. When a subscription's `expires_in_s` is close to the next task's runtime, warn before queueing rather than after. `status --all --json` surfaces both `expire` and `expires_in_s`.
-4. Ask what the box needs to become runnable — conda env, PATH exports, sourced rc files, a non-bash shell. The first time the user (or you, watching a manual run) discovers the working preamble, record it in the row: `env_setup` is a shell snippet and `shell` is what runs it (default bash; conda/zsh setups need the right shell recorded or the source fails silently). Then `shunt client env <name>` pushes it to `<qroot>/env_setup` + `<qroot>/shell` and every task after that runs with it — no per-task boilerplate, and `--file` tasks get it too. Never put `exit`/`exec` in the snippet: it runs inside the task's wrapper shell, so `exit` kills the launch. `bootstrap` re-pushes automatically.
-5. Endpoint drift: `status --all --json` reports `connect_failures` and `endpoint_rotates` per client. 3+ consecutive failures means stop retrying and escalate: for a rotating vendor ask the user for the console's current IP/port and run `shunt client update <name> --host <h> --port <p>` (rewrites the row AND clears mux/known_hosts/fail-streak state that hand-editing leaves pinned to the dead endpoint), then retry once; for stable-endpoint vendors (AutoDL) the box is more likely off or asleep — same escalation, different fix. Don't nag on the first failure — the counter only escalates after the streak, and any successful ssh clears it.
-6. `project bind`'s workdir is where task data lands — user-supplied, never inferred from a template's deploy_root (that is where the QUEUE lives, unrelated to where experiments belong). Ask before binding. Same for the template: only use one matching the actual vendor (`client templates` lists them; `generic` for an unknown vendor — autodl's `/root/autodl-tmp` defaults pollute a foreign box). For ad-hoc box probing use `shunt client exec <name> -- <cmd>` — managed ssh (mux, retries, our key/known_hosts); never hand-roll an `ssh -i ...` invocation.
-7. Host keys are shunt's business, never the user's: shunt TOFU-accepts into `~/.config/shunt/known_hosts`. **Never** echo, `ssh-keyscan >>`, or otherwise touch `~/.ssh/known_hosts` — a rebuilt container changes its key, and a stale entry there means the user's own ssh hits REMOTE HOST IDENTIFICATION HAS CHANGED with no obvious culprit. When shunt hits a changed key (`Offending key`/`IDENTIFICATION HAS CHANGED` in an ssh error), run `shunt client hostkey <name>` — it drops the stale entry from OUR store and kills the mux master, then reconnect (fresh TOFU).
-8. Deregistering a box is `shunt client rm <name>` — remote daemon stop + authorized_keys revocation (best-effort), then every local artifact (row, keys, mux socket, state, spool, project bindings). Add `--purge` to also `rm -rf <qroot>` on the box. Task data in bind workdirs is never deleted — the command lists it for the user to decide. Never hand-run the dozen cleanup steps.
+| domain                                                                                                                                                           | file                     |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| Register/deregister clients, projects, named queues (`client add                                                                                                 | update                   | rm | bootstrap | env | hostkey | rename | exec`, `queue add | set | default | rm | bootstrap | env | start | stop | restart`, `project add | bind | unbind | remove`) | `references/setup.md` |
+| Run and control work (`submit`, `spool`, `dispatch`, `cancel`, `prio`, `kill`, `clean`, `workers`, `shutdown`, `tunnel`, `task`, `serve`, `upgrade`, `feedback`) | `references/ops.md`      |
+| Interpret `status`/`logs`/queue tracks/`daemon.log`/`facts`                                                                                                      | `references/state.md`    |
+| `room` verbs (say/read/decide/members/compact/archive/rm)                                                                                                        | `references/rooms.md`    |
+| Metered-machine scheduling + retry/timeout/orphan semantics                                                                                                      | `references/playbook.md` |
 
 ## Scheduling objective — the utilization/efficiency Pareto front
 
@@ -295,21 +62,6 @@ The default goal when scheduling on shunt is the Pareto frontier between resourc
 - Prefer many small checkpointable tasks over monoliths: fine-grained work bin-packs the box's gaps and holds occupancy high even as tasks finish unevenly.
 - At true drain, keep the machine's intended lifecycle: a resident daemon, daemon-only exit, or explicitly authorized poweroff. Use `shutdown on` only when the user has actively opted into idle poweroff (armed it themselves or asked for it). On metered machines, surface idle cost when relevant.
 
-## Cost-aware playbook (metered machines)
-
-1. When the user has opted into idle poweroff, arm it right after enqueueing the last task of a batch: `shunt shutdown -c rw-a on`. The countdown only fires when both `pending/` and `running/` are empty, re-checks every second, and cancels if new work arrives — but never arm unprompted; powering off is the user's call. Never arm on a `shared` box — the arm is refused server-side anyway. To drain only a queue daemon, use `shunt queue stop <queue> -c <client>`.
-2. Submitting while the box is off costs nothing. The spool holds the task until a human powers the box on and the dispatcher delivers it. Batch overnight submissions; let one power-on drain them.
-3. Read `billing.hourly`/`billing.currency` from `status --all --json` before queueing. On hourly billing, unused paid time is already spent: if the instance has 40 min of paid time left and the next task needs 3 h, hold the long task, run short ones, or warn the user. That decision is yours; shunt only exposes the rate.
-4. Split multi-hour experiments into checkpointable tasks (`--guard runs/epoch10.pt` style) so an at-least-once rerun after a mid-flight death costs minutes, not the whole run. One giant unguarded 12 h task is the expensive failure mode.
-5. When a metered machine is running but `pending/` is empty and you have nothing to add, arm shutdown only if the user opted into idle poweroff — otherwise report relevant idle spend and let them choose. On owned or shared machines, follow the configured daemon lifecycle and resource agreements.
-
-## Failure semantics
-
-- Tasks with an explicit `--retry N` budget can reschedule on rc 75 or recognized OOM signatures after `--retry-delay` seconds (default 60). Failures outside those criteria, timeouts, and exhausted retries land in `failed/` and require inspection before resubmission. Entry directories contain `exit` and `log` sidecars; logs end with `=== exit <rc> <iso>` (legacy flat entries use `.exit`/`.log`).
-- A task that fails rc 97 never ran: the binding's `workdir` was unreachable.
-- Orphan requeue: if the daemon dies with tasks in `running/`, the next start moves each to `pending/0000_requeued_<name>` (front of queue) and the interrupted log to `failed/<name>.interrupted.<ts>.log`. If the task's process group is still alive, the daemon logs a WARNING and requeues anyway. Your guard is what makes that safe: the rerun must no-op or cheaply resume while the zombie finishes.
-- `shunt kill` and daemon TERM forwarding target recorded task process groups. The resulting exit follows the same reschedule or terminal-failure rules above; a matching OOM log can still qualify a retry-declared task for rescheduling after a kill.
-
 ## Safety rules
 
 - Prefer `shunt` commands over reading or writing shunt's files directly (see the mental-model rule); the only sanctioned hand-edit is a client row field that has no setter.
@@ -317,48 +69,3 @@ The default goal when scheduling on shunt is the Pareto frontier between resourc
 - Never let a test reach real `/usr/bin/shutdown`. Tests redirect the command via the `shutdown_cmd` file or `$SHUTDOWN_CMD` env, and never arm `shutdown on` against a box you are not willing to power off.
 - Every daemon liveness check is pidfile + `/proc/<pid>/cmdline` match.
 - Use placeholders (`root@<host>:<port>`) in docs, examples, and task scripts. Never write real hostnames, ports, or key paths into tracked files.
-
-## Reporting problems with shunt
-
-Hit a shunt defect, a confusing error, or a UX wart? File it upstream — that is how the tool improves:
-
-```bash
-shunt feedback "one-line title" --kind bug --body "what you ran, what happened, what you expected"
-# kinds: bug | ux | feature | docs; --client rw-a attaches the row's probe facts
-```
-
-- The report lands as a GitHub issue (`[feedback/<kind>] …`) on the upstream repo (or `server.toml` `feedback_repo` / `$SHUNT_FEEDBACK_REPO`). Deduped within 24 h; capped at 5/h — if delivery fails the report is persisted and `shunt feedback ls` / `shunt feedback retry` manage it.
-- Registry secrets (`ssh.host/port/user/password/key`, `$HOME`) are auto-redacted — still, never paste tokens, passwords, or private data into the body; the issues are public.
-- Include the command you ran and the JSON/log lines that matter; do not attach credentials or hostnames the scrubber cannot know about.
-
-## Dedicated cloud example
-
-```bash
-# once: register + bootstrap
-shunt client add rw-a --template autodl
-$EDITOR ~/.config/shunt/clients/rw-a.toml   # ssh.host/port/key
-shunt client bootstrap rw-a                  # probes facts, ships binary
-
-shunt project add riboworld
-shunt project bind riboworld --client rw-a \
-    --workdir /root/autodl-tmp/RiboWorld --env TASK_THREADS=4
-
-# submit a training run guarded on its metrics file
-shunt submit -p riboworld -c rw-a \
-    --guard runs/exp1/metrics.json -- \
-    uv run python train.py --out runs/exp1
-
-shunt dispatch --once          # or let the dispatcher loop push it
-shunt status -c rw-a --json    # pending → running
-shunt logs -c rw-a exp1        # watch the task log
-
-# Optional: only after the user opts into poweroff on a dedicated machine.
-shunt shutdown -c rw-a on      # fires ~60 s after running+pending empty (dedicated boxes only — refused on `shared` rows or busy sibling queues)
-# Whether poweroff stops billing depends on the provider.
-```
-
-Keeping shunt itself current: `shunt upgrade` self-upgrades the dev binary from the latest GitHub release (`--check`/`--json` read-only, `--force` to reinstall); `shunt upgrade -c rw-a` upgrades the box's binary to the latest musl build through the normal bootstrap path — that is also how wire-protocol drift gets fixed after a dev-side upgrade. `shunt version [-c rw-a]` reports either side's build.
-
-Upgrade handoff (§3.5a/§16): every live queue daemon and a pidfile'd `serve` get a SIGUSR2 — the image re-execs its own argv in place, adopting in-flight tasks; a pre-handler image is refused via `daemon.ver`/`serve.ver`, never killed. A dispatcher carries no pidfile, so upgrade discovers live ones by a /proc cmdline scan and names their pids — send USR2 or restart them yourself (a pre-handler dispatcher would die; spool + dedup make a restart lossless anyway). `upgrade -c` on a `local = true` row is an explicit no-op — local daemons run the dev machine's own image.
-
-If `shunt logs -c rw-a exp1` shows nothing, check `shunt spool ls`: the task may still be staged because the box is off or SSH failed.
