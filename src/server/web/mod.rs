@@ -181,8 +181,7 @@ fn ver_file() -> Result<PathBuf> {
 /// leaf keeps a recycled pid from false-identifying (§3.4).
 fn is_serve_cmdline(argv: &[&[u8]]) -> bool {
     let Some(argv0) = argv.first() else { return false };
-    let base = crate::proto::proc::argv0_base(argv0);
-    if !(base == b"shunt" || base == b"shuntd" || base.starts_with(b"shunt-")) {
+    if !crate::proto::proc::is_shunt_argv0(argv0) {
         return false;
     }
     argv.get(1).is_some_and(|a| *a == b"serve") && argv.get(2).is_some_and(|a| *a == b"run")

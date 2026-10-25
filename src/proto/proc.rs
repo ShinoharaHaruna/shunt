@@ -52,6 +52,15 @@ pub fn argv0_base(argv0: &[u8]) -> &[u8] {
     argv0.rsplit(|&b| b == b'/').next().unwrap_or(argv0)
 }
 
+/// argv[0] membership in the shunt binary family (`shunt`, `shuntd`,
+/// `shunt-*`): the identity prefix every cmdline needle shares —
+/// install prefixes and renamed builds differ in directories, not
+/// basenames.
+pub fn is_shunt_argv0(argv0: &[u8]) -> bool {
+    let base = argv0_base(argv0);
+    base == b"shunt" || base == b"shuntd" || base.starts_with(b"shunt-")
+}
+
 /// Probe one recorded pid: `/proc/<pid>` absent → `Dead`; cmdline
 /// read + needle match → `Live`; read + mismatch → `Dead` (recycled
 /// pid); read error → `Unknown`. `read_cmdline` is injected so tests

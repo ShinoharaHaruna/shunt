@@ -69,11 +69,46 @@ fn upgrade_local(a: &UpgradeArgs, release: &release::Release) -> Result<()> {
     if let Err(e) = crate::server::web::handoff_if_running() {
         eprintln!("serve not handed off: {e:#}");
     }
-    // The dispatcher has no pidfile, so its running image is
-    // undiscoverable — tell the operator rather than pretend. USR2
-    // re-execs it in place; a restart is equally safe (spool + dedup).
-    eprintln!("note: a running dispatcher keeps its old image — `kill -USR2 <dispatcher-pid>` re-execs it in place, or restart it");
+    // The dispatcher has no pidfile (§16): the /proc scan is the
+    // only discovery path, and the signal stays the operator's call —
+    // a pre-handler image has no daemon.ver gate and USR2 would kill
+    // it. Naming only pids that actually exist keeps the note honest.
+    let dispatchers = running_dispatchers();
+    if !dispatchers.is_empty() {
+        eprintln!("note: running dispatcher(s) {} keep their old image — `kill -USR2 <pid>` re-execs in place, or restart", dispatchers.iter().map(u32::to_string).collect::<Vec<_>>().join(" "));
+    }
     Ok(())
+}
+
+/// Live `shunt dispatch` processes owned by this uid — a /proc
+/// cmdline scan, because the dispatcher keeps no pidfile
+/// (design.md §16). Same-uid only: a foreign dispatcher cannot take
+/// our signal, and naming it would mislead the operator.
+fn running_dispatchers() -> Vec<u32> {
+    use crate::proto::proc;
+    use std::os::unix::fs::MetadataExt;
+    let mut pids = Vec::new();
+    let Ok(rd) = std::fs::read_dir("/proc") else { return pids };
+    for ent in rd.flatten() {
+        let Some(pid) = ent.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
+        let Ok(raw) = proc::read_cmdline(pid) else { continue };
+        let argv = proc::split_argv(&raw);
+        let Some(argv0) = argv.first() else { continue };
+        if !proc::is_shunt_argv0(argv0) || !is_dispatch_tail(&argv) {
+            continue;
+        }
+        if std::fs::metadata(ent.path()).map(|m| m.uid()).unwrap_or(u32::MAX) != unsafe { libc::getuid() } {
+            continue;
+        }
+        pids.push(pid);
+    }
+    pids
+}
+
+/// The dispatch needle: argv[1] == "dispatch" (argv[0] family is the
+/// shared `is_shunt_argv0` check the caller applies first).
+fn is_dispatch_tail(argv: &[&[u8]]) -> bool {
+    argv.get(1).is_some_and(|a| *a == b"dispatch")
 }
 
 /// Hand off every live daemon registered on this box (§3.5a/§16):
@@ -263,4 +298,25 @@ fn install_over(src: &std::path::Path, dst: &PathBuf) -> Result<()> {
     let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
     std::fs::rename(&staged, dst).with_context(|| format!("cannot replace {} — reinstall via your package manager or fix the install dir's permissions", dst.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The /proc scan is the feature — and identity is the cmdline,
+    /// not the executable (same rule as the §3.4 liveness needle):
+    /// `exec -a shunt yes dispatch` makes a `yes` process read as
+    /// `shunt dispatch` in /proc, which must appear in the scan and
+    /// drop out again once killed.
+    #[test]
+    fn running_dispatchers_finds_only_live_dispatchers() {
+        let mut child = std::process::Command::new("bash").args(["-c", "exec -a shunt yes dispatch >/dev/null"]).spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !super::running_dispatchers().contains(&child.id()) {
+            assert!(std::time::Instant::now() < deadline, "forged dispatcher pid {} never appeared in the scan", child.id());
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!super::running_dispatchers().contains(&child.id()), "a dead dispatcher must drop out of the scan");
+    }
 }
