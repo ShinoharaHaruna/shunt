@@ -16,7 +16,7 @@ mod tests;
 pub(crate) use control::{agent_shutdown, agent_workers, workers_wire_tail};
 pub(crate) use logs::{agent_dlog, agent_logs, logs_wire_tail};
 pub(crate) use status::agent_status;
-pub(crate) use tasks::{agent_cancel, agent_enqueue, agent_kill, agent_new, agent_prio};
+pub(crate) use tasks::{agent_cancel, agent_cat, agent_enqueue, agent_kill, agent_new, agent_prio};
 
 pub(crate) fn local_root(flag: &Option<String>) -> Result<PathBuf> {
     crate::client::queue::resolve_root(flag.as_deref())

@@ -22,6 +22,7 @@ export const zhTW: Dict = {
   'state.loading': '載入中…',
   'state.noOutput': '（無輸出）',
   'state.logEmpty': '記錄為空',
+  'state.scriptEmpty': '腳本為空',
   'state.unreachable': '無法連線',
   'state.expired': '已過期',
 
@@ -43,6 +44,7 @@ export const zhTW: Dict = {
   'common.pending': '等待中: {n}',
   'common.members': '成員: {n}',
   'common.log': '記錄',
+  'common.script': '腳本',
   'common.logTail': '記錄尾端',
   'common.daemonLog': '守護程式記錄',
   'common.needsGlibc': '需要 glibc {v}',

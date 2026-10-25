@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { ClientStatus, QueueStatus, StatusReport } from '../types'
 import { postExec } from '../api'
 import { Card, CopyText, Dot, Empty, Muted, Pill, SectionHeading } from './ui'
-import { EntryList, LogPane, RecentList, ResourceBlock } from './queueDetail'
+import { EntryList, LogPane, RecentList, ResourceBlock, ScriptPane } from './queueDetail'
 import { useI18n } from '../i18n'
 
 interface Sel {
@@ -209,31 +209,45 @@ function QueueDetail({
   snapAt: number
   facts?: Record<string, unknown>
 }) {
-  // Which section's log is open, and for which entry. Clicking the
+  // Which section's pane is open, and for which entry. Clicking the
   // same entry again toggles it closed; the pane renders inline
   // right under its owning section, not at the foot of the card.
+  // 'script' is the pending track's pane — a queued entry has no
+  // log yet, its task.sh is the only artifact to show.
   const [log, setLog] = useState<{
-    kind: 'running' | 'done' | 'failed' | 'daemon'
+    kind: 'running' | 'done' | 'failed' | 'daemon' | 'script'
     pattern: string | null
   } | null>(null)
   const rep = q.report
-  const toggle = (kind: 'running' | 'done' | 'failed' | 'daemon', pattern: string | null) =>
+  const toggle = (
+    kind: 'running' | 'done' | 'failed' | 'daemon' | 'script',
+    pattern: string | null,
+  ) =>
     setLog((prev) =>
       prev && prev.kind === kind && prev.pattern === pattern ? null : { kind, pattern },
     )
-  const pane = (kind: 'running' | 'done' | 'failed' | 'daemon') =>
+  const pane = (kind: 'running' | 'done' | 'failed' | 'daemon' | 'script') =>
     log?.kind === kind ? (
       <div key={`${kind}:${log.pattern ?? ''}`} className="rise">
-        <LogPane
-          client={client}
-          queue={queue}
-          pattern={log.pattern}
-          snapAt={snapAt}
-          onClose={() => setLog(null)}
-        />
+        {kind === 'script' ? (
+          <ScriptPane
+            client={client}
+            queue={queue}
+            name={log.pattern}
+            onClose={() => setLog(null)}
+          />
+        ) : (
+          <LogPane
+            client={client}
+            queue={queue}
+            pattern={log.pattern}
+            snapAt={snapAt}
+            onClose={() => setLog(null)}
+          />
+        )}
       </div>
     ) : null
-  const openName = (kind: 'running' | 'done' | 'failed') =>
+  const openName = (kind: 'running' | 'done' | 'failed' | 'script') =>
     log?.kind === kind ? log.pattern : null
   const { t } = useI18n()
   return (
@@ -261,7 +275,13 @@ function QueueDetail({
               openName={openName('running')}
             />
             {pane('running')}
-            <EntryList label={t('queue.pending')} entries={rep.pending_detail} />
+            <EntryList
+              label={t('queue.pending')}
+              entries={rep.pending_detail}
+              onPeek={(n) => toggle('script', n)}
+              openName={openName('script')}
+            />
+            {pane('script')}
             <RecentList
               label={t('queue.done')}
               tone="emerald"

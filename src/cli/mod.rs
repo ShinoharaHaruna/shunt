@@ -77,6 +77,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Submit(a) => cmd::submit(&a),
         Command::Status(a) => cmd::status(&a),
         Command::Logs(a) => cmd::logs(&a),
+        Command::Cat(a) => cmd::cat(&a),
         Command::Dlog(a) => cmd::dlog(&a),
         Command::Spool(c) => cmd::spool(&c),
         Command::Task(c) => cmd::task(&c),

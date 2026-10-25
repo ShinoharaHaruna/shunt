@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { EntryDetail, ExitRecord, StatusReport } from '../types'
 import { mibToGib } from '../fmt'
-import { fetchLogs } from '../api'
+import { fetchLogs, fetchScript } from '../api'
 import { Bar, CopyText, Dot, Empty, Muted, Pill } from './ui'
 import type { Tone } from './ui'
 import { useI18n } from '../i18n'
@@ -118,20 +118,26 @@ function UsageChips({ u }: { u: NonNullable<EntryDetail['usage']> }) {
 }
 
 /** Expandable pending/running entry list with declared+usage chips
- *  and a per-entry logs hook (running entries have live logs to tail).
- *  `openName` marks the entry whose log pane is currently shown. */
+ *  and a per-entry open hook: `onLogs` tails a running entry's log,
+ *  `onPeek` opens a queued entry's task.sh — the script is the only
+ *  artifact a pending entry has. `openName` marks the entry whose
+ *  pane is currently shown. */
 export function EntryList({
   label,
   entries,
   onLogs,
+  onPeek,
   openName,
 }: {
   label: string
   entries: EntryDetail[]
   onLogs?: (name: string) => void
+  onPeek?: (name: string) => void
   openName?: string | null
 }) {
   const { t } = useI18n()
+  const onOpen = onLogs ?? onPeek
+  const hint = onLogs ? t('common.log') : t('common.script')
   if (entries.length === 0) return null
   return (
     <details className="group">
@@ -145,15 +151,15 @@ export function EntryList({
             {entries.map((e) => (
               <li
                 key={e.name}
-                role={onLogs ? 'button' : undefined}
-                tabIndex={onLogs ? 0 : undefined}
-                onClick={onLogs ? () => onLogs(e.name) : undefined}
+                role={onOpen ? 'button' : undefined}
+                tabIndex={onOpen ? 0 : undefined}
+                onClick={onOpen ? () => onOpen(e.name) : undefined}
                 onKeyDown={
-                  onLogs
+                  onOpen
                     ? (ev) => {
                         if (ev.key === 'Enter' || ev.key === ' ') {
                           ev.preventDefault()
-                          onLogs(e.name)
+                          onOpen(e.name)
                         }
                       }
                     : undefined
@@ -161,8 +167,8 @@ export function EntryList({
                 className={`group/entry rounded-lg px-2.5 py-1.5 ring-1 transition-all duration-150 ${
                   openName === e.name
                     ? 'bg-hover-2 ring-signal-bd'
-                    : `bg-hover ring-edge-soft ${onLogs ? 'hover:bg-hover-2 hover:ring-edge' : ''}`
-                } ${onLogs ? 'cursor-pointer' : ''}`}
+                    : `bg-hover ring-edge-soft ${onOpen ? 'hover:bg-hover-2 hover:ring-edge' : ''}`
+                } ${onOpen ? 'cursor-pointer' : ''}`}
               >
                 <div className="flex items-center gap-1">
                   {/* name stays a copy button — stop the click from
@@ -174,7 +180,7 @@ export function EntryList({
                     <CopyText text={e.name} className="text-xs text-ink-2" />
                   </span>
                   <span className="flex-1" />
-                  {onLogs && (
+                  {onOpen && (
                     <span
                       className={`text-[10px] transition-colors ${
                         openName === e.name
@@ -182,7 +188,7 @@ export function EntryList({
                           : 'text-ink-4 group-hover/entry:text-signal-fg'
                       }`}
                     >
-                      {openName === e.name ? `${t('common.log')} ▾` : `${t('common.log')} ▸`}
+                      {openName === e.name ? `${hint} ▾` : `${hint} ▸`}
                     </span>
                   )}
                 </div>
@@ -350,6 +356,88 @@ export function LogPane({
           <Empty>{t('state.loading')}</Empty>
         ) : text === '' ? (
           <Empty>{t('state.logEmpty')}</Empty>
+        ) : (
+          <pre className="font-num whitespace-pre-wrap text-[11px] leading-relaxed">
+            {text.split('\n').map((l, i) => (
+              <div key={i} className={tint(l)}>
+                {l}
+              </div>
+            ))}
+          </pre>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** A queued task's task.sh — the pending track's only artifact, so
+ *  the script is what an entry click has to show. Fetched once per
+ *  open: unlike a running log the file never grows under you. The
+ *  `# shunt:`/`# shunt-env:` directive head tints signal — it's the
+ *  rendered contract (id, workdir, env, timeout, retry); other
+ *  comment lines fade to muted. */
+export function ScriptPane({
+  client,
+  queue,
+  name,
+  onClose,
+}: {
+  client: string
+  queue: string | null
+  name: string | null
+  onClose: () => void
+}) {
+  const { t } = useI18n()
+  const [text, setText] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetchScript(client, queue, name ?? '')
+      .then((r) => {
+        if (cancelled) return
+        if (r.ok) {
+          setText(r.text ?? '')
+          setErr(null)
+        } else {
+          setErr(r.error ?? t('probe.unknownError'))
+        }
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setErr(e instanceof Error ? e.message : String(e))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [client, queue, name])
+
+  const tint = (line: string): string => {
+    if (/^\s*#\s*shunt(-env)?:/.test(line)) return 'text-signal-fg'
+    if (/^\s*#/.test(line)) return 'text-ink-4'
+    return 'text-ink-2'
+  }
+
+  return (
+    <div className="mt-3 rounded-xl border border-edge bg-canvas/60 p-3">
+      <div className="mb-2 flex items-center gap-2 text-[11px]">
+        <Dot tone="signal" />
+        <span className="font-num text-ink-2">{name ?? 'task.sh'}</span>
+        <Muted>{t('common.script')}</Muted>
+        <span className="flex-1" />
+        <button
+          onClick={onClose}
+          className="ml-1 rounded px-1.5 text-[11px] text-ink-4 transition-colors hover:bg-hover-2 hover:text-ink-2"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="max-h-72 overflow-y-auto pr-1">
+        {err ? (
+          <Empty>{err}</Empty>
+        ) : text === null ? (
+          <Empty>{t('state.loading')}</Empty>
+        ) : text === '' ? (
+          <Empty>{t('state.scriptEmpty')}</Empty>
         ) : (
           <pre className="font-num whitespace-pre-wrap text-[11px] leading-relaxed">
             {text.split('\n').map((l, i) => (

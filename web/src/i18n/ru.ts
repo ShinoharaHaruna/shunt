@@ -22,6 +22,7 @@ export const ru: Dict = {
   'state.loading': 'загрузка…',
   'state.noOutput': '(нет вывода)',
   'state.logEmpty': 'лог пуст',
+  'state.scriptEmpty': 'скрипт пуст',
   'state.unreachable': 'недоступна',
   'state.expired': 'ПРОСРОЧЕН',
 
@@ -43,6 +44,7 @@ export const ru: Dict = {
   'common.pending': 'в очереди: {n}',
   'common.members': 'участников: {n}',
   'common.log': 'лог',
+  'common.script': 'скрипт',
   'common.logTail': 'конец лога',
   'common.daemonLog': 'лог демона',
   'common.needsGlibc': 'нужна glibc {v}',

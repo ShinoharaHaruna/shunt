@@ -1,6 +1,7 @@
 use super::logs::{render_dlog_line, tail_bytes};
-use super::{agent_cancel, agent_kill, agent_prio, logs_wire_tail, workers_wire_tail};
-use crate::cli::args::{LogsArgs, PatternArgs, PrioArgs, WorkerAction, WorkersArgs};
+use super::tasks::find_task;
+use super::{agent_cancel, agent_cat, agent_kill, agent_prio, logs_wire_tail, workers_wire_tail};
+use crate::cli::args::{CatArgs, LogsArgs, PatternArgs, PrioArgs, WorkerAction, WorkersArgs};
 
 /// Both the one-shot `dlog` render and `logs -f`'s appended-
 /// line render must go through the same JSONL→text transform
@@ -46,6 +47,48 @@ fn workers_wire_tail_honors_set_subcommand() {
     assert_eq!(workers_wire_tail(&wa(Some(3), None)), vec!["workers", "set", "3"]);
     assert_eq!(workers_wire_tail(&wa(None, Some(WorkerAction::Get))), vec!["workers", "get"]);
     assert_eq!(workers_wire_tail(&wa(None, None)), vec!["workers", "get"]);
+}
+
+fn cat_args(root: &std::path::Path, pattern: &str) -> CatArgs {
+    CatArgs { pattern: pattern.into(), client: None, queue: None, root: Some(root.display().to_string()) }
+}
+
+/// `cat`'s matcher: an exact name wins outright even when other
+/// entries contain it as a substring; a substring spanning tracks
+/// refuses with every hit named by track.
+#[test]
+fn cat_exact_match_wins_over_substrings() {
+    let root = tmp_root("cat-exact");
+    std::fs::create_dir_all(root.join("pending").join("0100_run")).unwrap();
+    std::fs::create_dir_all(root.join("done").join("0100_run_extra")).unwrap();
+    assert_eq!(find_task(&root, "0100_run"), vec![("pending", "0100_run".to_string())]);
+    std::fs::remove_dir_all(&root).ok();
+
+    let root = tmp_root("cat-multi");
+    std::fs::create_dir_all(root.join("pending").join("0100_x")).unwrap();
+    std::fs::create_dir_all(root.join("failed").join("0099_x")).unwrap();
+    let err = agent_cat(&cat_args(&root, "x")).unwrap_err().to_string();
+    assert!(err.contains("refusing"), "{err}");
+    assert!(err.contains("pending: 0100_x") && err.contains("failed: 0099_x"), "{err}");
+    std::fs::remove_dir_all(&root).ok();
+
+    let err = agent_cat(&cat_args(&root, "zzz")).unwrap_err().to_string();
+    assert_eq!(err, "no task matches 'zzz'", "{err}");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The happy path prints the entry's task.sh: dir layout in
+/// pending/, legacy flat `.sh` in done/ — `task_file` resolves both.
+#[test]
+fn cat_prints_task_sh_both_layouts() {
+    let root = tmp_root("cat-print");
+    std::fs::create_dir_all(root.join("pending").join("0100_a")).unwrap();
+    std::fs::write(root.join("pending").join("0100_a").join("task.sh"), "echo dir\n").unwrap();
+    agent_cat(&cat_args(&root, "0100_a")).unwrap();
+    std::fs::create_dir_all(root.join("done")).unwrap();
+    std::fs::write(root.join("done").join("0099_b.sh"), "echo flat\n").unwrap();
+    agent_cat(&cat_args(&root, "0099_b")).unwrap();
+    std::fs::remove_dir_all(&root).ok();
 }
 
 fn pat_args(root: &std::path::Path, pattern: &str) -> PatternArgs {

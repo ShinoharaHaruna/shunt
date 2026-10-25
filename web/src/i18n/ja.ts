@@ -22,6 +22,7 @@ export const ja: Dict = {
   'state.loading': '読み込み中…',
   'state.noOutput': '（出力なし）',
   'state.logEmpty': 'ログは空',
+  'state.scriptEmpty': 'スクリプトは空',
   'state.unreachable': '到達不能',
   'state.expired': '期限切れ',
 
@@ -43,6 +44,7 @@ export const ja: Dict = {
   'common.pending': '待機中: {n}',
   'common.members': 'メンバー: {n}',
   'common.log': 'ログ',
+  'common.script': 'スクリプト',
   'common.logTail': 'ログ末尾',
   'common.daemonLog': 'デーモンログ',
   'common.needsGlibc': '要 glibc {v}',

@@ -539,6 +539,19 @@ fn handle(mut stream: TcpStream, latest: &Latest, hub: &ws::Hub, token: &Option<
                 Err(e) => http::json(&mut stream, 200, &json!({"ok": false, "error": format!("{e:#}")})),
             }
         }
+        p if p.starts_with("/api/script/") => {
+            // /api/script/<client>/<queue>?name=<entry> — the entry's
+            // task.sh verbatim; queue may be empty (single-queue
+            // client). Same text-op shape as /api/logs.
+            let segs: Vec<&str> = p.trim_start_matches("/api/script/").split('/').collect();
+            let client = segs.first().copied().unwrap_or("");
+            let queue = segs.get(1).copied().filter(|q| !q.is_empty());
+            let name = http::query_param(&req.query, "name").unwrap_or_default();
+            match snapshot::script(client, queue, &name) {
+                Ok(text) => http::json(&mut stream, 200, &json!({"ok": true, "text": text})),
+                Err(e) => http::json(&mut stream, 200, &json!({"ok": false, "error": format!("{e:#}")})),
+            }
+        }
         p => match assets::lookup(p) {
             Some((bytes, ctype)) => {
                 // Vite emits hashed filenames under assets/ — safe to

@@ -22,6 +22,7 @@ export const ptBR: Dict = {
   'state.loading': 'carregando…',
   'state.noOutput': '(sem saída)',
   'state.logEmpty': 'log vazio',
+  'state.scriptEmpty': 'script vazio',
   'state.unreachable': 'inacessível',
   'state.expired': 'EXPIRADO',
 
@@ -43,6 +44,7 @@ export const ptBR: Dict = {
   'common.pending': 'pendentes: {n}',
   'common.members': 'membros: {n}',
   'common.log': 'log',
+  'common.script': 'script',
   'common.logTail': 'tail do log',
   'common.daemonLog': 'log do daemon',
   'common.needsGlibc': 'requer glibc {v}',

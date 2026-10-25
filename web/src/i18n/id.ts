@@ -22,6 +22,7 @@ export const id: Dict = {
   'state.loading': 'memuat…',
   'state.noOutput': '(tanpa output)',
   'state.logEmpty': 'log kosong',
+  'state.scriptEmpty': 'skrip kosong',
   'state.unreachable': 'tak terjangkau',
   'state.expired': 'KEDALUWARSA',
 
@@ -43,6 +44,7 @@ export const id: Dict = {
   'common.pending': 'mengantre: {n}',
   'common.members': 'anggota: {n}',
   'common.log': 'log',
+  'common.script': 'skrip',
   'common.logTail': 'tail log',
   'common.daemonLog': 'log daemon',
   'common.needsGlibc': 'perlu glibc {v}',

@@ -22,6 +22,7 @@ export const es: Dict = {
   'state.loading': 'cargando…',
   'state.noOutput': '(sin salida)',
   'state.logEmpty': 'log vacío',
+  'state.scriptEmpty': 'script vacío',
   'state.unreachable': 'inaccesible',
   'state.expired': 'CADUCADO',
 
@@ -43,6 +44,7 @@ export const es: Dict = {
   'common.pending': 'pendientes: {n}',
   'common.members': 'miembros: {n}',
   'common.log': 'log',
+  'common.script': 'script',
   'common.logTail': 'fin del log',
   'common.daemonLog': 'log del demonio',
   'common.needsGlibc': 'requiere glibc {v}',

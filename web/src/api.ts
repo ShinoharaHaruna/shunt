@@ -34,6 +34,20 @@ export async function fetchLogs(
   return (await r.json()) as { ok: boolean; text?: string; error?: string }
 }
 
+export async function fetchScript(
+  client: string,
+  queue: string | null,
+  name: string,
+): Promise<{ ok: boolean; text?: string; error?: string }> {
+  const q = queue ? `/${encodeURIComponent(queue)}` : '/'
+  const u = new URL(`/api/script/${encodeURIComponent(client)}${q}`, location.origin)
+  u.searchParams.set('name', name)
+  const token = getToken()
+  if (token !== null) u.searchParams.set('token', token)
+  const r = await fetch(u)
+  return (await r.json()) as { ok: boolean; text?: string; error?: string }
+}
+
 /** The one non-GET call: `client exec` passthrough for read-only
  *  probes. Token rides the header — keeps it out of the URL (and
  *  therefore out of server logs and Referer headers). */

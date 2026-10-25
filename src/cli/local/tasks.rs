@@ -3,7 +3,7 @@
 use anyhow::{Context as _, Result};
 
 use super::{jfail, jfields, jobj, jprint, local_root, wire};
-use crate::cli::args::{EnqueueArgs, NewArgs, PatternArgs, PrioArgs};
+use crate::cli::args::{CatArgs, EnqueueArgs, NewArgs, PatternArgs, PrioArgs};
 
 pub(crate) fn agent_enqueue(a: &EnqueueArgs) -> Result<()> {
     wire(a.json, enqueue_impl(a))
@@ -206,6 +206,48 @@ fn prio_impl(a: &PrioArgs) -> Result<()> {
         println!("renamed: {base} -> {new}");
     }
     Ok(())
+}
+
+/// Entries matching `pat` across the four live tracks, in state-
+/// machine order. An exact name match wins outright (an entry lives
+/// in exactly one track, so it is inherently singular) — otherwise
+/// every substring hit is a candidate the caller reduces.
+pub(crate) fn find_task(root: &std::path::Path, pat: &str) -> Vec<(&'static str, String)> {
+    let mut subs = Vec::new();
+    for t in ["pending", "running", "done", "failed"] {
+        for n in crate::client::queue::list_entries(root, t).unwrap_or_default() {
+            if n == pat {
+                return vec![(t, n)];
+            }
+            if n.contains(pat) {
+                subs.push((t, n));
+            }
+        }
+    }
+    subs
+}
+
+/// `cat` prints a task's task.sh — the pending track's only
+/// artifact (no log exists until a claim), and the box-side half
+/// of the dashboard's pending-entry script pane. Text op like
+/// `logs`/`mktask`: the body goes to stdout verbatim, not JSON.
+pub(crate) fn agent_cat(a: &CatArgs) -> Result<()> {
+    let root = local_root(&a.root)?;
+    let m = find_task(&root, &a.pattern);
+    match m.as_slice() {
+        [(track, name)] => {
+            let tf = crate::client::queue::task_file(&root, track, name);
+            let bytes = std::fs::read(&tf).with_context(|| format!("cannot read {}", tf.display()))?;
+            use std::io::Write;
+            std::io::stdout().write_all(&bytes)?;
+            Ok(())
+        }
+        [] => anyhow::bail!("no task matches '{}'", a.pattern),
+        _ => {
+            let list = m.iter().map(|(t, n)| format!("{t}: {n}")).collect::<Vec<_>>().join("\n  ");
+            anyhow::bail!("pattern matches several tasks, refusing:\n  {list}")
+        }
+    }
 }
 
 pub(crate) fn agent_kill(a: &PatternArgs) -> Result<()> {

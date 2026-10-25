@@ -16,7 +16,7 @@ pub(super) use client::client;
 pub(super) use control::{cancel, kill, prio, shutdown, workers};
 pub(super) use enqueue::{enqueue, mktask, new};
 pub(super) use misc::{completions, dispatch, probe, serve, tunnel, version};
-pub(super) use observe::{dlog, logs, status};
+pub(super) use observe::{cat, dlog, logs, status};
 pub(super) use project::project;
 pub(super) use queue::{daemon, init, restart, start, stop};
 pub(super) use tasks::{spool, submit, task};

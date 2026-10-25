@@ -17,7 +17,7 @@ mod tests;
 pub use misc::{CompletionsArgs, FeedbackAction, FeedbackArgs, ProbeArgs, UpgradeArgs, VersionArgs};
 pub use room::{RoomAction, RoomCmd};
 pub use server::{ClientAction, ClientCmd, DispatchArgs, ProjectAction, ProjectCmd, QueueAction, QueueCmd, ServeAction, ServeArgs, SpoolAction, SpoolCmd, TaskAction, TaskCmd, TunnelAction, TunnelArgs};
-pub use tasks::{EnqueueArgs, LogsArgs, NewArgs, PatternArgs, PrioArgs, RootArgs, ShutdownAction, ShutdownArgs, StatusArgs, SubmitArgs, WorkerAction, WorkersArgs};
+pub use tasks::{CatArgs, EnqueueArgs, LogsArgs, NewArgs, PatternArgs, PrioArgs, RootArgs, ShutdownAction, ShutdownArgs, StatusArgs, SubmitArgs, WorkerAction, WorkersArgs};
 
 #[derive(Parser)]
 #[command(
@@ -44,6 +44,9 @@ pub enum Command {
     Status(StatusArgs),
     /// Task or daemon logs
     Logs(LogsArgs),
+    /// Print a queued task's script (task.sh) verbatim
+    #[command(arg_required_else_help = true)]
+    Cat(CatArgs),
     /// Daemon log only (client convenience)
     Dlog(RootArgs),
     /// Manage the server-side staging queue

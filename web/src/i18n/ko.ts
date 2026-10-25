@@ -22,6 +22,7 @@ export const ko: Dict = {
   'state.loading': '로딩 중…',
   'state.noOutput': '(출력 없음)',
   'state.logEmpty': '로그 비어 있음',
+  'state.scriptEmpty': '스크립트 비어 있음',
   'state.unreachable': '연결 불가',
   'state.expired': '만료됨',
 
@@ -43,6 +44,7 @@ export const ko: Dict = {
   'common.pending': '대기 중: {n}',
   'common.members': '멤버: {n}',
   'common.log': '로그',
+  'common.script': '스크립트',
   'common.logTail': '로그 tail',
   'common.daemonLog': 'daemon 로그',
   'common.needsGlibc': 'glibc {v} 필요',

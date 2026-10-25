@@ -115,6 +115,22 @@ pub struct LogsArgs {
 }
 
 #[derive(Args)]
+pub struct CatArgs {
+    /// Task name or unique substring — matches entries in pending/,
+    /// running/, done/, failed/; an exact name match wins outright
+    pub pattern: String,
+    /// Query a client over SSH (server side)
+    #[arg(short, long)]
+    pub client: Option<String>,
+    /// Local queue root (client side)
+    #[arg(long)]
+    pub root: Option<String>,
+    /// Named queue on the selected server client
+    #[arg(long, conflicts_with = "root")]
+    pub queue: Option<String>,
+}
+
+#[derive(Args)]
 pub struct RootArgs {
     /// Queue root; falls back to $SHUNT_ROOT
     // visible `--qroot`: spec §5's wire table spells the flag after

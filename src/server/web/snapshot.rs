@@ -70,6 +70,18 @@ pub fn logs(client: &str, queue: Option<&str>, pattern: Option<&str>, tail: usiz
     transport::queue_exec(t.as_ref(), &resolved, &refs, None)
 }
 
+/// Task script (task.sh) over the wire: `cat -- <name>` resolved
+/// through the same `load_queue` ladder as `logs`. A text op — raw
+/// stdout passes through verbatim, same as the CLI prints it. This
+/// backs the dashboard's pending-entry script pane: a queued entry
+/// has no log yet, so the script is what a click has to show.
+pub fn script(client: &str, queue: Option<&str>, name: &str) -> anyhow::Result<String> {
+    use crate::server::{registry, transport};
+    let resolved = registry::load_queue(client, queue)?;
+    let t = transport::transport_for(&resolved.client);
+    transport::queue_exec(t.as_ref(), &resolved, &["cat", "--", name], None)
+}
+
 /// `client exec` passthrough for read-only probes (`sh -c <cmd>`).
 /// The dashboard's one non-GET surface — its scope is the §18
 /// probe use, not mutation: nothing here writes queue state.

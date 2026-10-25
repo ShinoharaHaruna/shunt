@@ -22,6 +22,7 @@ export const en = {
   'state.loading': 'loading…',
   'state.noOutput': '(no output)',
   'state.logEmpty': 'log empty',
+  'state.scriptEmpty': 'script empty',
   'state.unreachable': 'unreachable',
   'state.expired': 'EXPIRED',
 
@@ -43,6 +44,7 @@ export const en = {
   'common.pending': 'pending: {n}',
   'common.members': 'members: {n}',
   'common.log': 'log',
+  'common.script': 'script',
   'common.logTail': 'log tail',
   'common.daemonLog': 'daemon log',
   'common.needsGlibc': 'needs glibc {v}',

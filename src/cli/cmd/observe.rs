@@ -2,9 +2,9 @@
 //! forwards over the wire while a local queue in scope runs the
 //! local handler.
 
-use crate::cli::args::{LogsArgs, RootArgs, StatusArgs};
+use crate::cli::args::{CatArgs, LogsArgs, RootArgs, StatusArgs};
 use crate::cli::dual_mode;
-use crate::cli::local::{agent_dlog, agent_logs, agent_status, logs_wire_tail};
+use crate::cli::local::{agent_cat, agent_dlog, agent_logs, agent_status, logs_wire_tail};
 use crate::cli::server::{print_subhelp, remote_queue, rootless};
 use anyhow::Result;
 
@@ -50,6 +50,14 @@ pub fn logs(a: &LogsArgs) -> Result<()> {
         },
         || agent_logs(a),
     )
+}
+
+/// `cat` is a text op like `logs`: the remote answers task.sh on
+/// stdout, so `expect_json` stays false and the body passes through
+/// verbatim — a script line shaped like a wire object is content,
+/// never a protocol answer.
+pub fn cat(a: &CatArgs) -> Result<()> {
+    dual_mode(&a.client, &a.root, &a.queue, "cat", |name| remote_queue(name, a.queue.as_deref(), &["cat", "--", &a.pattern], None, false), || agent_cat(a))
 }
 
 pub fn dlog(a: &RootArgs) -> Result<()> {

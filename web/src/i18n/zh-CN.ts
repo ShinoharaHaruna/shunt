@@ -22,6 +22,7 @@ export const zhCN: Dict = {
   'state.loading': '加载中…',
   'state.noOutput': '（无输出）',
   'state.logEmpty': '日志为空',
+  'state.scriptEmpty': '脚本为空',
   'state.unreachable': '不可达',
   'state.expired': '已过期',
 
@@ -43,6 +44,7 @@ export const zhCN: Dict = {
   'common.pending': '排队中: {n}',
   'common.members': '成员: {n}',
   'common.log': '日志',
+  'common.script': '脚本',
   'common.logTail': '日志尾部',
   'common.daemonLog': '守护进程日志',
   'common.needsGlibc': '需要 glibc {v}',
