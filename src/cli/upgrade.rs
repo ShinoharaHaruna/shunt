@@ -259,7 +259,13 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Re
             let mut dead_streak = 0u32;
             while std::time::Instant::now() < deadline {
                 if let remote::StatusAnswer::Report { report, .. } = remote::remote_status(t.as_ref(), &resolved) {
-                    if report.daemon.alive && report.daemon.ver.as_deref().and_then(release::parse_version).map(|(v, _, _)| v == latest).unwrap_or(false) {
+                    // daemon.ver is SHUNT_VERSION — "0.9.1 (<sha>
+                    // <date>)", NO "shunt " prefix — so parse_version
+                    // (built for `--version` output) returns None on
+                    // it and a parse-based compare can never flip.
+                    // The leading whitespace token IS the semver.
+                    let flipped_now = report.daemon.alive && report.daemon.ver.as_deref().and_then(|v| v.split_whitespace().next()) == Some(latest);
+                    if flipped_now {
                         flipped = true;
                         break;
                     }
