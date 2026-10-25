@@ -25,6 +25,38 @@ fn run(c: &QueueCmd) -> Result<()> {
             let path = registry::set_default_queue(&client_name, name)?;
             success(c.json, &client_name, name, "default", Some(&path));
         }
+        QueueAction::Set { name, qroot, env_setup, shell, exit_on_idle, no_exit_on_idle, workers, no_workers } => {
+            anyhow::ensure!(*workers != Some(0), "workers must be positive; use --workers 1 or greater, or --no-workers to clear");
+            let patch = registry::QueuePatch {
+                qroot: qroot.clone(),
+                env_setup: env_setup.clone(),
+                shell: shell.clone(),
+                exit_on_idle: if *exit_on_idle {
+                    Some(true)
+                } else if *no_exit_on_idle {
+                    Some(false)
+                } else {
+                    None
+                },
+                workers: if *no_workers { Some(None) } else { workers.map(Some) },
+            };
+            let out = registry::set_queue_fields(&client_name, name, patch)?;
+            if c.json {
+                println!("{}", serde_json::json!({"ok": true, "client": client_name, "queue": out.queue, "action": "set", "changed": out.changed, "path": out.path.as_ref().map(|p| p.display().to_string())}));
+            } else if let Some(path) = &out.path {
+                println!("{client_name}/{}: set {}; wrote {}", out.queue, out.changed.join(", "), path.display());
+            } else {
+                println!("{client_name}/{}: unchanged — fields already match", out.queue);
+            }
+            // stderr notes fire under --json too: they describe
+            // follow-up work the row write cannot do itself.
+            if out.changed.iter().any(|ch| ch.starts_with("qroot")) {
+                eprintln!("warn: qroot moved — wire ops now target the new root, but a live daemon stays on the OLD one (staged tasks keep their pinned qroot too); relocate: stop the old daemon on the box, then `shunt queue bootstrap {} -c {client_name}`", out.queue);
+            }
+            if out.changed.iter().any(|ch| ch.starts_with("env_setup") || ch.starts_with("shell") || ch.starts_with("exit_on_idle") || ch.starts_with("workers")) {
+                eprintln!("note: registry change only — push it to the box with `shunt queue env {} -c {client_name}`", out.queue);
+            }
+        }
         QueueAction::Ls => {
             let client = registry::load_client(&client_name)?;
             let queues = registry::all_queues(&client)?;

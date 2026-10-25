@@ -228,6 +228,54 @@ fn queue_mutations_preserve_legacy_default_and_guard_removal() {
 }
 
 #[test]
+fn queue_set_patches_only_passed_fields_and_writes_only_on_change() {
+    let _lock = HOME_LOCK.lock().unwrap();
+    let home = RegistryHome::new("queue-set");
+    save_client(&legacy()).unwrap();
+    let patch = |exit_on_idle, workers| QueuePatch { exit_on_idle, workers, ..QueuePatch::default() };
+
+    // Single-field patch: exit_on_idle flips, every sibling survives.
+    let out = set_queue_fields("box", "default", patch(Some(false), None)).unwrap();
+    assert_eq!(out.queue, "default");
+    assert_eq!(out.changed, ["exit_on_idle: -> false"]);
+    assert!(out.path.is_some());
+    let stored = load_client("box").unwrap();
+    let q = &stored.queues["default"];
+    assert_eq!(q.qroot, "/srv/queue");
+    assert_eq!(q.env_setup, "export FOO=bar");
+    assert_eq!(q.shell, "zsh");
+    assert!(!q.exit_on_idle);
+
+    // A no-diff call is honest: no save, file byte-identical.
+    let before = home.row_text();
+    let out = set_queue_fields("box", "default", patch(Some(false), None)).unwrap();
+    assert!(out.changed.is_empty() && out.path.is_none());
+    assert_eq!(home.row_text(), before);
+
+    // workers: set then --no-workers clears back to runtime-managed.
+    let out = set_queue_fields("box", "default", patch(None, Some(Some(3)))).unwrap();
+    assert_eq!(out.changed, ["workers: -> 3"]);
+    let out = set_queue_fields("box", "default", patch(None, Some(None))).unwrap();
+    assert_eq!(out.changed, ["workers: cleared"]);
+    assert_eq!(load_client("box").unwrap().queues["default"].workers, None);
+
+    // Empty strings clear env_setup/shell; canonical resolution
+    // (case-fold) reaches the same queue.
+    let out = set_queue_fields("box", "DEFAULT", QueuePatch { env_setup: Some(String::new()), shell: Some(String::new()), ..QueuePatch::default() }).unwrap();
+    assert_eq!(out.changed, ["env_setup: cleared", "shell: cleared"]);
+    let q = &load_client("box").unwrap().queues["default"];
+    assert!(q.env_setup.is_empty() && q.shell.is_empty());
+
+    // Rejections leave the file byte-identical: empty patch, unknown
+    // name, and a qroot the validator rejects (relative / overlap).
+    let before = home.row_text();
+    assert!(set_queue_fields("box", "default", QueuePatch::default()).unwrap_err().to_string().contains("nothing to update"));
+    assert!(set_queue_fields("box", "missing", patch(Some(true), None)).is_err());
+    assert!(set_queue_fields("box", "default", QueuePatch { qroot: Some("relative".into()), ..QueuePatch::default() }).is_err());
+    assert_eq!(home.row_text(), before);
+}
+
+#[test]
 fn explicit_default_mutation_normalizes_but_failures_leave_legacy_untouched() {
     let _lock = HOME_LOCK.lock().unwrap();
     let home = RegistryHome::new("default-mutation");

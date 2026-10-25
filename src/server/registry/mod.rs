@@ -20,7 +20,7 @@ mod types;
 pub(crate) use io::load_client_row;
 pub use io::{list_clients, list_names, load_client, load_project, load_server_config, remove, retarget_default_client, save_client, save_project};
 pub use paths::{client_key_path, known_hosts_path, shunt_home, valid_name};
-pub use queues::{add_queue, all_queues, canonicalize_queues, default_queue_name, load_queue, queue_names, remove_queue_config, resolve_queue, set_default_queue, ResolvedQueue, DEFAULT_QUEUE};
+pub use queues::{add_queue, all_queues, canonicalize_queues, default_queue_name, load_queue, queue_names, remove_queue_config, resolve_queue, set_default_queue, set_queue_fields, QueuePatch, QueueSet, ResolvedQueue, DEFAULT_QUEUE};
 pub use state::{conn_fail_bump, conn_fail_read, conn_fail_reset, CONN_FAIL_ESCALATE};
 pub use types::{Billing, Binding, ClientEntry, ProjectDefaults, ProjectEntry, QueueEntry, ServerConfig, SshEndpoint};
 

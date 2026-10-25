@@ -146,6 +146,73 @@ pub fn add_queue(client_name: &str, name: &str, entry: QueueEntry) -> Result<Pat
     save_client(&client)
 }
 
+/// Field-level patch for `queue set` (design.md §4): every `None`
+/// leaves the row field untouched. `workers: Some(None)` clears the
+/// configured preference back to runtime-managed; empty strings
+/// clear `env_setup`/`shell` (the box falls back to none/bash).
+/// `qroot` has no clear — `validate_queues` rejects an empty one.
+#[derive(Default)]
+pub struct QueuePatch {
+    pub qroot: Option<String>,
+    pub env_setup: Option<String>,
+    pub shell: Option<String>,
+    pub exit_on_idle: Option<bool>,
+    pub workers: Option<Option<u32>>,
+}
+
+/// Outcome of `set_queue_fields`: the resolved canonical name, the
+/// applied field changes in order (empty = no-op), and the row path
+/// when a save actually happened.
+#[derive(Debug)]
+pub struct QueueSet {
+    pub queue: String,
+    pub changed: Vec<String>,
+    pub path: Option<PathBuf>,
+}
+
+/// `queue set` (design.md §4): patch one registered queue's fields —
+/// the update path `add_queue`'s existing-name refusal delegates to.
+/// The name resolves through the §4.1a middleware (a case-folded hit
+/// substitutes canonical with a stderr note), only passed fields
+/// move, the whole row re-validates BEFORE any write (a bad qroot
+/// fails leaving the file byte-identical), and a no-diff call does
+/// not rewrite the row.
+pub fn set_queue_fields(client_name: &str, name: &str, patch: QueuePatch) -> Result<QueueSet> {
+    ensure!(patch.qroot.is_some() || patch.env_setup.is_some() || patch.shell.is_some() || patch.exit_on_idle.is_some() || patch.workers.is_some(), "nothing to update — pass at least one of --qroot/--env-setup/--shell/--exit-on-idle/--workers (--no-* forms clear)");
+    let mut client = load_client(client_name)?;
+    let canonical = resolve_queue(&client, Some(name))?.name;
+    canonicalize_queues(&mut client)?;
+    let queue = client.queues.get_mut(&canonical).expect("a resolved queue exists in the map");
+    let mut changed = Vec::new();
+    if let Some(v) = patch.qroot.filter(|v| *v != queue.qroot) {
+        changed.push(format!("qroot: {} -> {v}", queue.qroot));
+        queue.qroot = v;
+    }
+    if let Some(v) = patch.env_setup.filter(|v| *v != queue.env_setup) {
+        // Never echo snippet contents — they can carry tokens.
+        changed.push(if v.is_empty() { "env_setup: cleared".into() } else { "env_setup: set".into() });
+        queue.env_setup = v;
+    }
+    if let Some(v) = patch.shell.filter(|v| *v != queue.shell) {
+        changed.push(if v.is_empty() { "shell: cleared".into() } else { "shell: set".into() });
+        queue.shell = v;
+    }
+    if let Some(v) = patch.exit_on_idle.filter(|v| *v != queue.exit_on_idle) {
+        changed.push(format!("exit_on_idle: -> {v}"));
+        queue.exit_on_idle = v;
+    }
+    if let Some(v) = patch.workers.filter(|v| *v != queue.workers) {
+        changed.push(match v {
+            Some(n) => format!("workers: -> {n}"),
+            None => "workers: cleared".into(),
+        });
+        queue.workers = v;
+    }
+    validate_queues(&client)?;
+    let path = if changed.is_empty() { None } else { Some(save_client(&client)?) };
+    Ok(QueueSet { queue: canonical, changed, path })
+}
+
 pub fn set_default_queue(client_name: &str, name: &str) -> Result<PathBuf> {
     let mut client = load_client(client_name)?;
     resolve_queue(&client, Some(name))?;

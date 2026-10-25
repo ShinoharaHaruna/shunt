@@ -383,6 +383,37 @@ pub enum QueueAction {
     Show { name: String },
     /// Set the execution default without contacting the client
     Default { name: String },
+    /// Patch one queue's fields in place — `add` refuses an existing
+    /// name, so this is the single-field update path (design.md §4).
+    /// Only passed flags change; empty strings clear env_setup/shell,
+    /// --no-* forms clear exit_on_idle/workers. Server-local like
+    /// `add`: a live box picks the values up on `queue env` (or a
+    /// re-bootstrap); a moved qroot retargets wire ops, so relocate
+    /// the queue on the box rather than just renaming its root.
+    Set {
+        name: String,
+        /// New queue root on the box (must be absolute)
+        #[arg(long)]
+        qroot: Option<String>,
+        /// Shell snippet sourced before every task (empty clears)
+        #[arg(long)]
+        env_setup: Option<String>,
+        /// Shell for task wrappers + env_setup (empty clears to bash)
+        #[arg(long)]
+        shell: Option<String>,
+        /// Daemon exits once the queue drains (§3.11a)
+        #[arg(long, overrides_with = "no_exit_on_idle")]
+        exit_on_idle: bool,
+        /// Clear the exit_on_idle mark
+        #[arg(long, overrides_with = "exit_on_idle")]
+        no_exit_on_idle: bool,
+        /// Configured worker-pool preference
+        #[arg(long, overrides_with = "no_workers")]
+        workers: Option<u32>,
+        /// Clear the workers preference (runtime-managed)
+        #[arg(long, overrides_with = "workers")]
+        no_workers: bool,
+    },
     /// Remove an unreferenced queue, optionally deleting its qroot
     Rm {
         name: String,

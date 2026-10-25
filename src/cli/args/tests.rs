@@ -28,7 +28,7 @@ fn named_queue_rejects_local_roots_and_aggregate() {
 
 #[test]
 fn queue_actions_accept_global_flags_in_both_positions() {
-    for action in [vec!["add", "fast", "--qroot", "/tmp/fast", "--workers", "2"], vec!["ls"], vec!["show", "fast"], vec!["default", "fast"], vec!["rm", "fast", "--purge"], vec!["bootstrap", "fast", "--bin-path", "/tmp/shunt"], vec!["env", "fast"], vec!["start", "fast"], vec!["stop", "fast"]] {
+    for action in [vec!["add", "fast", "--qroot", "/tmp/fast", "--workers", "2"], vec!["ls"], vec!["show", "fast"], vec!["default", "fast"], vec!["set", "fast", "--exit-on-idle", "--workers", "3"], vec!["set", "fast", "--no-workers", "--env-setup", ""], vec!["rm", "fast", "--purge"], vec!["bootstrap", "fast", "--bin-path", "/tmp/shunt"], vec!["env", "fast"], vec!["start", "fast"], vec!["stop", "fast"]] {
         for before in [true, false] {
             let mut argv = vec!["shunt", "queue"];
             if before {
