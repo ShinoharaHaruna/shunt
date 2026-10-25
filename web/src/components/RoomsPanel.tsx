@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { Listings, RoomDetail, RoomView } from '../types'
 import { fetchRoom, getToken } from '../api'
-import { hhmm, shortTs } from '../fmt'
+import { msgTs, shortTs } from '../fmt'
 import { Card, Empty, Muted, Pill, SectionHeading } from './ui'
 import { Md } from './Md'
 import { useI18n } from '../i18n'
@@ -76,7 +76,7 @@ function RoomStream({ detail }: { detail: RoomDetail }) {
               <Pill tone="amber">{t('rooms.digestThrough', { n: m.summary_through })}</Pill>
               <span className="font-num text-ink-4">#{m.n}</span>
               <span className="text-ink-4">{m.author}</span>
-              <span className="font-num ml-auto text-ink-4">{hhmm(m.ts)}</span>
+              <span className="font-num ml-auto text-ink-4">{msgTs(m.ts)}</span>
             </div>
             <Md text={m.body_md} className="text-xs leading-relaxed text-ink-2" />
           </div>
@@ -91,7 +91,7 @@ function RoomStream({ detail }: { detail: RoomDetail }) {
                 {m.author}
               </span>
               {!m.member && <Pill tone="amber">{t('rooms.nonMember')}</Pill>}
-              <span className="font-num ml-auto text-ink-4">{hhmm(m.ts)}</span>
+              <span className="font-num ml-auto text-ink-4">{msgTs(m.ts)}</span>
             </div>
             <Md text={m.body_md} className="mt-0.5 text-[13px] leading-relaxed text-ink-2" />
           </div>
@@ -212,7 +212,7 @@ export function RoomsPanel({
                     <span className="eyebrow shrink-0 text-signal-fg">{t('rooms.decision')}</span>
                     <span className="text-xs text-ink-2">{activeRoom.room.decision.note}</span>
                     <Muted className="font-num ml-auto shrink-0 text-[10px]">
-                      {activeRoom.room.decision.author} · {hhmm(activeRoom.room.decision.ts)}
+                      {activeRoom.room.decision.author} · {msgTs(activeRoom.room.decision.ts)}
                     </Muted>
                   </div>
                 )}

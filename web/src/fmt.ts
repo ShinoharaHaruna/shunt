@@ -19,6 +19,20 @@ export function hhmm(iso: string | null | undefined): string {
   return Number.isNaN(t) ? iso : dtf.format(t)
 }
 
+/** "14:03" for today, "Oct 24 14:03" for earlier days — for chat-style timelines. */
+export function msgTs(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return iso
+  const d = new Date(t)
+  const now = new Date()
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  return sameDay ? dtf.format(t) : stf.format(t)
+}
+
 /** "Oct 24 14:03" for submitted/pushed timestamps. */
 export function shortTs(iso: string | null | undefined): string {
   if (!iso) return '—'
