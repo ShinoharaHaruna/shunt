@@ -250,16 +250,21 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Re
         remote::WireCall::Reply(_) => {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
             let mut flipped = false;
+            // The handoff path polls through the daemon's own re-exec:
+            // the fresh image rewrites daemon.pid/daemon.ver during
+            // startup, and a status exec inside that window reads a
+            // transient dead. Only a SUSTAINED dead streak proves the
+            // handoff lost the daemon — §3.5a keeps the old image
+            // running on exec failure, so one dead poll means nothing.
+            let mut dead_streak = 0u32;
             while std::time::Instant::now() < deadline {
                 if let remote::StatusAnswer::Report { report, .. } = remote::remote_status(t.as_ref(), &resolved) {
                     if report.daemon.alive && report.daemon.ver.as_deref().and_then(release::parse_version).map(|(v, _, _)| v == latest).unwrap_or(false) {
                         flipped = true;
                         break;
                     }
-                    // A dead-but-restarted daemon reports the new
-                    // version on the first poll; keep waiting only
-                    // while it is still on the old image.
-                    if !report.daemon.alive {
+                    dead_streak = if report.daemon.alive { 0 } else { dead_streak + 1 };
+                    if dead_streak >= 3 {
                         break;
                     }
                 }
