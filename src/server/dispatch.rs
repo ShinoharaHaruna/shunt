@@ -1,7 +1,7 @@
 //! Dispatcher: drains spool/ into clients over SSH (design.md §4.4).
-//! Two-phase, at-least-once end to end: push, ack, delete. Auto-heal
-//! restarts a dead client daemon before pushing. An unreachable box
-//! (powered off) is normal operation, never an error.
+//! Two-phase, at-least-once end to end: push, start the queue daemon,
+//! ack, delete. An unreachable box (powered off) is normal operation,
+//! never an error.
 
 use crate::server::registry;
 use crate::server::remote;
@@ -130,6 +130,11 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
     let mut down = BTreeSet::new();
     let mut live = BTreeSet::new();
     let mut pushed = 0;
+    struct PendingStart {
+        target: registry::ResolvedQueue,
+        entries: Vec<(crate::proto::task::SpoolEntry, String)>,
+    }
+    let mut pending_start = BTreeMap::new();
     let tunnels = match crate::server::tunnel::list() {
         Ok(names) => names,
         Err(e) => {
@@ -194,7 +199,11 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
         if let std::collections::btree_map::Entry::Vacant(v) = reach.entry(key.clone()) {
             let r = probe_client(t, &target);
             if let Reach::Up { daemon_alive } = r {
-                if !daemon_alive {
+                // A task queue is started only after its entries have
+                // landed: an idle-exiting daemon started first can scan
+                // an empty queue and leave the later delivery stranded.
+                // Tunnel-only maintenance has no pending task to order.
+                if !daemon_alive && entry.is_none() {
                     match remote::wire_call(t, &target, &["start", "--json"], None) {
                         remote::WireCall::Reply(_) => eprintln!("dispatch: {name} queue {queue} daemon restarted"),
                         remote::WireCall::RemoteErr(e) => eprintln!("dispatch: {name} queue {queue} start failed: {e:#}"),
@@ -237,31 +246,45 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
         // rule is the same either way.
         let (r, burned) = remote::conn_fail_delta(&name, || spool::body(&entry.id).and_then(|b| push(t, &target, &entry, &b)));
         match r {
-            Ok((name, deduped)) => {
-                eprintln!("dispatch: {} -> {} as {name}{}", entry.id, client.name, if deduped { " (deduped)" } else { "" });
-                // Ledger (design.md §4.5): the spool id -> queue
-                // name mapping survives only here once the spool
-                // entry is gone. Best-effort — a ledger failure
-                // must not make a delivered task look undelivered.
-                if let Err(e) = crate::server::tasks::record_push(&entry, &name) {
-                    eprintln!("dispatch: {} ledger write failed: {e:#}", entry.id);
-                }
-                // A remove hiccup must not abort the sweep: every
-                // remaining deliverable entry would be skipped this
-                // poll for one fs error. The entry WAS delivered —
-                // log LOUDLY: the leftover spool file re-pushes next
-                // sweep, where box-side `# shunt:id=` dedup returns
-                // the existing entry (the task guard is the backstop
-                // for remotes that predate the directive).
-                if let Err(e) = spool::remove(&entry.id) {
-                    eprintln!("dispatch: {} spool remove failed ({e:#}); entry will RE-PUSH next sweep — box-side dedup returns the same name", entry.id);
-                }
-                pushed += 1;
+            Ok((queue_name, deduped)) => {
+                eprintln!("dispatch: {} -> {} as {queue_name}{}", entry.id, client.name, if deduped { " (deduped)" } else { "" });
+                pending_start.entry(key).or_insert_with(|| PendingStart { target: target.clone(), entries: Vec::new() }).entries.push((entry, queue_name));
             }
             Err(e) => eprintln!("dispatch: {} retained: {e:#}", entry.id),
         }
         if burned {
             down.insert(client.name.clone());
+        }
+    }
+    // Start once per queue after all its deliveries are visible. If
+    // startup fails, keep those spool entries so the next sweep can
+    // dedup the already-published tasks and retry the start.
+    for ((name, queue), batch) in pending_start {
+        let owned = crate::server::transport::transport_for(&batch.target.client);
+        let t: &dyn Transport = forced.unwrap_or_else(|| owned.as_ref());
+        match remote::wire_call(t, &batch.target, &["start", "--json"], None) {
+            remote::WireCall::Reply(_) => {
+                eprintln!("dispatch: {name} queue {queue} daemon started after delivery");
+                for (entry, queue_name) in batch.entries {
+                    // Ledger (design.md §4.5): the spool id -> queue
+                    // name mapping survives only here once the spool
+                    // entry is gone. Best-effort — a ledger failure
+                    // must not make a delivered task look undelivered.
+                    if let Err(e) = crate::server::tasks::record_push(&entry, &queue_name) {
+                        eprintln!("dispatch: {} ledger write failed: {e:#}", entry.id);
+                    }
+                    // A remove hiccup must not abort later deliveries;
+                    // the leftover entry re-pushes next sweep, where
+                    // box-side `# shunt:id=` dedup returns this name.
+                    if let Err(e) = spool::remove(&entry.id) {
+                        eprintln!("dispatch: {} spool remove failed ({e:#}); entry will RE-PUSH next sweep — box-side dedup returns the same name", entry.id);
+                    }
+                    pushed += 1;
+                }
+            }
+            remote::WireCall::RemoteErr(e) | remote::WireCall::ConnDown(e) => {
+                eprintln!("dispatch: {name} queue {queue} start failed after enqueue: {e:#}; retaining {} spool entr{} for retry", batch.entries.len(), if batch.entries.len() == 1 { "y" } else { "ies" });
+            }
         }
     }
     Ok(pushed)

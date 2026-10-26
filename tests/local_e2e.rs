@@ -49,9 +49,11 @@ fn localhost_submit_dispatch_execute_done() -> Result<()> {
     // init over the wire surface.
     queue_exec(&t, &queue, &["init", "--json"], None)?;
     assert!(qroot.join("pending").is_dir());
+    std::fs::write(qroot.join("exit_on_idle"), "1\n")?;
 
     // Server side: stage a task for localhost, then one dispatch sweep.
-    // The sweep auto-heals (starts) the real daemon, then enqueues.
+    // Delivery precedes start, so the idle-exiting daemon sees it on
+    // its first scan instead of exiting before enqueue.
     spool::submit("localhost", None, None, Some("e2e"), None, &Default::default(), &["touch".into(), "e2e.done".into()])?;
     assert!(dispatch::sweep_with(&t)? >= 1);
     assert!(spool::list()?.is_empty(), "spool should drain on ack");
@@ -64,6 +66,12 @@ fn localhost_submit_dispatch_execute_done() -> Result<()> {
         anyhow::ensure!(Instant::now() < deadline, "task did not finish within 30s (see {})", qroot.join("daemon.log").display());
         std::thread::sleep(Duration::from_millis(200));
     }
+    let idle_deadline = Instant::now() + Duration::from_secs(10);
+    while qroot.join("daemon.pid").exists() {
+        anyhow::ensure!(Instant::now() < idle_deadline, "exit_on_idle daemon did not exit (see {})", qroot.join("daemon.log").display());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    anyhow::ensure!(std::fs::read_to_string(qroot.join("daemon.log"))?.contains("daemon_exit_idle"), "daemon did not log its idle exit");
     // workdir defaults to the queue root, so `touch e2e.done` landed
     // under <qroot> — proving the runner cwd, not just the claim.
     assert!(qroot.join("e2e.done").exists());
@@ -82,12 +90,15 @@ fn localhost_submit_dispatch_execute_done() -> Result<()> {
         anyhow::ensure!(Instant::now() < deadline, "bound task did not finish within 30s");
         std::thread::sleep(Duration::from_millis(200));
     }
-
-    // Drain + exit the daemon; the Drop guard covers failure paths.
-    let _ = queue_exec(&t, &queue, &["stop"], None);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while qroot.join("daemon.pid").exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(200));
+    let done_deadline = Instant::now() + Duration::from_secs(10);
+    while qroot.join("done").read_dir()?.count() < 2 {
+        anyhow::ensure!(Instant::now() < done_deadline, "second task did not finalize (see {})", qroot.join("daemon.log").display());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let exit_deadline = Instant::now() + Duration::from_secs(10);
+    while qroot.join("daemon.pid").exists() {
+        anyhow::ensure!(Instant::now() < exit_deadline, "second exit_on_idle daemon did not exit (see {})", qroot.join("daemon.log").display());
+        std::thread::sleep(Duration::from_millis(50));
     }
     Ok(())
 }

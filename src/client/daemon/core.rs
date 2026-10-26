@@ -259,17 +259,30 @@ fn run_registered(root: &Path, argv_rest: Vec<OsString>, handed_off: bool) -> Re
             // its gate stays fail-closed on the listing.
             if d.root.join("shutdown_on_idle").exists() && d.runpids.is_empty() && !shutdown::pending_nonempty(&d.root) {
                 maybe_shutdown(&d.root, true, false, Some(&d.got_signal), Some(&d.reexec));
-            } else if d.root.join("exit_on_idle").exists() && d.runpids.is_empty() && !shutdown::pending_nonempty(&d.root) {
-                // Residency preference (§3.11a): the queue is drained
-                // and the owner asked for no resident daemon — leave
-                // the box clean. Not multi-tenant-gated: this daemon
-                // only serves its own queue, so a busy sibling daemon
-                // is no reason to stay, and `status`/dispatch
-                // auto-heal revives it on the next submit.
-                dlog(&d.root, "daemon_exit_idle", ev(json!({"pid": std::process::id()})));
-                super::drop_daemon_files(&d.root);
-                shutdown::deregister_qroot(&d.root);
-                return Ok(());
+            } else if d.root.join("exit_on_idle").exists() && d.runpids.is_empty() {
+                // Serialize the final empty check and daemon teardown
+                // with enqueue's publish under .seq.lock. Otherwise a
+                // dispatcher can publish after this check and strand
+                // work when the idle daemon exits (§3.11a/§4.4).
+                match queue::seq_lock(&d.root) {
+                    Ok(_pending_lock) if !shutdown::pending_nonempty(&d.root) => {
+                        // Residency preference: leave the box clean.
+                        // Not multi-tenant-gated; this daemon serves
+                        // only its own queue, so a busy sibling is no
+                        // reason to stay.
+                        dlog(&d.root, "daemon_exit_idle", ev(json!({"pid": std::process::id()})));
+                        super::drop_daemon_files(&d.root);
+                        shutdown::deregister_qroot(&d.root);
+                        return Ok(());
+                    }
+                    Ok(_pending_lock) => {}
+                    Err(e) => dlog(
+                        &d.root,
+                        "exit_idle_lock_failed",
+                        ev(json!({"error": format!("{e:#}"),
+                                  "warning": "daemon kept running; check .seq.lock access and retry"})),
+                    ),
+                }
             }
         }
         std::thread::sleep(poll);

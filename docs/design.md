@@ -41,7 +41,7 @@ dev machine (server)                         experiment machine (client)
 - One Rust binary `shunt` runs on both sides. Server subcommands operate the registry and spool; client subcommands operate the local queue.
 - The wire protocol is SSH exec: the server runs `ssh <endpoint> 'shunt <subcmd> --json'`. No agent port, no daemon on the server side beyond the dispatcher loop, no extra process on the client beyond `shuntd` (the queue daemon embedded in `shunt`).
 - Machines ↔ projects is many-to-many. A client (machine) owns named queues (§4.1a), each with an independent qroot, worker pool, daemon, binary, shell, and environment setup. A project binds to `(client, queue)` pairs via `[[bind]]` entries; the binding supplies `workdir` and the env overlay applied when a task runs.
-- Client lifecycle: the machine is reachable → the dispatcher revives a stopped queue daemon before delivering work → tasks are claimed → on drain the daemon stays resident, exits if `exit_on_idle` is configured, or powers off the machine if idle shutdown was explicitly armed. No server-to-machine wake path exists.
+- Client lifecycle: the machine is reachable → the dispatcher delivers work into `pending/` and ensures the queue daemon is running → tasks are claimed → on drain the daemon stays resident, exits if `exit_on_idle` is configured, or powers off the machine if idle shutdown was explicitly armed. No server-to-machine wake path exists.
 
 ## 3. Client queue semantics
 
@@ -225,7 +225,7 @@ Residual race, documented in the bash source and retained: an enqueue in flight 
 
 ### 3.11a Idle daemon exit (`exit_on_idle`)
 
-`exit_on_idle` is the residency preference: the client row's `exit_on_idle = true` is pushed to `<qroot>/exit_on_idle` at bootstrap / `client env`. On the same drain condition as §3.11 — tracked `runpids` empty AND `pending/` empty — but only when `shutdown_on_idle` is not armed (an armed shutdown wins: its countdown ends the daemon anyway), the daemon logs `daemon_exit_idle` with its pid, removes `daemon.pid`, deregisters its qroot, and exits 0 instead of staying resident. No countdown and no multi-tenant gate: this daemon serves only its own queue, a busy sibling is no reason to stay, and the next `status`/dispatch revives it through the auto-heal `shunt start`. For boxes shared with other users where a resident process is unwanted.
+`exit_on_idle` is the residency preference: the client row's `exit_on_idle = true` is pushed to `<qroot>/exit_on_idle` at bootstrap / `client env`. On the same drain condition as §3.11 — tracked `runpids` empty AND `pending/` empty — but only when `shutdown_on_idle` is not armed (an armed shutdown wins: its countdown ends the daemon anyway), the daemon logs `daemon_exit_idle` with its pid, removes `daemon.pid`, deregisters its qroot, and exits 0 instead of staying resident. The final `pending/` check and teardown hold `.seq.lock`, the same lock enqueue holds while publishing an entry: enqueue-first means the daemon sees the task; exit-first means dispatch's post-enqueue `start` runs after the daemon relinquishes the queue. No countdown and no multi-tenant gate: this daemon serves only its own queue, and a busy sibling is no reason to stay. For boxes shared with other users where a resident process is unwanted.
 
 ### 3.12 Task environment (exec wrapper)
 
@@ -429,15 +429,16 @@ A second advisory fires the same way: a `-p`-less submit aimed at a `(client, qu
 Two-phase dispatch, at-least-once end to end:
 
 1. Dispatcher (server-side loop, poll interval from `server.toml`) scans `spool/` oldest-first.
-2. For each entry bound to client C, over the row's transport: `shunt enqueue - <slug>-<shortid> --json --root <qroot>` with the body on stdin.
-3. Only on a clean ack (exit 0 + JSON `{ok: true, name: ...}`) does the server remove the spool entry. Any failure leaves it for the next poll.
-4. Dupes from a retry after a lost ack are deduped box-side: the rendered body carries `# shunt:id=<task id>` and the remote returns the existing entry (`{ok, name, deduped: true}`) instead of minting a second number (§3.3). The task guard remains the backstop for remotes that predate the directive, and the server task id is also embedded in the slug (`<slug>-<shortid>`) so a re-pushed task is recognizable in logs. A spool entry staged before this change carries no directive in its body — it simply allocates a fresh number per push, the pre-dedup behavior.
+2. For each entry bound to client C, over the row's transport: `shunt enqueue - <slug>-<shortid> --json --root <qroot>` with the body on stdin. Enqueue publishes the entry to `pending/` atomically under `.seq.lock` (§3.3).
+3. After pushing the sweep's entries, start each affected queue once. Starting after delivery ensures the first daemon scan sees queued work; `.seq.lock` serializes that scan's idle-exit decision with concurrent enqueue (§3.11a).
+4. Only after a clean start reply does the server write the task ledger and remove that queue's delivered spool entries. Any enqueue or start failure leaves its spool entry for the next poll; a repeated enqueue dedups to the already-published task.
+5. Dupes from a retry after a lost ack are deduped box-side: the rendered body carries `# shunt:id=<task id>` and the remote returns the existing entry (`{ok, name, deduped: true}`) instead of minting a second number (§3.3). The task guard remains the backstop for remotes that predate the directive, and the server task id is also embedded in the slug (`<slug>-<shortid>`) so a re-pushed task is recognizable in logs. A spool entry staged before this change carries no directive in its body — it simply allocates a fresh number per push, the pre-dedup behavior.
 
 **Held entries are staged but undeliverable until released.** `submit --hold[=REASON]` and `spool hold <id> [reason]` set `hold` on the entry JSON (a free-form reason string, `""` = held without note); `spool release <id>` clears it — both accept a unique id prefix, same as `task show`. A held entry is excluded from every sweep — `dispatch --once` and the loop alike: no probe, no `pin_target`, no push — so deferred work can sit in the spool indefinitely without ever reaching the box. This is the answer to "stage now, decide later" (issue #13): the alternative, dispatch-time id filtering, would only shape `--once`, while the looping dispatcher still fires every staged entry on its next poll. The flag is spool-local state — it never enters the rendered task body or the §5 wire protocol. `spool ls` marks held entries; `spool rm` removes them like any other. Backward compat: the field is absent on pre-hold entries (`serde(default)` parses them as unheld), and a downgraded binary ignores the unknown field — a held entry read by an old binary is simply dispatchable again.
 
 Fault isolation: a spool file that fails to read or parse is quarantined — `<id>.json`/`<id>.sh` renamed to `*.bad` — with a stderr warning, and the sweep continues; one corrupt entry must never stop delivery for any client. A client row that fails to load skips only that client's entries. In the looping dispatcher a failed sweep is logged and retried next poll; `dispatch --once` still propagates errors.
 
-Auto-heal: if the box answers but the daemon liveness check fails, the dispatcher runs `shunt start --root <qroot>` once before pushing (this is the "power on → claims work" link; box-side autostart remains optional sugar). If the transport fails entirely (box off), the entry stays in spool.
+Auto-heal: if the box answers, the dispatcher pushes task entries first and then runs `shunt start --root <qroot>` once per affected queue (this is the "power on → claims work" link; box-side autostart remains optional sugar). A start failure leaves those entries in spool for a deduplicated retry. If the transport fails entirely (box off), the entry stays in spool. Tunnel-only maintenance has no task to deliver and retains its direct start behavior.
 
 Dead-box probe backoff: the sweep walks entries in order, so a single dead box (a full `ConnectTimeout` × retry stretch) would head-of-line block every live client behind it. Once a client's conn_fail streak reaches `CONN_FAIL_ESCALATE`, the dispatcher probes it only every 4th sweep and treats it as down in between; a recovered box clears the streak on its first periodic probe and resumes full service. `dispatch --once` (sweep 0) always probes.
 
@@ -505,7 +506,7 @@ This dedicated-cloud example uses AutoDL paths. Local, owned, or shared machines
 2. `shunt client bootstrap rw-a` — scp the binary, remote `shunt init` + `shunt start`, then wire `shunt probe` (the binary is already on the box, so there is exactly one probe implementation); facts merged into the row. A start that immediately exits cleanly under `exit_on_idle` still counts as successful bootstrap.
 3. `shunt project add riboworld` + `shunt project bind riboworld --client rw-a --workdir /root/autodl-tmp/RiboWorld`.
 4. `shunt submit -p riboworld -c rw-a --guard runs/x.json -- uv run python ...` → lands in `spool/`.
-5. Dispatcher pushes when the machine is reachable; its queue daemon runs the task independently. On drain, the daemon stays resident or exits under `exit_on_idle`; only explicitly armed idle shutdown powers the machine off. Offline submissions stay in spool until the machine is available; the dispatcher's auto-heal restarts `shuntd` and delivers.
+5. Dispatcher publishes the task to `pending/`, then ensures the queue daemon is running; its daemon runs the task independently. On drain, the daemon stays resident or exits under `exit_on_idle`; only explicitly armed idle shutdown powers the machine off. Offline submissions stay in spool until the machine is available; the dispatcher starts the queue after delivery so an idle exit cannot race the first task scan.
 
 ## 8. Probe spec
 
@@ -580,7 +581,7 @@ Integration tests spawn a real daemon against a tmp `SHUNT_ROOT`; the poll inter
 - idle-shutdown: arm → fire (marker), cancel via flag rm / new pending / STOP, grace default, final re-check
 - workers resize: raise dispatches immediately; lower drains only; invalid value falls back to last-known
 - env file overlay, workdir, proxy unset, thread caps
-- dispatcher: spool → push → ack → delete; unreachable client retains; auto-heal restarts a dead daemon
+- dispatcher: spool → enqueue → start → ledger/delete; unreachable client or failed start retains spool for deduplicated retry
 - `pre_connect`: fires once per call after the first rc-255 (fake-ssh → hook marker file), eagerly before the first attempt when the conn_fail streak is already nonzero; a hook failure or timeout is named in the unreachable error and never gates the remaining retries; wire errors and deadline-hit hangs do not trigger it; `tunnel up` retries a setup-dead spawn once after running it
 - reschedule: rc 75 requeues same-name to pending/ with `attempts`/`retry_after`; budget exhaustion finalizes; OOM heuristic only fires for retry-declared tasks; `retry_after` gates dispatch until due
 - usage telemetry: `usage` sidecar written per cycle, travels to terminal tracks; `status` reports resources + declared-vs-observed detail

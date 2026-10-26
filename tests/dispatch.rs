@@ -13,9 +13,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Fakes a box: `status --json` reports daemon alive, `enqueue -`
-/// appends the body to `<pending>` and acks. `fail_enqueue` simulates
-/// a remote enqueue error; `down` simulates unreachable ssh.
+/// Fakes a box: `status --json` reports daemon liveness, `enqueue -`
+/// publishes into `<pending>`, and `start` checks delivery order.
+/// `fail_enqueue`/`fail_start` simulate remote errors; `down` simulates
+/// unreachable ssh.
 struct FakeTransport {
     pending: PathBuf,
     fail_enqueue: bool,
@@ -28,6 +29,7 @@ struct FakeTransport {
     /// `daemon.alive` in the `status` answer; false exercises the
     /// auto-heal `start` path.
     daemon_alive: bool,
+    fail_start: bool,
     /// When set, `enqueue` returns this raw wire line instead of the
     /// normal `{ok,name}` ack — exercises malformed-ack handling.
     ack_line: Option<String>,
@@ -35,12 +37,16 @@ struct FakeTransport {
 }
 
 fn fake(pending: &Path) -> FakeTransport {
-    FakeTransport { pending: pending.to_path_buf(), fail_enqueue: false, down: false, done_recent: Vec::new(), drift: false, daemon_alive: true, ack_line: None, calls: Mutex::new(Vec::new()) }
+    FakeTransport { pending: pending.to_path_buf(), fail_enqueue: false, down: false, done_recent: Vec::new(), drift: false, daemon_alive: true, fail_start: false, ack_line: None, calls: Mutex::new(Vec::new()) }
 }
 
 impl Transport for FakeTransport {
     fn exec(&self, client: &ClientEntry, argv: &[String], stdin: Option<&str>) -> Result<String> {
-        self.calls.lock().unwrap().push(argv.get(1).cloned().unwrap_or_default());
+        let mut calls = self.calls.lock().unwrap();
+        let operation = argv.get(1).cloned().unwrap_or_default();
+        calls.push(operation.clone());
+        let enqueue_count = calls.iter().filter(|call| *call == "enqueue").count();
+        drop(calls);
         if self.down {
             anyhow::bail!("ssh connect timeout");
         }
@@ -59,14 +65,19 @@ impl Transport for FakeTransport {
                     anyhow::bail!("remote rc=1: disk full");
                 }
                 let body = stdin.unwrap_or("");
-                let name = "0100_task";
-                let dir = self.pending.join(name);
+                let name = format!("{:04}_task", 99 + enqueue_count);
+                let dir = self.pending.join(&name);
                 std::fs::create_dir_all(&dir)?;
                 std::fs::write(dir.join("task.sh"), body)?;
                 if let Some(line) = &self.ack_line {
                     return Ok(format!("{line}\n"));
                 }
                 Ok(format!(r#"{{"protocol":1,"ok":true,"name":"{name}","client":"{}"}}"#, client.name))
+            }
+            Some("start") => {
+                anyhow::ensure!(!self.fail_start, "remote rc=1: daemon start failed");
+                anyhow::ensure!(std::fs::read_dir(&self.pending)?.next().is_some(), "daemon start ran before enqueue");
+                Ok(r#"{"protocol":1,"ok":true}"#.into())
             }
             _ => Ok(r#"{"protocol":1,"ok":true}"#.into()),
         }
@@ -104,6 +115,7 @@ fn dispatch_ack_deletes_failure_retains() -> Result<()> {
     spool::stage(&entry("t1", "a-t1"), "echo t1\n")?;
     let t = fake(&pending);
     assert_eq!(dispatch::sweep_with(&t)?, 1);
+    assert_eq!(t.calls.lock().unwrap().as_slice(), ["status", "enqueue", "start"]);
     assert!(spool::list()?.is_empty());
     assert_eq!(std::fs::read_to_string(pending.join("0100_task/task.sh"))?, "echo t1\n");
 
@@ -220,6 +232,49 @@ fn malformed_ack_retains_entry_and_skips_ledger() -> Result<()> {
     Ok(())
 }
 
+/// A failed post-delivery start leaves the spool entry so a retry can
+/// dedup the published task and try starting the daemon again.
+#[test]
+fn start_failure_retains_delivered_spool_entry() -> Result<()> {
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, _client) = fixture("startfail")?;
+    let pending = home.join("pending");
+    std::fs::create_dir_all(&pending)?;
+    spool::stage(&entry("t1", "a-t1"), "echo t1\n")?;
+
+    let t = FakeTransport { daemon_alive: false, fail_start: true, ..fake(&pending) };
+    assert_eq!(dispatch::sweep_with(&t)?, 0);
+    assert_eq!(t.calls.lock().unwrap().as_slice(), ["status", "enqueue", "start"]);
+    assert_eq!(spool::list()?.len(), 1);
+    assert!(shunt::server::tasks::load("t1").is_err(), "failed start must not write a pushed ledger record");
+    assert!(pending.join("0100_task/task.sh").exists());
+
+    std::fs::remove_dir_all(&home).ok();
+    Ok(())
+}
+
+/// The daemon starts once, after every task for the queue has been
+/// published, so its first scan cannot miss a later entry in the sweep.
+#[test]
+fn queue_starts_after_all_sweep_deliveries() -> Result<()> {
+    let _lock = HOME_LOCK.lock().unwrap();
+    let (home, _client) = fixture("batchstart")?;
+    let pending = home.join("pending");
+    std::fs::create_dir_all(&pending)?;
+    spool::stage(&entry("t1", "a-t1"), "echo t1\n")?;
+    spool::stage(&entry("t2", "a-t2"), "echo t2\n")?;
+
+    let t = FakeTransport { daemon_alive: false, ..fake(&pending) };
+    assert_eq!(dispatch::sweep_with(&t)?, 2);
+    assert_eq!(t.calls.lock().unwrap().as_slice(), ["status", "enqueue", "enqueue", "start"]);
+    assert_eq!(std::fs::read_to_string(pending.join("0100_task/task.sh"))?, "echo t1\n");
+    assert_eq!(std::fs::read_to_string(pending.join("0101_task/task.sh"))?, "echo t2\n");
+    assert!(spool::list()?.is_empty());
+
+    std::fs::remove_dir_all(&home).ok();
+    Ok(())
+}
+
 /// `task show`'s lazy outcome resolution (§4.6): a terminal
 /// sighting in `done_recent` is written back to the record and
 /// appended to events.jsonl exactly once; transient/absent states
@@ -296,9 +351,9 @@ fn task_ledger_rejects_traversal_id() -> Result<()> {
 }
 
 /// Auto-heal (§4.4): ssh answers but the daemon is dead — the
-/// sweep issues a remote `start` before pushing the entry.
+/// sweep publishes work before starting the queue daemon.
 #[test]
-fn dead_daemon_is_restarted_then_pushed() -> Result<()> {
+fn dead_daemon_is_started_after_delivery() -> Result<()> {
     let _lock = HOME_LOCK.lock().unwrap();
     let (home, _client) = fixture("heal")?;
     let pending = home.join("pending");
@@ -308,7 +363,7 @@ fn dead_daemon_is_restarted_then_pushed() -> Result<()> {
     let t = FakeTransport { daemon_alive: false, ..fake(&pending) };
     assert_eq!(dispatch::sweep_with(&t)?, 1);
     let calls = t.calls.lock().unwrap();
-    assert_eq!(calls.as_slice(), ["status", "start", "enqueue"], "{calls:?}");
+    assert_eq!(calls.as_slice(), ["status", "enqueue", "start"], "{calls:?}");
     drop(calls);
     assert!(spool::list()?.is_empty());
     assert_eq!(std::fs::read_to_string(pending.join("0100_task/task.sh"))?, "echo t1\n");
@@ -435,7 +490,7 @@ fn held_entry_skipped_until_released() -> Result<()> {
     assert_eq!(spool::set_hold("h1", None)?, "h1");
     assert_eq!(dispatch::sweep_with(&t)?, 1);
     assert!(spool::list()?.is_empty());
-    assert_eq!(std::fs::read_to_string(pending.join("0100_task/task.sh"))?, "echo deferred\n");
+    assert_eq!(std::fs::read_to_string(pending.join("0101_task/task.sh"))?, "echo deferred\n");
 
     // Ambiguous prefix and unknown id are honest errors.
     assert!(spool::set_hold("nope", None).is_err());

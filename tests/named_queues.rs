@@ -157,8 +157,10 @@ fn changing_default_never_retarguess_staged_tasks() -> Result<()> {
     registry::save_client(&c)?;
 
     // Delivery still lands in train's qroot — the staged snapshot wins.
+    // The post-delivery start may claim this fast task before the sweep
+    // returns, so observe its terminal track rather than a transient pending entry.
     dispatch::sweep_with(&t)?;
-    wait_until(15, "train pending entry", || home.path("q/train/pending").read_dir().map(|mut d| d.next().is_some()).unwrap_or(false))?;
+    wait_until(15, "train done entry", || home.path("q/train/done").read_dir().map(|mut d| d.next().is_some()).unwrap_or(false))?;
     assert!(home.path("q/eval/pending").read_dir()?.next().is_none());
     let ledger = shunt::server::tasks::list()?;
     assert_eq!(ledger[0].queue, "train");
