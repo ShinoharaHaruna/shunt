@@ -12,6 +12,7 @@ mod seq;
 mod tests;
 
 pub use clean::{clean, CleanReport, CleanSets};
+pub(crate) use enqueue::invalidate_dedup_index;
 pub use enqueue::{enqueue, EnqueueOutcome};
 pub use entries::{archive_oldest, claim, digits_only, is_dir_entry, list_entries, match_pending, match_running, pending_list, piece_file, recent_exits, remove_pending, running_list, task_file};
 pub use seq::{next_seq, seq_lock};

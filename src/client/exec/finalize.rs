@@ -22,10 +22,13 @@ pub fn quarantine(root: &Path, track: &str, name: &str, note: &str) -> Result<()
     if !src_dir.exists() && !root.join(track).join(format!("{name}.sh")).exists() {
         return Ok(());
     }
+    let _seq_lock = queue::seq_lock(root)?;
     let failed = root.join("failed");
     std::fs::create_dir_all(&failed)?;
     let mut dest = failed.join(name);
     if dest.exists() || failed.join(format!("{name}.sh")).exists() {
+        // A suffix changes the indexed basename; force a live-track bootstrap (§3.3).
+        queue::invalidate_dedup_index(root)?;
         dest = failed.join(format!("{name}.quarantined.{}", crate::proto::time::unix_now()));
     }
     if src_dir.is_dir() {

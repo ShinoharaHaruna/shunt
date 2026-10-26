@@ -253,6 +253,28 @@ fn quarantine_missing_source_is_noop() {
     std::fs::remove_dir_all(&root).ok();
 }
 
+/// A collision suffix changes the task basename; invalidate `.dedup`
+/// so a subsequent re-push bootstraps to the quarantined entry name.
+#[test]
+fn quarantine_collision_rebuilds_dedup_name() {
+    let root = std::env::temp_dir().join(format!("shunt-qdedup-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    crate::client::queue::init(&root).unwrap();
+    let body = "#!/usr/bin/env bash\n# shunt:id=quarantine-1\nexec true\n";
+    let crate::client::queue::EnqueueOutcome::Fresh(name) = crate::client::queue::enqueue(&root, "task", body).unwrap() else {
+        panic!("first enqueue must mint");
+    };
+    assert!(crate::client::queue::claim(&root, &name).unwrap());
+    std::fs::create_dir_all(root.join("failed").join(&name)).unwrap();
+
+    super::quarantine(&root, "running", &name, "collision test").unwrap();
+    assert!(!root.join(".dedup").exists(), "collision left the old basename indexed");
+    let crate::client::queue::EnqueueOutcome::Deduped(quarantined) = crate::client::queue::enqueue(&root, "task", body).unwrap() else {
+        panic!("re-push did not dedup to quarantined task");
+    };
+    assert!(quarantined.starts_with(&format!("{name}.quarantined.")), "unexpected destination: {quarantined}");
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// `exit`/`timeout` are written inside the running entry BEFORE
 /// the rename (design.md §3.9 deviates: write-then-mv): on
 /// success the sidecars simply travel with the dir to done/.

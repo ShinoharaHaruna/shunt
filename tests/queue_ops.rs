@@ -86,6 +86,21 @@ fn prio_renumber_and_refuse_existing() {
 }
 
 #[test]
+fn prio_rename_keeps_delivery_dedup_valid() {
+    let q = Q::new("prio-dedup");
+    let body = "#!/usr/bin/env bash\n# shunt:id=prio-delivery\nexec true\n";
+    let original = q.enqueue_script("delivery", body);
+    let renamed = format!("0005_{}", original.split_once('_').unwrap().1);
+    q.run_ok(&["prio", &original, "5"]);
+    assert!(!q.root.join(".dedup").exists(), "name-changing prio kept a stale index");
+
+    let source = q.root.join("task-delivery.sh.src");
+    q.run_ok(&["enqueue", source.to_str().unwrap(), "delivery"]);
+    assert_eq!(q.tasks("pending"), vec![renamed.clone()]);
+    assert_eq!(std::fs::read_to_string(q.root.join(".dedup")).unwrap(), format!("prio-delivery\t{renamed}\n"));
+}
+
+#[test]
 fn status_json_shape() {
     let q = Q::new("status");
     q.enqueue_script("s1", &sleep_task());

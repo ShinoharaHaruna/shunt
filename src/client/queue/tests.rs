@@ -54,20 +54,36 @@ fn claim_flat_name_collision_is_err() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// The wraparound floor spans all tracks + archives (§3.2): a
-/// number held only in done/ or .archive/ must not be reminted —
-/// the collision would fail a later claim/finalize rename.
+/// The wraparound floor spans only live tracks (§3.2): archived
+/// legacy NNNN names are inert, while a live terminal entry still
+/// prevents a collision at claim/finalize time.
 #[test]
-fn next_seq_wraparound_clears_all_tracks() {
+fn next_seq_wraparound_ignores_archives() {
     let root = tmp_root("hiwater");
     std::fs::create_dir_all(root.join("done/9500_old")).unwrap();
-    std::fs::create_dir_all(root.join("failed/.archive/9700_ancient")).unwrap();
+    std::fs::create_dir_all(root.join("failed/.archive/9999_ancient")).unwrap();
     std::fs::write(root.join(".seq"), format!("{SEQ_MAX}\n")).unwrap();
-    let n = next_seq(&root).unwrap();
-    assert_eq!(n, 9701);
-    // true exhaustion: 9999 occupied in a terminal track
+    assert_eq!(next_seq(&root).unwrap(), 9501);
+    // True exhaustion still applies when 9999 remains on a live track.
     std::fs::create_dir_all(root.join("done/9999_last")).unwrap();
     assert!(next_seq(&root).is_err());
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Archiving releases the original NNNN prefix and leaves the data
+/// visible only under an underscore-prefixed cold-storage name.
+#[test]
+fn archive_renames_out_of_sequence_namespace() {
+    let root = tmp_root("archivename");
+    for name in ["0100_old", "0101_new"] {
+        std::fs::create_dir_all(root.join("done").join(name)).unwrap();
+    }
+    assert_eq!(archive_oldest(&root, "done", 1), 1);
+    let archived: Vec<_> = std::fs::read_dir(root.join("done/.archive")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(archived.len(), 1);
+    assert!(archived[0].starts_with('_'), "archive name retained a numeric prefix: {}", archived[0]);
+    assert!(archived[0].ends_with("_0100_old"));
+    assert_eq!(list_entries(&root, "done").unwrap(), vec!["0101_new".to_string()]);
     std::fs::remove_dir_all(&root).ok();
 }
 
@@ -87,7 +103,20 @@ fn enqueue_dedups_on_shunt_id() {
         EnqueueOutcome::Deduped(n) => assert_eq!(n, name),
         EnqueueOutcome::Fresh(n) => panic!("re-push minted {n}"),
     }
-    assert_eq!(pending_list(&root).unwrap(), vec![name]);
+    assert_eq!(pending_list(&root).unwrap(), vec![name.clone()]);
+    assert_eq!(std::fs::read_to_string(root.join(".dedup")).unwrap(), format!("abc-123\t{name}\n"));
+    // Removal makes the latest index row stale; a re-push is fresh,
+    // then that newer row becomes the dedup target.
+    remove_pending(&root, &name).unwrap();
+    let replacement = match enqueue(&root, "t-abc123", body).unwrap() {
+        EnqueueOutcome::Fresh(n) => n,
+        EnqueueOutcome::Deduped(n) => panic!("removed entry {n} remained a dedup target"),
+    };
+    assert_ne!(replacement, name);
+    match enqueue(&root, "t-abc123", body).unwrap() {
+        EnqueueOutcome::Deduped(n) => assert_eq!(n, replacement),
+        EnqueueOutcome::Fresh(n) => panic!("re-push minted {n} after re-mint"),
+    }
     // No id -> no dedup, even for byte-identical bodies.
     let plain = "#!/usr/bin/env bash\nexec true\n";
     assert!(matches!(enqueue(&root, "x", plain).unwrap(), EnqueueOutcome::Fresh(_)));
@@ -112,6 +141,77 @@ fn enqueue_dedup_finds_claimed_and_finished() {
         }
         std::fs::remove_dir_all(&entry).unwrap();
     }
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Pre-index queues bootstrap from live task heads, including the
+/// legacy flat-file layout, before subsequent lookups use `.dedup`.
+#[test]
+fn enqueue_bootstraps_legacy_flat_entry() {
+    let root = tmp_root("dedupbootstrap");
+    let name = "0090_legacy";
+    std::fs::write(root.join(format!("done/{name}.sh")), "#!/usr/bin/env bash\n# shunt:id=legacy-9\nexec true\n").unwrap();
+    let body = "#!/usr/bin/env bash\n# shunt:id=legacy-9\nexec true\n";
+    match enqueue(&root, "legacy9", body).unwrap() {
+        EnqueueOutcome::Deduped(n) => assert_eq!(n, name),
+        EnqueueOutcome::Fresh(n) => panic!("legacy flat entry missed bootstrap: {n}"),
+    }
+    assert_eq!(std::fs::read_to_string(root.join(".dedup")).unwrap(), format!("legacy-9\t{name}\n"));
+    assert_eq!(std::fs::read_to_string(root.join(".seq")).unwrap(), "99\n");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A stale last index row is a miss rather than a phantom dedup hit.
+#[test]
+fn enqueue_stale_dedup_row_is_miss() {
+    let root = tmp_root("dedupstale");
+    std::fs::write(root.join(".dedup"), "gone-1\t0100_removed\n").unwrap();
+    let out = enqueue(&root, "gone1", "#!/usr/bin/env bash\n# shunt:id=gone-1\nexec true\n").unwrap();
+    assert!(matches!(out, EnqueueOutcome::Fresh(_)));
+    assert_eq!(pending_list(&root).unwrap().len(), 1);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Compaction runs at the 64 KiB growth boundary, dropping stale rows
+/// while retaining every row that still names a live entry.
+#[test]
+fn enqueue_compacts_dedup_index_at_threshold() {
+    use super::enqueue::{dedup_compact_bytes, DEDUP_COMPACT_BYTES_OVERRIDE};
+
+    struct ResetThreshold;
+    impl Drop for ResetThreshold {
+        fn drop(&mut self) {
+            DEDUP_COMPACT_BYTES_OVERRIDE.with(|threshold| threshold.set(None));
+        }
+    }
+
+    DEDUP_COMPACT_BYTES_OVERRIDE.with(|threshold| threshold.set(Some(512)));
+    let _reset = ResetThreshold;
+    let threshold = dedup_compact_bytes() as usize;
+    let root = tmp_root("dedupcompact");
+    std::fs::create_dir_all(root.join("pending/0100_kept")).unwrap();
+    std::fs::write(root.join("pending/0100_kept/task.sh"), "#!/usr/bin/env bash\n# shunt:id=kept-1\nexec true\n").unwrap();
+    let append = "fresh-1\t0101_fresh\n";
+    let stale = "stale-1\t9999_gone\n";
+    let mut seeded = String::from("kept-1\t0100_kept\n");
+    while seeded.len() + stale.len() + append.len() <= threshold {
+        seeded.push_str(stale);
+    }
+    let gap = threshold - append.len() - seeded.len();
+    if gap > 0 {
+        seeded.push_str(&"x".repeat(gap - 1));
+        seeded.push('\n');
+    }
+    assert_eq!(seeded.len() + append.len(), threshold);
+    std::fs::write(root.join(".dedup"), seeded).unwrap();
+
+    match enqueue(&root, "fresh", "#!/usr/bin/env bash\n# shunt:id=fresh-1\nexec true\n").unwrap() {
+        EnqueueOutcome::Fresh(n) => assert_eq!(n, "0101_fresh"),
+        EnqueueOutcome::Deduped(n) => panic!("unexpected hit: {n}"),
+    }
+    let compacted = std::fs::read_to_string(root.join(".dedup")).unwrap();
+    assert_eq!(compacted, "kept-1\t0100_kept\nfresh-1\t0101_fresh\n");
+    assert!(compacted.len() < threshold);
     std::fs::remove_dir_all(&root).ok();
 }
 
@@ -250,6 +350,8 @@ fn clean_selected_sets_only() {
     std::fs::create_dir_all(root.join("done/.archive/0001_anc")).unwrap();
     std::fs::create_dir_all(root.join("done/.archive/0002_anc")).unwrap();
     std::fs::create_dir_all(root.join("failed/.archive/0003_anc")).unwrap();
+    std::fs::write(root.join(".dedup"), "kept\t0100_a\n").unwrap();
+    init(&root).unwrap();
 
     let r = clean(&root, &CleanSets { pending: true, archive: true, ..Default::default() });
     assert_eq!((r.pending, r.archive, r.done, r.failed, r.skipped), (3, 3, 0, 0, 0));
@@ -263,6 +365,7 @@ fn clean_selected_sets_only() {
     assert_eq!(list_entries(&root, "failed").unwrap(), vec!["0091_f".to_string()]);
     assert!(list_entries(&root, "done/.archive").unwrap().is_empty());
     assert!(list_entries(&root, "failed/.archive").unwrap().is_empty());
+    assert_eq!(std::fs::read_to_string(root.join(".dedup")).unwrap(), "kept\t0100_a\n");
     // The run's own trash dir must not survive.
     let stray: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".clean-")).collect();
     assert!(stray.is_empty());

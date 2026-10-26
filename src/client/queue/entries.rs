@@ -9,7 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// they move to `<track>/.archive/` — dot-prefixed, so `list_entries`
 /// (which skips `.` names) never sees them, but the data survives on
 /// disk. Name sort is sequence order, so the oldest entries leave
-/// first. Returns how many entries moved.
+/// first. The underscore prefix releases their NNNN slots; old-format
+/// NNNN archives remain inert and cannot collide with these names.
+/// Returns how many entries moved.
 pub fn archive_oldest(root: &Path, track: &str, keep: usize) -> usize {
     let Ok(names) = list_entries(root, track) else {
         return 0;
@@ -22,8 +24,16 @@ pub fn archive_oldest(root: &Path, track: &str, keep: usize) -> usize {
         return 0;
     }
     let mut moved = 0;
+    let millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
     for name in names.iter().take(names.len() - keep) {
-        if std::fs::rename(root.join(track).join(name), archive.join(name)).is_ok() {
+        let archived_name = format!("_{millis}_{name}");
+        let target = archive.join(archived_name);
+        // Unix rename can replace an existing file; preserve same-ms
+        // collisions in the terminal track for a later finalize retry.
+        if target.exists() {
+            continue;
+        }
+        if std::fs::rename(root.join(track).join(name), target).is_ok() {
             moved += 1;
         }
     }

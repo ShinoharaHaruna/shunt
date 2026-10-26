@@ -208,6 +208,9 @@ fn prio_impl(a: &PrioArgs) -> Result<()> {
         return jfail(a.json, &format!("target name exists: {new}"));
     }
     if new != base {
+        // `.dedup` stores basenames, so the next keyed push must bootstrap (§3.3).
+        let _seq_lock = crate::client::queue::seq_lock(&root)?;
+        crate::client::queue::invalidate_dedup_index(&root)?;
         if crate::client::queue::is_dir_entry(&root, "pending", &base) {
             // check-then-rename: rename onto a non-empty dir already
             // fails; onto an EMPTY dir it silently replaces — a

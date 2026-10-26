@@ -94,11 +94,10 @@ pub fn next_seq(root: &Path) -> Result<u32> {
     mint_locked(root)
 }
 
-/// Highest NNNN prefix occupied anywhere in the NNNN namespace:
-/// all four live tracks plus each track's `.archive/` (priority
-/// band 0000–0099 excluded). Wraparound renumbering must clear
-/// every one of these or the minted name collides at claim or
-/// finalize time (design.md §3.2).
+/// Highest NNNN prefix occupied on the four live tracks (priority
+/// band 0000–0099 excluded). The floor bounds concurrent on-track
+/// entries, not lifetime history; underscore-prefixed archives no
+/// longer reserve sequence numbers (design.md §3.2).
 fn high_water(root: &Path) -> Result<u32> {
     let mut hi = SEQ_INIT;
     let mut bump = |n: &str| {
@@ -109,13 +108,6 @@ fn high_water(root: &Path) -> Result<u32> {
     for track in ["pending", "running", "done", "failed"] {
         for name in list_entries(root, track)? {
             bump(&name);
-        }
-        // Archived entries still hold their NNNN prefix; a wrapped
-        // counter minting onto one collides in .archive/ itself.
-        if let Ok(rd) = std::fs::read_dir(root.join(track).join(".archive")) {
-            for ent in rd.flatten() {
-                bump(&ent.file_name().to_string_lossy());
-            }
         }
     }
     Ok(hi)

@@ -102,7 +102,17 @@ pub(crate) fn adopt_orphans(root: &Path) -> Result<HashMap<u32, RunHandle>> {
             // replaces it (unlike bash mv) — check the target first
             // and take the same quarantine path as a rename failure.
             let target = pending.join(format!("0000_requeued_{clean}"));
-            let moved = if target.exists() { Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("target exists: {}", target.display()))) } else { std::fs::rename(&dir, &target) };
+            // Requeue rewrites the basename; invalidate the index
+            // under the same lock so the next lookup bootstraps anew.
+            let moved = {
+                let _seq_lock = queue::seq_lock(root)?;
+                queue::invalidate_dedup_index(root)?;
+                if target.exists() {
+                    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("target exists: {}", target.display())))
+                } else {
+                    std::fs::rename(&dir, &target)
+                }
+            };
             if let Err(e) = moved {
                 // A failed rename must not strand the entry in
                 // running/ forever: no pid file means kill/status
@@ -123,7 +133,17 @@ pub(crate) fn adopt_orphans(root: &Path) -> Result<HashMap<u32, RunHandle>> {
             // Legacy flat entry: stays a flat `NNNN_slug.sh` in
             // pending so the listing keeps seeing it.
             let target = pending.join(format!("0000_requeued_{clean}.sh"));
-            let moved = if target.exists() { Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("target exists: {}", target.display()))) } else { std::fs::rename(running.join(format!("{base}.sh")), &target) };
+            // Requeue rewrites the basename; invalidate the index
+            // under the same lock so the next lookup bootstraps anew.
+            let moved = {
+                let _seq_lock = queue::seq_lock(root)?;
+                queue::invalidate_dedup_index(root)?;
+                if target.exists() {
+                    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("target exists: {}", target.display())))
+                } else {
+                    std::fs::rename(running.join(format!("{base}.sh")), &target)
+                }
+            };
             if let Err(e) = moved {
                 dlog(root, "requeue_failed", ev(json!({"task": base, "error": e.to_string()})));
                 if let Err(e2) = exec::quarantine(root, "running", &base, &format!("orphan requeue failed: {e}")) {
@@ -331,6 +351,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         queue::init(&root).unwrap();
         root
+    }
+
+    /// Orphan recovery changes the basename, so the old name-based
+    /// index is invalidated and the next retry bootstraps the new name.
+    #[test]
+    fn orphan_requeue_preserves_dedup_after_rename() {
+        let root = tmp_root("dedup-requeue");
+        let body = "#!/usr/bin/env bash\n# shunt:id=orphan-retry\nexec true\n";
+        let queue::EnqueueOutcome::Fresh(original) = queue::enqueue(&root, "orphan", body).unwrap() else {
+            panic!("first enqueue must mint");
+        };
+        assert!(queue::claim(&root, &original).unwrap());
+        assert!(root.join(".dedup").is_file());
+
+        adopt_orphans(&root).unwrap();
+        let requeued = format!("0000_requeued_{original}");
+        assert!(root.join("pending").join(&requeued).is_dir());
+        assert!(!root.join(".dedup").exists(), "stale basename index survived orphan move");
+        match queue::enqueue(&root, "orphan", body).unwrap() {
+            queue::EnqueueOutcome::Deduped(n) => assert_eq!(n, requeued),
+            queue::EnqueueOutcome::Fresh(n) => panic!("orphan retry minted duplicate {n}"),
+        }
+        assert_eq!(std::fs::read_to_string(root.join(".dedup")).unwrap(), format!("orphan-retry\t{requeued}\n"));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A claim stage stranded by kill -9 (`.sh` already moved into
