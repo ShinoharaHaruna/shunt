@@ -82,12 +82,44 @@ pub fn script(client: &str, queue: Option<&str>, name: &str) -> anyhow::Result<S
     transport::queue_exec(t.as_ref(), &resolved, &["cat", "--", name], None)
 }
 
-/// `client exec` passthrough for read-only probes (`sh -c <cmd>`).
-/// The dashboard's one non-GET surface — its scope is the §18
-/// probe use, not mutation: nothing here writes queue state.
-pub fn exec(client: &str, cmd: &str) -> anyhow::Result<String> {
+/// Fixed, read-only system probes exposed by `serve` (§18). The
+/// argv is server-owned so request text can never become a command.
+pub const PROBE_NAMES: &[&str] = &["ps", "gpu", "df", "mem", "uptime"];
+
+/// Resolve a public probe name to its fixed argv; never pass request
+/// text to a shell or append it to these arguments.
+pub fn probe_argv(probe: &str) -> Option<&'static [&'static str]> {
+    match probe {
+        "ps" => Some(&["ps", "-eo", "pid,pgid,etime,%cpu,stat,cmd", "--sort=-%cpu"]),
+        "gpu" => Some(&["nvidia-smi"]),
+        "df" => Some(&["df", "-h"]),
+        "mem" => Some(&["free", "-h"]),
+        "uptime" => Some(&["uptime"]),
+        _ => None,
+    }
+}
+
+/// Run a fixed system probe on a registered client (§18).
+pub fn probe(client: &str, probe: &str) -> anyhow::Result<String> {
     use crate::server::transport;
+    let argv = probe_argv(probe).ok_or_else(|| anyhow::anyhow!("unknown probe {probe:?}"))?;
     let (c, t) = transport::client_transport(client)?;
-    let argv = vec!["sh".to_string(), "-c".to_string(), cmd.to_string()];
+    let argv: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
     t.exec(&c, &argv, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probes_resolve_only_to_fixed_argv() {
+        assert_eq!(PROBE_NAMES, &["ps", "gpu", "df", "mem", "uptime"]);
+        assert_eq!(probe_argv("ps"), Some(&["ps", "-eo", "pid,pgid,etime,%cpu,stat,cmd", "--sort=-%cpu"][..]));
+        assert_eq!(probe_argv("gpu"), Some(&["nvidia-smi"][..]));
+        assert_eq!(probe_argv("df"), Some(&["df", "-h"][..]));
+        assert_eq!(probe_argv("mem"), Some(&["free", "-h"][..]));
+        assert_eq!(probe_argv("uptime"), Some(&["uptime"][..]));
+        assert_eq!(probe_argv("ps; id"), None);
+    }
 }

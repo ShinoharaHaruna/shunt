@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { ClientStatus, QueueStatus, StatusReport } from '../types'
-import { postExec } from '../api'
+import { postProbe } from '../api'
 import { Card, CopyText, Dot, Empty, Muted, Pill, SectionHeading } from './ui'
 import { EntryList, LogPane, RecentList, ResourceBlock, ScriptPane } from './queueDetail'
 import { useI18n } from '../i18n'
@@ -111,29 +111,20 @@ function StatusChips({ rep, compat }: { rep: StatusReport; compat?: string | nul
   )
 }
 
-const PROBES: [string, string][] = [
-  ['ps', 'ps -eo pid,pgid,etime,%cpu,stat,cmd --sort=-%cpu | head -25'],
-  ['nvidia-smi', 'nvidia-smi'],
-  ['df', 'df -h /'],
-  ['free', 'free -h'],
-  ['uptime', 'uptime'],
-]
+const PROBES = ['ps', 'gpu', 'df', 'mem', 'uptime'] as const
 
-/** `client exec` passthrough — read-only probes, one shell string at
- *  a time. Output is verbatim; the transport timeout caps runaway
- *  commands the same way the CLI does. */
+/** Fixed server-defined probes keep request text out of command execution. */
 function ProbeSection({ client }: { client: string }) {
   const { t } = useI18n()
-  const [cmd, setCmd] = useState('')
   const [out, setOut] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
-  const run = (c: string) => {
-    if (!c.trim() || busy) return
+  const run = (probe: string) => {
+    if (busy) return
     setBusy(true)
     setErr(null)
-    postExec(client, c)
+    postProbe(client, probe)
       .then((r) => {
         if (r.ok) setOut(r.out ?? '')
         else setErr(r.error ?? t('probe.unknownError'))
@@ -144,43 +135,22 @@ function ProbeSection({ client }: { client: string }) {
 
   return (
     <div className="mt-4 border-t border-edge-soft pt-3">
-      <div className="mb-2 flex items-center gap-2 text-[11px]">
+      <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px]">
         <Muted>{t('probe.label', { client })}</Muted>
-        {PROBES.map(([label, c]) => (
+        {PROBES.map((probe) => (
           <button
-            key={label}
-            onClick={() => {
-              setCmd(c)
-              run(c)
-            }}
-            className="font-num rounded px-1.5 py-0.5 text-[10px] text-ink-4 ring-1 ring-edge transition-all duration-150 hover:-translate-y-px hover:bg-hover hover:text-ink-2 active:translate-y-0"
+            key={probe}
+            type="button"
+            aria-label={`${t('probe.run')} ${probe}`}
+            disabled={busy}
+            onClick={() => run(probe)}
+            className="font-num rounded px-1.5 py-0.5 text-[10px] text-ink-4 ring-1 ring-edge transition-all duration-150 hover:-translate-y-px hover:bg-hover hover:text-ink-2 active:translate-y-0 disabled:opacity-40"
           >
-            {label}
+            {busy ? '…' : probe}
           </button>
         ))}
       </div>
-      <form
-        className="flex gap-1.5"
-        onSubmit={(e) => {
-          e.preventDefault()
-          run(cmd)
-        }}
-      >
-        <input
-          value={cmd}
-          onChange={(e) => setCmd(e.target.value)}
-          placeholder={t('probe.placeholder', { client })}
-          spellCheck={false}
-          className="font-num min-w-0 flex-1 rounded-lg border border-edge bg-hover px-2.5 py-1 text-[12px] text-ink-2 placeholder:text-ink-4 focus:border-edge focus:outline-none"
-        />
-        <button
-          type="submit"
-          disabled={busy || !cmd.trim()}
-          className="rounded-lg border border-edge px-2.5 text-[11px] text-ink-2 transition-all duration-150 hover:bg-hover active:scale-[0.97] disabled:opacity-40"
-        >
-          {busy ? '…' : t('probe.run')}
-        </button>
-      </form>
+      <Muted className="text-[10px]">{t('probe.help')}</Muted>
       {(err !== null || out !== null) && (
         <pre className="font-num mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap rounded-lg bg-hover p-2.5 text-[11px] leading-relaxed ring-1 ring-edge-soft">
           {err !== null ? (

@@ -1,7 +1,6 @@
 //! Minimal HTTP/1.1 surface for `serve` (design.md §18): enough to
-//! route GETs and detect a WebSocket upgrade. Not a general server —
-//! bodies are never read (the surface is GET-only), and every
-//! response closes the connection.
+//! route GETs, one bounded probe POST, and detect a WebSocket upgrade.
+//! Not a general server — every response closes the connection.
 
 use anyhow::Result;
 use std::io::{Read, Write};
@@ -22,8 +21,8 @@ pub struct Request {
     /// Header names lowercased; values verbatim.
     pub headers: Vec<(String, String)>,
     /// Request body, read per Content-Length (empty for GETs).
-    /// Bounded: the only body route is the exec probe — a command
-    /// line never legitimately exceeds this.
+    /// Bounded: the only body route selects a fixed probe and its
+    /// request never needs more than this.
     pub body: Vec<u8>,
 }
 
@@ -134,8 +133,11 @@ pub fn respond(stream: &mut TcpStream, code: u16, reason: &str, content_type: &s
 pub fn json(stream: &mut TcpStream, code: u16, body: &serde_json::Value) -> Result<()> {
     let reason = match code {
         200 => "OK",
+        400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
+        405 => "Method Not Allowed",
         500 => "Internal Server Error",
         _ => "?",
     };

@@ -81,7 +81,7 @@ export const en = {
   'decl.retry': 'retry {n}',
 
   'probe.label': 'probe · {client}',
-  'probe.placeholder': 'sh -c "…" on {client}',
+  'probe.help': 'fixed read-only system probes',
   'probe.run': 'run',
   'probe.unknownError': 'unknown error',
 

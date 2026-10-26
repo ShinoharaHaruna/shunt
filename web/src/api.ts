@@ -48,21 +48,21 @@ export async function fetchScript(
   return (await r.json()) as { ok: boolean; text?: string; error?: string }
 }
 
-/** The one non-GET call: `client exec` passthrough for read-only
- *  probes. Token rides the header — keeps it out of the URL (and
- *  therefore out of server logs and Referer headers). */
-export async function postExec(
+/** The one non-GET call selects a server-defined read-only probe.
+ *  Token rides the header — keeping it out of the URL avoids logs
+ *  and Referer headers. */
+export async function postProbe(
   client: string,
-  cmd: string,
+  probe: string,
 ): Promise<{ ok: boolean; out?: string; error?: string }> {
   const token = getToken()
-  const r = await fetch('/api/exec', {
+  const r = await fetch('/api/probe', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       ...(token !== null ? { 'x-shunt-token': token } : {}),
     },
-    body: JSON.stringify({ client, cmd }),
+    body: JSON.stringify({ client, probe }),
   })
   return (await r.json()) as { ok: boolean; out?: string; error?: string }
 }

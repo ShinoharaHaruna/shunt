@@ -81,7 +81,7 @@ export const ru: Dict = {
   'decl.retry': 'повторов {n}',
 
   'probe.label': 'exec · {client}',
-  'probe.placeholder': 'sh -c "…" на {client}',
+  'probe.help': 'фиксированные системные проверки только для чтения',
   'probe.run': 'выполнить',
   'probe.unknownError': 'неизвестная ошибка',
 

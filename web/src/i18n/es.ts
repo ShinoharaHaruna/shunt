@@ -81,7 +81,7 @@ export const es: Dict = {
   'decl.retry': 'reintentos {n}',
 
   'probe.label': 'sondeo · {client}',
-  'probe.placeholder': 'sh -c "…" en {client}',
+  'probe.help': 'sondeos de sistema fijos de solo lectura',
   'probe.run': 'ejecutar',
   'probe.unknownError': 'error desconocido',
 

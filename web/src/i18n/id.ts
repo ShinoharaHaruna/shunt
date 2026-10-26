@@ -81,7 +81,7 @@ export const id: Dict = {
   'decl.retry': 'retry {n}',
 
   'probe.label': 'probe · {client}',
-  'probe.placeholder': 'sh -c "…" di {client}',
+  'probe.help': 'probe sistem tetap hanya-baca',
   'probe.run': 'jalankan',
   'probe.unknownError': 'error tidak dikenal',
 

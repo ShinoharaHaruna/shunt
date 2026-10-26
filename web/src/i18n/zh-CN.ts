@@ -80,7 +80,7 @@ export const zhCN: Dict = {
   'decl.retry': '重试 {n}',
 
   'probe.label': '探测 · {client}',
-  'probe.placeholder': '在 {client} 上执行 sh -c "…"',
+  'probe.help': '固定的只读系统探测',
   'probe.run': '运行',
   'probe.unknownError': '未知错误',
 

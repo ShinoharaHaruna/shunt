@@ -81,7 +81,7 @@ export const ko: Dict = {
   'decl.retry': 'retry {n}',
 
   'probe.label': 'probe · {client}',
-  'probe.placeholder': '{client}에서 sh -c "…"',
+  'probe.help': '고정 읽기 전용 시스템 프로브',
   'probe.run': '실행',
   'probe.unknownError': '알 수 없는 오류',
 

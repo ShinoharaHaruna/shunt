@@ -81,7 +81,7 @@ export const ja: Dict = {
   'decl.retry': 'リトライ {n}',
 
   'probe.label': 'プローブ · {client}',
-  'probe.placeholder': '{client} で sh -c "…"',
+  'probe.help': '固定の読み取り専用システムプローブ',
   'probe.run': '実行',
   'probe.unknownError': '不明なエラー',
 

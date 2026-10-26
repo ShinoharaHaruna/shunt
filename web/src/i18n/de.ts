@@ -81,7 +81,7 @@ export const de: Dict = {
   'decl.retry': 'retry {n}',
 
   'probe.label': 'Probe · {client}',
-  'probe.placeholder': 'sh -c "…" auf {client}',
+  'probe.help': 'feste schreibgeschützte System-Probes',
   'probe.run': 'ausführen',
   'probe.unknownError': 'unbekannter Fehler',
 

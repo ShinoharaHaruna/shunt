@@ -81,7 +81,7 @@ export const fr: Dict = {
   'decl.retry': 'réessais {n}',
 
   'probe.label': 'sonde · {client}',
-  'probe.placeholder': 'sh -c "…" sur {client}',
+  'probe.help': 'sondes système fixes en lecture seule',
   'probe.run': 'exécuter',
   'probe.unknownError': 'erreur inconnue',
 

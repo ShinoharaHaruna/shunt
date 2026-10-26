@@ -81,7 +81,7 @@ export const ptBR: Dict = {
   'decl.retry': 'retry {n}',
 
   'probe.label': 'sondagem · {client}',
-  'probe.placeholder': 'sh -c "…" em {client}',
+  'probe.help': 'sondagens fixas e somente leitura',
   'probe.run': 'executar',
   'probe.unknownError': 'erro desconhecido',
 

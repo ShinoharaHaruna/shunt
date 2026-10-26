@@ -209,8 +209,12 @@ fn alive() -> Result<Option<u32>> {
     }
 }
 
+fn is_loopback_bind(bind: &str) -> bool {
+    matches!(bind, "127.0.0.1" | "127.0.1.1" | "::1" | "localhost")
+}
+
 fn ensure_bind_allowed(opts: &ServeOpts) -> Result<()> {
-    let loopback = matches!(opts.bind.as_str(), "127.0.0.1" | "127.0.1.1" | "::1" | "localhost");
+    let loopback = is_loopback_bind(&opts.bind);
     anyhow::ensure!(loopback || opts.token.is_some(), "refusing to bind {}:{} without --token — the dashboard exposes fleet state to anyone who can reach the port; bind 127.0.0.1 (and use `ssh -L {0}:{1}:127.0.0.1:{1} <dev>` from your browser) or pass --token", opts.bind, opts.port);
     Ok(())
 }
@@ -412,7 +416,7 @@ pub fn run(opts: ServeOpts) -> Result<()> {
 
     let listener = TcpListener::bind((opts.bind.as_str(), opts.port))?;
     let token_note = if opts.token.is_some() { " (append ?token=… to the URL)" } else { "" };
-    println!("shunt serve: http://{}:{}{token_note} — read-only dashboard; Ctrl-C stops", opts.bind, opts.port);
+    println!("shunt serve: http://{}:{}{token_note} — read-only dashboard (fixed probes only); Ctrl-C stops", opts.bind, opts.port);
 
     // Lifecycle bookkeeping: pidfile first (up/down find us through
     // it), then a signal thread that removes it and exits — TERM
@@ -454,12 +458,13 @@ pub fn run(opts: ServeOpts) -> Result<()> {
     }
 
     let auth = Arc::new(opts.token);
+    let bind = opts.bind;
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
-                let (latest, hub, auth) = (latest.clone(), hub.clone(), auth.clone());
+                let (latest, hub, auth, bind) = (latest.clone(), hub.clone(), auth.clone(), bind.clone());
                 std::thread::spawn(move || {
-                    let _ = handle(stream, &latest, &hub, &auth);
+                    let _ = handle(stream, &latest, &hub, &auth, &bind);
                 });
             }
             Err(e) => eprintln!("serve: accept failed: {e}"),
@@ -480,6 +485,67 @@ fn publish(latest: &Latest, hub: &ws::Hub, f: impl FnOnce(&mut Value)) {
     hub.broadcast(&text);
 }
 
+fn host_component(host: &str) -> Option<&str> {
+    let host = host.trim();
+    if let Some(rest) = host.strip_prefix('[') {
+        let (component, suffix) = rest.split_once(']')?;
+        component.parse::<std::net::Ipv6Addr>().ok()?;
+        if !suffix.is_empty() && !suffix.strip_prefix(':').is_some_and(|port| port.parse::<u16>().is_ok()) {
+            return None;
+        }
+        return Some(component);
+    }
+    match host.rsplit_once(':') {
+        Some((component, port)) if !component.contains(':') => {
+            port.parse::<u16>().ok()?;
+            Some(component)
+        }
+        Some(_) => None,
+        None => Some(host),
+    }
+}
+
+/// A loopback listener must not accept an attacker-controlled Host:
+/// DNS rebinding keeps Host and Origin equal while resolving to 127.0.0.1.
+fn loopback_host_allowed(host: Option<&str>, bind: &str) -> bool {
+    let Some(host) = host.and_then(host_component) else { return false };
+    let host = host.strip_suffix('.').unwrap_or(host);
+    ["127.0.0.1", "localhost", "::1", bind].iter().any(|allowed| host.eq_ignore_ascii_case(allowed))
+}
+
+fn origin_authority(origin: &str) -> Option<&str> {
+    let origin = origin.trim();
+    if origin.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    let (scheme, authority) = origin.split_once("://")?;
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) || authority.is_empty() || authority.bytes().any(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'?' | b'#' | b'@' | b',')) {
+        return None;
+    }
+    Some(authority)
+}
+
+/// Browser metadata blocks cross-site reads and writes before routing
+/// or token checks; absent headers keep non-browser clients usable.
+fn same_origin_ok(req: &http::Request) -> bool {
+    if req.header("sec-fetch-site").is_some_and(|site| !site.eq_ignore_ascii_case("same-origin") && !site.eq_ignore_ascii_case("none")) {
+        return false;
+    }
+    let Some(origin) = req.header("origin") else {
+        return true;
+    };
+    let Some(host) = req.header("host") else {
+        return false;
+    };
+    origin_authority(origin).is_some_and(|authority| authority.eq_ignore_ascii_case(host))
+}
+
+#[derive(serde::Deserialize)]
+struct ProbeRequest {
+    client: String,
+    probe: String,
+}
+
 fn authorized(req: &http::Request, token: &Option<String>) -> bool {
     let Some(expected) = token else {
         return true;
@@ -488,32 +554,40 @@ fn authorized(req: &http::Request, token: &Option<String>) -> bool {
     presented.as_deref() == Some(expected.as_str())
 }
 
-fn handle(mut stream: TcpStream, latest: &Latest, hub: &ws::Hub, token: &Option<String>) -> Result<()> {
+fn handle(mut stream: TcpStream, latest: &Latest, hub: &ws::Hub, token: &Option<String>, bind: &str) -> Result<()> {
     stream.set_nodelay(true).ok();
     let Some(req) = http::read_request(&mut stream) else {
         return Ok(());
     };
+    if is_loopback_bind(bind) && !loopback_host_allowed(req.header("host"), bind) {
+        return http::json(&mut stream, 403, &json!({"error": "invalid Host for loopback bind"}));
+    }
+    if !same_origin_ok(&req) {
+        return http::json(&mut stream, 403, &json!({"error": "cross-origin request rejected"}));
+    }
     if !authorized(&req, token) {
         return http::json(&mut stream, 401, &json!({"error": "unauthorized — pass ?token=, x-shunt-token, or Authorization: Bearer"}));
     }
-    if req.method == "POST" && req.path == "/api/exec" {
-        // §18 probe surface: `client exec` passthrough. The only
-        // non-GET route — everything else stays read.
-        let body: serde_json::Value = match serde_json::from_slice(&req.body) {
+    if req.method == "POST" && req.path == "/api/probe" {
+        // §18 exposes fixed inspection commands only; extra JSON
+        // fields are ignored and cannot alter the selected argv.
+        let body: ProbeRequest = match serde_json::from_slice(&req.body) {
             Ok(v) => v,
-            Err(_) => return http::json(&mut stream, 400, &json!({"error": "body must be JSON {client, cmd}"})),
+            Err(_) => return http::json(&mut stream, 400, &json!({"error": "body must be JSON {client, probe}"})),
         };
-        let (client, cmd) = (body["client"].as_str().unwrap_or(""), body["cmd"].as_str().unwrap_or(""));
-        if client.is_empty() || cmd.is_empty() {
-            return http::json(&mut stream, 400, &json!({"error": "expected {client, cmd}"}));
+        if body.client.is_empty() || body.probe.is_empty() {
+            return http::json(&mut stream, 400, &json!({"error": "expected {client, probe}"}));
         }
-        return match snapshot::exec(client, cmd) {
+        if snapshot::probe_argv(&body.probe).is_none() {
+            return http::json(&mut stream, 400, &json!({"error": format!("unknown probe {:?}; valid probes: {}", body.probe, snapshot::PROBE_NAMES.join(", "))}));
+        }
+        return match snapshot::probe(&body.client, &body.probe) {
             Ok(out) => http::json(&mut stream, 200, &json!({"ok": true, "out": out})),
             Err(e) => http::json(&mut stream, 200, &json!({"ok": false, "error": format!("{e:#}")})),
         };
     }
     if req.method != "GET" {
-        return http::json(&mut stream, 405, &json!({"error": "GET only (POST /api/exec is the one probe route)"}));
+        return http::json(&mut stream, 405, &json!({"error": "GET only (POST /api/probe is the one probe route)"}));
     }
     match req.path.as_str() {
         "/ws" => ws::upgrade(stream, &req, hub.clone(), latest),
@@ -563,5 +637,80 @@ fn handle(mut stream: TcpStream, latest: &Latest, hub: &ws::Hub, token: &Option<
             }
             None => http::json(&mut stream, 404, &json!({"error": format!("not found: {p}")})),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(headers: &[(&str, &str)]) -> http::Request {
+        http::Request { method: "GET".into(), path: "/".into(), query: String::new(), headers: headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(), body: Vec::new() }
+    }
+
+    #[test]
+    fn same_origin_gate_accepts_same_origin_and_non_browser_requests() {
+        assert!(same_origin_ok(&request(&[("host", "LOCALHOST:8747"), ("origin", "http://localhost:8747")])));
+        assert!(same_origin_ok(&request(&[("sec-fetch-site", "none")])));
+        assert!(same_origin_ok(&request(&[])));
+    }
+
+    #[test]
+    fn same_origin_gate_rejects_cross_site_metadata_and_origins() {
+        assert!(!same_origin_ok(&request(&[("sec-fetch-site", "cross-site")])));
+        assert!(!same_origin_ok(&request(&[("sec-fetch-site", "same-site")])));
+        assert!(!same_origin_ok(&request(&[("host", "localhost:8747"), ("origin", "null")])));
+        assert!(!same_origin_ok(&request(&[("host", "localhost:8747"), ("origin", "http://evil.example")])));
+    }
+
+    #[test]
+    fn loopback_host_gate_accepts_local_names_and_rejects_rebinding() {
+        for host in ["127.0.0.1", "127.0.0.1:8747", "localhost", "LOCALHOST.:8747", "[::1]", "[::1]:8747"] {
+            assert!(loopback_host_allowed(Some(host), "127.0.0.1"), "{host}");
+        }
+        assert!(loopback_host_allowed(Some("127.0.1.1:8747"), "127.0.1.1"));
+        assert!(!loopback_host_allowed(Some("attacker.example:8747"), "127.0.0.1"));
+        assert!(!loopback_host_allowed(Some("localhost.example:8747"), "127.0.0.1"));
+        assert!(!loopback_host_allowed(None, "127.0.0.1"));
+    }
+
+    fn response_for(raw: &str, bind: &str) -> String {
+        use std::io::{Read, Write};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).unwrap();
+        client.write_all(raw.as_bytes()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let latest: Latest = Arc::new(RwLock::new(json!({})));
+        handle(server, &latest, &ws::Hub::new(), &None, bind).unwrap();
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    fn loopback_request_rejects_rebinding_host_before_routing() {
+        let response = response_for("GET /api/snapshot HTTP/1.1\r\nHost: attacker.example:8747\r\nOrigin: http://attacker.example:8747\r\nSec-Fetch-Site: same-origin\r\n\r\n", "127.0.0.1");
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden\r\n"));
+        assert!(response.contains("invalid Host for loopback bind"));
+    }
+
+    #[test]
+    fn probe_request_ignores_untrusted_command_fields() {
+        let body: ProbeRequest = serde_json::from_str(r#"{"client":"localhost","probe":"ps","cmd":"rm -rf /"}"#).unwrap();
+        assert_eq!(body.client, "localhost");
+        assert_eq!(snapshot::probe_argv(&body.probe), Some(&["ps", "-eo", "pid,pgid,etime,%cpu,stat,cmd", "--sort=-%cpu"][..]));
+        assert_eq!(snapshot::probe_argv("rm -rf /"), None);
+    }
+
+    #[test]
+    fn unknown_probe_is_a_bad_request_listing_valid_names() {
+        let body = r#"{"client":"localhost","probe":"unknown"}"#;
+        let raw = format!("POST /api/probe HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        let response = response_for(&raw, "127.0.0.1");
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+        assert!(response.contains("unknown probe \\\"unknown\\\"; valid probes: ps, gpu, df, mem, uptime"));
     }
 }
