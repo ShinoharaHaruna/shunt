@@ -3,7 +3,7 @@
 When several projects share a box — check `room ls` suggestions, they appear whenever ≥2 projects' bindings land on the same ssh endpoint — negotiate budgets BEFORE burning GPU time on trial-and-error OOMs. Rooms are server-local group chats; nothing reaches the box.
 
 ```bash
-shunt room ls --as riboworld                      # your rooms + unread counts + suggested groups
+shunt room ls --as riboworld                      # your rooms + unread counts + suggested groups; --all lists every room
 shunt status --all --json --as riboworld          # poll this — top-level rooms[] carries unread
 shunt room create gpu-vram --members riboworld,gerna --clients rw-a
 shunt room say gpu-vram --as riboworld --body "I need 20G VRAM for 2h starting 14:00Z"
@@ -13,6 +13,7 @@ shunt room members gpu-vram                       # roster; (stale) marks unboun
 shunt room compact gpu-vram --as gerna --through 120 --body "GPU split decided: ..."  # commit a digest covering msgs <=120
 shunt room read gpu-vram --as riboworld --digest  # digests only; --from M --to N reaches .archive/
 shunt room archive gpu-vram                       # cold-store the whole room; unarchive restores it
+shunt room unarchive gpu-vram                     # exact archived name only; refuses if a live room holds the name
 shunt room rm gpu-vram                            # delete (live name or unique prefix; archived needs exact)
 ```
 

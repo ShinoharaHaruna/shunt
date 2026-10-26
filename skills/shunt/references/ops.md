@@ -21,7 +21,7 @@ shunt submit -c rw-a --env CUDA_VISIBLE_DEVICES=1 --timeout 7200 \
 # shunt-env:KEY=value         # env overlay; beats the queue env file
 ```
 
-Other `submit` flags: `--timeout <s>` is a wall-clock budget (TERM at the deadline, KILL after a 10 s grace — the task lands `failed/`); `--retry N [--retry-delay <s>]` reschedules on rc 75 / OOM (see `failure.md`); `--gpu-mem-mb`/`--ram-mb`/`--cpu-cores` are DECLARED sizing estimates recorded in the task head and shown beside measured usage — advisory, never gated on; `--env KEY=value` (repeatable) is a per-task overlay that beats the binding's env per key.
+Other `submit` flags: `--timeout <s>` is a wall-clock budget (TERM at the deadline, KILL after a 10 s grace — the task lands `failed/`); `--retry N [--retry-delay <s>]` reschedules on rc 75 / OOM (see `playbook.md`); `--gpu-mem-mb`/`--ram-mb`/`--cpu-cores` are DECLARED sizing estimates recorded in the task head and shown beside measured usage — advisory, never gated on; `--env KEY=value` (repeatable) is a per-task overlay that beats the binding's env per key; `--hold[=REASON]` and `--hold-on-box[=REASON]` park the work instead of letting it run (see the holds section below).
 
 A `--file` script can carry its own directives the same way.
 
@@ -86,7 +86,17 @@ shunt spool hold <id> "reason"   # hold an already-staged entry
 shunt spool release <id>         # let the next sweep deliver it
 ```
 
-A held spool entry is skipped by EVERY dispatch sweep — `--once` and the loop alike: no probe, no push. Use it for work staged ahead of a decision (lease approval, quota, a prerequisite run): staging is free, but an unheld entry fires the moment the box answers. Held entries show `held`/`held: <reason>` in `spool ls`. `--hold` takes its reason only via `=` (`--hold=why`), never a bare word — that slot belongs to task files.
+A held spool entry is skipped by EVERY dispatch sweep — `--once` and the loop alike: no probe, no push. Use it for work staged ahead of a decision (lease approval, quota, a prerequisite run): staging is free, but an unheld entry fires the moment the box answers. `spool ls` carries two hold columns — `held in spool[: reason]` and `held on box[: reason]` — so both gates stay visible before and after delivery. `--hold` and `--hold-on-box` take their reason only via `=` (`--hold=why`), never a bare word — that slot belongs to task files.
+
+## Box admission holds — delivered but not claimable
+
+```bash
+shunt submit -c rw-a --hold-on-box="GPU lease pending" -- python train.py
+shunt hold -c rw-a exp2 "waiting on the dataset copy"
+shunt release -c rw-a exp2
+```
+
+`--hold-on-box` still delivers: the dispatcher pushes the task on its next sweep, and the box installs `pending/<entry>/held` atomically with the entry, so the daemon skips it without changing its position. `shunt hold <pattern> [reason]` parks an entry already sitting in `pending/`; `shunt release <pattern>` clears the gate so the next poll can claim it. The gate is one-shot — a claim consumes it, so a rescheduled retry or an orphan requeue never waits for a second release. `status --json` exposes it as `pending_detail[].held`/`hold_reason` (a local `status --root` table annotates the entry `held` or `held: <reason>`), and `cat`, `prio`, `cancel`, and `clean --pending` still reach a held entry. A task already in `running/` cannot be re-parked: cancel before it is claimed, or resubmit with `--hold-on-box`.
 
 ## task ledger — what a spool id became
 
@@ -134,5 +144,5 @@ shunt feedback "one-line title" --kind bug --body "what you ran, what happened, 
 ```
 
 - The report lands as a GitHub issue (`[feedback/<kind>] …`) on the upstream repo (or `server.toml` `feedback_repo` / `$SHUNT_FEEDBACK_REPO`). Deduped within 24 h; capped at 5/h — if delivery fails the report is persisted and `shunt feedback ls` / `shunt feedback retry` manage it.
-- Registry secrets (`ssh.host/port/user/password/key`, `$HOME`) are auto-redacted — still, never paste tokens, passwords, or private data into the body; the issues are public.
+- Redaction covers every client row's `ssh.host/port/user/password/key` and `ssh.options` entries, the `$HOME` prefix, and registered names — client names become `<BOX_NAME>`, projects `<PROJECT_NAME>`, queues `<QUEUE_NAME>`, case-insensitively, with generic words (`localhost`, `default`, `admin`, `root`, …) exempt. That is still no guarantee: never paste tokens, passwords, or private data into the body — the issues are public, and the scrubber cannot know an arbitrary secret.
 - Include the command you ran and the JSON/log lines that matter; do not attach credentials or hostnames the scrubber cannot know about.
