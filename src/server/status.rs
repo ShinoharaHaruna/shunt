@@ -169,7 +169,7 @@ fn probe_skip(client: &ClientEntry, streak: u32, last_fail: Option<i64>, now: i6
 /// A row a sweep deliberately did not touch: everything the registry
 /// itself knows, plus why. `queues` is empty because nobody asked.
 fn skipped_status(client: &ClientEntry, skip: ProbeSkip) -> ClientStatus {
-    let fails = registry::conn_fail_read(&client.name);
+    let fails = registry::conn_fail_streak(client);
     ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: None, billing: client.billing.clone(), expire: (!client.expire.is_empty()).then(|| client.expire.clone()), expires_in_s: expires_left_s(client), connect_failures: (fails > 0).then_some(fails), endpoint_rotates: client.endpoint_rotates, facts: (!client.facts.is_empty()).then(|| client.facts.clone()), skip: Some(skip) }
 }
 
@@ -178,7 +178,7 @@ fn skipped_status(client: &ClientEntry, skip: ProbeSkip) -> ClientStatus {
 pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
     let expire = (!client.expire.is_empty()).then(|| client.expire.clone());
     let expires_in_s = expires_left_s(client);
-    let fails = registry::conn_fail_read(&client.name);
+    let fails = registry::conn_fail_streak(client);
     let connect_failures = (fails > 0).then_some(fails);
     let endpoint_rotates = client.endpoint_rotates;
     let mut queues = BTreeMap::new();
@@ -289,7 +289,7 @@ pub fn probe_all(force: bool) -> Result<Vec<ProbedClient>> {
     let clients: Vec<Result<ClientEntry>> = names.iter().map(|n| registry::load_client(n)).collect();
     // Skipped rows never reach `spawn`: the saving IS the point.
     let now = now_epoch();
-    let skip_for = |c: &ClientEntry| probe_skip(c, registry::conn_fail_read(&c.name), registry::conn_fail_at(&c.name), now);
+    let skip_for = |c: &ClientEntry| probe_skip(c, registry::conn_fail_streak(c), registry::conn_fail_at(&c.name), now);
     let skips: Vec<Option<ProbeSkip>> = clients.iter().map(|c| if force { None } else { c.as_ref().ok().and_then(skip_for) }).collect();
     // Scoped threads borrow `clients`; each builds its own transport
     // (`Box<dyn Transport>` is not Sync, and transports are cheap).

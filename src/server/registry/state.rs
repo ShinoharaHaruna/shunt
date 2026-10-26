@@ -1,6 +1,7 @@
 //! Connection-failure streak counters under `$SHUNT_HOME/state/`.
 
 use super::paths::shunt_home;
+use super::ClientEntry;
 use crate::server::fsutil::{private_dir, write_private};
 use anyhow::Result;
 use fs2::FileExt;
@@ -58,6 +59,43 @@ pub fn conn_fail_read(name: &str) -> u32 {
 /// the probe scheduler then treats the next attempt as due.
 pub fn conn_fail_at(name: &str) -> Option<i64> {
     read_fail_file(name).1
+}
+
+/// The client row's own file — the registry's source of truth for a box,
+/// so its mtime doubles as "a human last touched this row".
+fn client_row_path(name: &str) -> Option<PathBuf> {
+    Some(shunt_home().ok()?.join("clients").join(format!("{name}.toml")))
+}
+
+/// The streak to act on: the recorded count, unless the row file is
+/// newer than the newest recorded failure — then the streak is stale and
+/// is cleared first.
+///
+/// The case this exists for is a renewed subscription. `expire` is a
+/// hand-edited row field (§9), and the give-up pause would otherwise
+/// deadlock: a streak only clears on a successful ssh, while a paused
+/// client is never ssh'd. Renewal moves the deadline with one edit, so
+/// the edit IS the retry signal — the same way `client update --host`
+/// clears the streak for a new endpoint. Any other row edit (a new
+/// qroot, a fixed env_setup) earns the same single probe; a box that is
+/// still gone simply re-bumps.
+pub fn conn_fail_streak(client: &ClientEntry) -> u32 {
+    let count = conn_fail_read(&client.name);
+    if count == 0 {
+        return 0;
+    }
+    let (Some(row), Ok(fail)) = (client_row_path(&client.name), conn_fail_path(&client.name)) else {
+        return count;
+    };
+    let mtime = |p: &std::path::Path| fs::metadata(p).and_then(|m| m.modified());
+    let (Ok(row_at), Ok(fail_at)) = (mtime(&row), mtime(&fail)) else {
+        return count;
+    };
+    if row_at <= fail_at {
+        return count;
+    }
+    conn_fail_reset(&client.name);
+    0
 }
 
 /// ssh-level failure (exit 255): bump the streak, return the count.

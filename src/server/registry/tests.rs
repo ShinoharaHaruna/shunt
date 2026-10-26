@@ -87,6 +87,33 @@ fn conn_fail_sidecar_keeps_count_and_epoch() {
     std::fs::remove_dir_all(&tmp).ok();
 }
 
+/// A renewed subscription must not stay paused behind the give-up cap:
+/// the streak is dropped once the row file is newer than the newest
+/// failure, because a paused client is never ssh'd and so could never
+/// clear it any other way (design.md §4.1).
+#[test]
+fn edited_row_clears_the_fail_streak() {
+    let _g = HOME_LOCK.lock().unwrap();
+    let tmp = std::env::temp_dir().join(format!("shunt-test-renew-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &tmp);
+    let mut row = ClientEntry { name: "renew-me".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: "2020-01-01T00:00:00Z".into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: "/q".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/root".into(), facts: BTreeMap::new(), billing: None };
+    save_client(&row).unwrap();
+    for _ in 0..3 {
+        conn_fail_bump(&row.name);
+    }
+    assert_eq!(conn_fail_streak(&row), 3, "an untouched row keeps its streak");
+    assert_eq!(conn_fail_read(&row.name), 3);
+
+    // Renewal: one hand edit of `expire`, which makes the row newer than
+    // the failure it outlived.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    row.expire = "2999-01-01T00:00:00Z".into();
+    save_client(&row).unwrap();
+    assert_eq!(conn_fail_streak(&row), 0, "the edit is the retry signal");
+    assert_eq!(conn_fail_read(&row.name), 0, "the stale sidecar is gone");
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
 /// Registry privacy: client rows can carry ssh.password
 /// plaintext, so dirs are 0700 and files 0600 regardless of
 /// umask — including re-tightening a pre-existing loose file.

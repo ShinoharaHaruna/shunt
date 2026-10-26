@@ -64,7 +64,7 @@ struct PreConnect {
 impl PreConnect {
     fn new(client: &ClientEntry) -> Self {
         let mut h = Self { fired: client.pre_connect.is_empty(), note: None };
-        if !h.fired && crate::server::registry::conn_fail_read(&client.name) > 0 {
+        if !h.fired && crate::server::registry::conn_fail_streak(client) > 0 {
             h.on_255(client);
         }
         h

@@ -180,7 +180,7 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
             if crate::server::status::is_expired(client) {
                 eprintln!("dispatch: {name} expired ({}) — not delivering; renew the row's `expire` to resume", client.expire);
                 down.insert(name.clone());
-            } else if registry::conn_fail_read(&name) >= registry::CONN_FAIL_ESCALATE && !idx.is_multiple_of(PROBE_BACKOFF_EVERY) {
+            } else if registry::conn_fail_streak(client) >= registry::CONN_FAIL_ESCALATE && !idx.is_multiple_of(PROBE_BACKOFF_EVERY) {
                 down.insert(name.clone());
             }
         }

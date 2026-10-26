@@ -55,7 +55,7 @@ pub(super) fn up_locked(dir: &Path, t: &dyn Transport, client: &ClientEntry, por
     // so without the eager case the hook would never get its chance.
     let mut hook_done = client.pre_connect.is_empty();
     let mut hook_note: Option<String> = None;
-    if !hook_done && crate::server::registry::conn_fail_read(&client.name) > 0 {
+    if !hook_done && crate::server::registry::conn_fail_streak(client) > 0 {
         hook_note = crate::server::transport::run_pre_connect(client);
         hook_done = true;
     }
