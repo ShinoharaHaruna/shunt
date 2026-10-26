@@ -37,7 +37,7 @@ Before registering a box, ask the user — record their answers, don't choose th
 2. **SSH identity?** dedicated keypair + auto-deploy (needs `ssh.password`), reuse an authorized key (`--key`), manual `.pub` install, or password-only auth (`--key "" --password`; requires dev-machine `sshpass`, leaves `authorized_keys` untouched but skips the `.shunt-owner` claim).
 3. **qroot?** REQUIRED — ask for the exact path; the whole footprint lives inside it. Templates seed `<deploy_root>/queue`, which can collide on shared boxes.
 4. **Residency?** daemon stays resident by default; `--exit-on-idle` exits on drain — polite on shared boxes.
-5. **Reachability?** VPN/overlay/port-forward first → record `pre_connect` (idempotent, non-interactive; resident parts are the user's supervisor problem).
+5. **Reachability?** SSH-layer proxy or bastion → hand-edit `ssh.options` (for example `ProxyCommand=...` or `ProxyJump=...`); a VPN/overlay/port-forward that must be established first → record `pre_connect` (idempotent, non-interactive; resident parts are the user's supervisor problem).
 
 Full rationale, the two-users-one-box topology rules, and the register → bootstrap → bind walkthrough: `references/setup.md`.
 

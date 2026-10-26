@@ -140,9 +140,26 @@ pub struct SshEndpoint {
     /// `ssh-copy-id`.
     #[serde(default)]
     pub password: String,
+    /// Per-client OpenSSH options for reachability customization
+    /// (ProxyCommand, ProxyJump, etc.). Appended after managed options
+    /// so first-value-wins preserves shunt's connection invariants;
+    /// multi-value options such as IdentityFile still accumulate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
 }
 
 impl SshEndpoint {
+    /// Append custom options after managed flags so they cannot override
+    /// shunt's first-value-wins connection and authentication settings.
+    pub(crate) fn append_options(&self, args: &mut Vec<String>) {
+        for option in &self.options {
+            if !option.trim().is_empty() {
+                args.push("-o".into());
+                args.push(option.clone());
+            }
+        }
+    }
+
     /// Empty key plus a password selects password-only transport auth
     /// (§4.1); a configured key always takes precedence.
     pub fn password_only(&self) -> bool {

@@ -115,20 +115,13 @@ pub(super) fn up_locked(dir: &Path, t: &dyn Transport, client: &ClientEntry, por
     Ok(pid)
 }
 
-/// The tunnel's ssh argv: the shared conn flags (auth, known_hosts,
-/// timeouts, target) PLUS the long-lived session options. The mux
-/// options are overridden OFF: `ssh_conn_args` carries
-/// `ControlMaster=auto`/`ControlPath=<cm>/<name>.sock`, which would
-/// either make the tunnel itself the mux master (pinning the socket
-/// and routing every later exec through this session) or join an
-/// existing master (so `ssh -O exit` / master death kills the
-/// forward invisibly to the pid bookkeeping). ssh resolves each `-o`
-/// parameter first-value-wins, so the `none` overrides must precede
-/// the inherited args.
+/// The tunnel's ssh argv: tunnel policy first, then the shared
+/// connection args (including user options) and target. Disabling the
+/// mux first-value-wins before the inherited mux settings, while
+/// keeping all tunnel-managed options ahead of ssh.options.
 pub(super) fn up_argv(client: &ClientEntry, port: u16) -> Result<Vec<String>> {
-    let mut args = vec!["ssh".to_string(), "-o".into(), "ControlMaster=no".into(), "-o".into(), "ControlPath=none".into()];
+    let mut args = vec!["ssh".to_string(), "-o".into(), "ControlMaster=no".into(), "-o".into(), "ControlPath=none".into(), "-N".into(), "-R".into(), port.to_string(), "-o".into(), "ExitOnForwardFailure=yes".into(), "-o".into(), "ServerAliveInterval=30".into(), "-o".into(), "ServerAliveCountMax=3".into()];
     args.extend(ssh_conn_args(client)?);
-    args.extend(["-N".into(), "-R".into(), port.to_string(), "-o".into(), "ExitOnForwardFailure=yes".into(), "-o".into(), "ServerAliveInterval=30".into(), "-o".into(), "ServerAliveCountMax=3".into()]);
     Ok(args)
 }
 

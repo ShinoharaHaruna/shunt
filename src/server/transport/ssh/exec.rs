@@ -13,13 +13,10 @@ use std::process::Stdio;
 
 pub(super) fn exec(client: &ClientEntry, argv: &[String], stdin: Option<&str>) -> Result<String> {
     let mut cmd = ssh_tool_cmd(client, "ssh")?;
-    cmd.args(SshTransport::base_args(client)?)
-        // Half-open TCP detection — not in base_args because the
-        // tunnel sets its own ServerAlive policy. scp spells the
-        // same opts via copy_to below (design.md §5).
-        .args(["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2"])
-        .arg(SshTransport::target(client))
-        .arg(join_argv(argv));
+    // Half-open TCP detection — not in base_args because the
+    // tunnel sets its own ServerAlive policy. Keep these managed
+    // options before ssh.options, whose -o values are appended last.
+    cmd.args(["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2"]).args(SshTransport::base_args(client)?).arg(SshTransport::target(client)).arg(join_argv(argv));
     if stdin.is_some() {
         cmd.stdin(Stdio::piped());
     } else {

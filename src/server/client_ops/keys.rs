@@ -63,8 +63,13 @@ pub fn deploy_key(entry: &ClientEntry) -> Result<bool> {
     // the shared hard deadline: §5 requires every ssh op bounded
     // twice — ConnectTimeout alone leaves a half-open TCP session to
     // a flapping box hanging `bootstrap` forever.
+    let mut args = vec!["-e".into(), "ssh".into(), "-p".into(), entry.ssh.port.to_string(), "-o".into(), "PreferredAuthentications=password".into(), "-o".into(), "PubkeyAuthentication=no".into(), "-o".into(), "NumberOfPasswordPrompts=1".into(), "-o".into(), "StrictHostKeyChecking=accept-new".into(), "-o".into(), format!("UserKnownHostsFile={kh}"), "-o".into(), "ControlPath=none".into(), "-o".into(), format!("ConnectTimeout={}", entry.ssh_timeout_s.unwrap_or(15)), "-o".into(), "ServerAliveInterval=15".into(), "-o".into(), "ServerAliveCountMax=2".into()];
+    // Keep shunt-managed authentication and timeout policy first-value-wins.
+    entry.ssh.append_options(&mut args);
+    args.push(format!("{}@{}", entry.ssh.user, entry.ssh.host));
+    args.push(script.into());
     use std::os::unix::process::CommandExt;
-    let mut child = std::process::Command::new("sshpass").args(["-e", "ssh", "-p", &entry.ssh.port.to_string(), "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no", "-o", "NumberOfPasswordPrompts=1", "-o", "StrictHostKeyChecking=accept-new", "-o", &format!("UserKnownHostsFile={kh}"), "-o", "ControlPath=none", "-o", &format!("ConnectTimeout={}", entry.ssh_timeout_s.unwrap_or(15)), "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2", &format!("{}@{}", entry.ssh.user, entry.ssh.host), script]).env("SSHPASS", &entry.ssh.password).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).process_group(0).spawn().context("spawn sshpass ssh")?;
+    let mut child = std::process::Command::new("sshpass").args(args).env("SSHPASS", &entry.ssh.password).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).process_group(0).spawn().context("spawn sshpass ssh")?;
     // Write from a thread: a remote that never reads stdin while
     // filling stderr would otherwise deadlock the write — the pipe
     // readers only start inside wait_deadline. process_group(0)
@@ -90,7 +95,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn pw_client(key: &std::path::Path) -> ClientEntry {
-        ClientEntry { name: "t".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 22, user: "u".into(), key: key.display().to_string(), password: "pw".into() }, qroot: "/tmp/qt".into(), deploy_root: "/tmp".into(), facts: BTreeMap::new(), billing: None, queues: Default::default(), default_queue: None }
+        ClientEntry { name: "t".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 22, user: "u".into(), key: key.display().to_string(), password: "pw".into(), options: Vec::new() }, qroot: "/tmp/qt".into(), deploy_root: "/tmp".into(), facts: BTreeMap::new(), billing: None, queues: Default::default(), default_queue: None }
     }
 
     /// Install a fake `sshpass` ahead on PATH (fake-ssh pattern).
@@ -128,6 +133,47 @@ mod tests {
     /// §4.1 `shared`: authorized_keys is never touched automatically
     /// on a shared row — deploy_key reports "not deployed" even with
     /// a password set, steering to the manual/console path.
+    #[test]
+    fn deploy_key_appends_client_options_after_managed_ssh_flags() {
+        let _h = HOME_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-deploy-options-home-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let dir = std::env::temp_dir().join(format!("shunt-deploy-options-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("id");
+        std::fs::write(dir.join("id.pub"), "ssh-ed25519 AAAA t").unwrap();
+        let argfile = dir.join("argv");
+        std::env::set_var("FAKE_ARGV", &argfile);
+        let old_path = std::env::var_os("PATH");
+        fake_sshpass(r#"printf '%s\n' "$@" > "$FAKE_ARGV"; cat >/dev/null; exit 0"#);
+        let proxy = "ProxyCommand=nc -X 5 -x 127.0.0.1:1080 %h %p";
+        let jump = "ProxyJump=jump-user@jump.example";
+        let mut client = pw_client(&key);
+        client.ssh.options = vec![proxy.into(), jump.into(), String::new(), " ".into()];
+
+        assert!(deploy_key(&client).unwrap());
+
+        let args = std::fs::read_to_string(&argfile).unwrap();
+        let lines = args.lines().collect::<Vec<_>>();
+        let pos = |value: &str| lines.iter().position(|arg| *arg == value).unwrap();
+        assert_eq!(lines[0], "-e");
+        assert_eq!(lines[1], "ssh");
+        assert!(pos("ServerAliveCountMax=2") < pos(proxy), "managed flags precede ssh.options: {args}");
+        assert!(pos(proxy) < pos("u@127.0.0.1"), "options precede target: {args}");
+        assert!(lines.windows(2).any(|pair| pair == ["-o", proxy]));
+        assert!(lines.windows(2).any(|pair| pair == ["-o", jump]));
+
+        std::env::remove_var("FAKE_ARGV");
+        std::env::remove_var("SHUNT_HOME");
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        std::fs::remove_dir_all(home).ok();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn deploy_key_skips_shared_row() {
         let mut e = pw_client(std::path::Path::new("/nope/id"));

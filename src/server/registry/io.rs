@@ -53,6 +53,7 @@ const CLIENT_HEADER: &str = "\
 #   timeout_s                          loopback transport: exec timeout seconds
 #   ssh_timeout_s                      ssh transport: ConnectTimeout (default 15)
 #   ssh.password                       plaintext; key deploy or sshpass transport auth when ssh.key is empty
+#   ssh.options                        per-client OpenSSH -o options (ProxyCommand/ProxyJump, etc.)
 #   shutdown_cmd                       poweroff command pushed to <qroot>/shutdown_cmd at arm time
 #   expire                             \"unlimited\" | \"metered\" | ISO-8601 timestamp (subscription end)
 #   default_queue                      named queue used when --queue is omitted

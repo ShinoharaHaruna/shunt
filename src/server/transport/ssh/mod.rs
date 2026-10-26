@@ -85,14 +85,22 @@ impl PreConnect {
 
 impl SshTransport {
     /// ssh connection flags (-p, auth mode, timeouts, TOFU known_hosts,
-    /// key, user@host, mux). Shared by exec, scp, and the tunnel
-    /// manager.
+    /// key, mux) followed by per-client options. Shared by exec, scp,
+    /// and ad-hoc SSH uses.
+    pub(crate) fn base_args(client: &ClientEntry) -> Result<Vec<String>> {
+        let mut args = Self::managed_args(client)?;
+        client.ssh.append_options(&mut args);
+        Ok(args)
+    }
+
+    /// Build only shunt-managed flags. Callers that add managed options
+    /// of their own must append `ssh.options` after those too.
     /// There is no safe fallback for a failed `shunt_home()` (HOME
     /// and SHUNT_HOME both unset — cron/systemd/forced-command
     /// contexts): the old code degraded known_hosts and ControlPath
     /// to /dev/null and chmodded a /tmp fallback, stripping /tmp's
     /// sticky bit. Errors now propagate to the caller instead.
-    pub(crate) fn base_args(client: &ClientEntry) -> Result<Vec<String>> {
+    pub(crate) fn managed_args(client: &ClientEntry) -> Result<Vec<String>> {
         // Per-client TOFU store: two rows can legitimately share one
         // host:port behind a NAT gateway while the boxes carry
         // different host keys — a shared file would deadlock the

@@ -272,13 +272,17 @@ fn tunnel_argv_disables_mux_before_conn_args() {
     c.ssh.host = "h".into();
     c.ssh.port = 2222;
     c.ssh.key = "/k".into();
+    let option = "ProxyCommand=nc -X 5 -x 127.0.0.1:1080 %h %p";
+    c.ssh.options = vec![option.into()];
     let argv = up_argv(&c, 1080).unwrap();
     std::env::remove_var("SHUNT_HOME");
     // First occurrence of each -o parameter is the effective one.
     let pos = |needle: &str| argv.iter().position(|a| a == needle).unwrap_or(usize::MAX);
     assert!(pos("ControlPath=none") < argv.iter().position(|a| a.starts_with("ControlPath=") && *a != "ControlPath=none").unwrap_or(usize::MAX), "{argv:?}");
     assert!(pos("ControlMaster=no") < pos("ControlMaster=auto"), "{argv:?}");
+    assert!(pos("ServerAliveCountMax=3") < pos(option), "managed tunnel options precede ssh.options: {argv:?}");
     assert!(argv.contains(&"/k".to_string()) && argv.contains(&"u@h".to_string()), "{argv:?}");
+    assert_eq!(argv.last().map(String::as_str), Some("u@h"));
 }
 
 /// Password-only tunnel creation also goes through sshpass, with the

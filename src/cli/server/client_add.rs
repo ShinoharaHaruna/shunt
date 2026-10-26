@@ -39,7 +39,7 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
     let suppress_key_generation = opts.key.as_deref() == Some("");
     let mut entry = match template {
         Some(t) => load_vendor_template(t)?,
-        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: String::new(), queues: Default::default(), default_queue: None, deploy_root: String::new(), facts: Default::default(), billing: None },
+        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new(), options: Vec::new() }, qroot: String::new(), queues: Default::default(), default_queue: None, deploy_root: String::new(), facts: Default::default(), billing: None },
     };
     entry.name = name.into();
     // Adding a row for the built-in name materializes the loopback

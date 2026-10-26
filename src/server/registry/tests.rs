@@ -15,10 +15,11 @@ fn client_roundtrip() {
     let _g = HOME_LOCK.lock().unwrap();
     let tmp = std::env::temp_dir().join(format!("shunt-test-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
-    let entry = ClientEntry { name: "box-1".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: "/path/to/key".into(), password: String::new() }, qroot: "/root/autodl-tmp/queue".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/root/autodl-tmp".into(), facts: BTreeMap::new(), billing: Some(Billing { hourly: 2.6, currency: "cny".into() }) };
+    let entry = ClientEntry { name: "box-1".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: "/path/to/key".into(), password: String::new(), options: vec!["ProxyJump=jump.example".into()] }, qroot: "/root/autodl-tmp/queue".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/root/autodl-tmp".into(), facts: BTreeMap::new(), billing: Some(Billing { hourly: 2.6, currency: "cny".into() }) };
     save_client(&entry).unwrap();
     let back = load_client("box-1").unwrap();
     assert_eq!(back.ssh.port, 22);
+    assert_eq!(back.ssh.options, vec!["ProxyJump=jump.example"]);
     assert_eq!(list_names("clients").unwrap(), vec!["box-1"]);
 
     // localhost is a peer: first access materializes its row file
@@ -48,6 +49,14 @@ fn client_roundtrip() {
     assert!(lo3.local && !lo3.disabled);
     assert!(tmp.join("clients/localhost.toml").exists());
     std::fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn ssh_options_default_when_absent_and_omit_when_empty() {
+    let old: SshEndpoint = toml::from_str(r#"host = 'box.example'"#).unwrap();
+    assert!(old.options.is_empty());
+    let serialized = toml::to_string(&SshEndpoint::default()).unwrap();
+    assert!(!serialized.contains("options"), "{serialized}");
 }
 
 /// Registry privacy: client rows can carry ssh.password

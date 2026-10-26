@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn ssh_entry(name: &str) -> ClientEntry {
-    ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: "/q".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/q".into(), facts: BTreeMap::new(), billing: None }
+    ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: String::new(), password: String::new(), options: Vec::new() }, qroot: "/q".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/q".into(), facts: BTreeMap::new(), billing: None }
 }
 
 #[test]

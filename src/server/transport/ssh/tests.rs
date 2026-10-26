@@ -87,6 +87,36 @@ fn password_only_base_args_select_password_auth_and_keep_mux() {
 }
 
 #[test]
+fn base_args_append_client_options_after_managed_flags_and_skip_blanks() {
+    let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("shunt-ssh-options-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &home);
+    let mut client = ssh_client();
+    client.ssh.key = "/managed-key".into();
+    let proxy = "ProxyCommand=nc -X 5 -x 127.0.0.1:1080 %h %p";
+    let jump = "ProxyJump=jump-user@jump.example";
+    client.ssh.options = vec![proxy.into(), jump.into(), String::new(), " \t ".into()];
+
+    let args = SshTransport::base_args(&client).unwrap();
+    let position = |value: &str| args.iter().position(|arg| arg == value).unwrap();
+    assert!(position("ControlPersist=60") < position(proxy), "{args:?}");
+    assert!(position("/managed-key") < position(proxy), "{args:?}");
+    assert!(args.windows(2).any(|pair| pair == ["-o", proxy]));
+    assert!(args.windows(2).any(|pair| pair == ["-o", jump]));
+    assert_eq!(args.iter().filter(|arg| *arg == proxy).count(), 1);
+
+    let mut blanks = ssh_client();
+    blanks.ssh.options = vec![String::new(), " \t ".into()];
+    let mut none = ssh_client();
+    none.ssh.options.clear();
+    assert_eq!(SshTransport::base_args(&blanks).unwrap(), SshTransport::base_args(&none).unwrap());
+
+    std::env::remove_var("SHUNT_HOME");
+    std::fs::remove_dir_all(home).ok();
+}
+
+#[test]
 fn password_only_requires_sshpass_with_actionable_error() {
     let _g = ENV_LOCK.lock().unwrap();
     let dir = std::env::temp_dir().join(format!("shunt-no-sshpass-{}", std::process::id()));
@@ -120,6 +150,37 @@ fn ssh_exec_passes_serveralive() {
     assert!(argv.contains("ServerAliveCountMax=2"), "{argv}");
     std::env::remove_var("FAKE_ARGV");
     restore_path();
+}
+
+#[test]
+fn ssh_exec_passes_custom_options_after_managed_keepalives() {
+    let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("shunt-ssh-custom-exec-home-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &home);
+    let dir = std::env::temp_dir().join(format!("shunt-ssh-custom-exec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let argfile = dir.join("argv");
+    std::env::set_var("FAKE_ARGV", &argfile);
+    fake_ssh("printf '%s\\n' \"$@\" > \"$FAKE_ARGV\"; exit 0");
+    let mut client = ssh_client();
+    let option = "ProxyCommand=nc -X 5 -x 127.0.0.1:1080 %h %p";
+    client.ssh.options = vec![option.into()];
+
+    SshTransport.exec(&client, &["status".into()], None).unwrap();
+
+    let args = std::fs::read_to_string(&argfile).unwrap();
+    let lines = args.lines().collect::<Vec<_>>();
+    let pos = |value: &str| lines.iter().position(|arg| *arg == value).unwrap();
+    assert!(pos("ServerAliveCountMax=2") < pos(option), "{args}");
+    assert_eq!(lines[pos(option) - 1], "-o", "each entry remains one -o argument: {args}");
+    assert!(pos(option) < pos("u@127.0.0.1"), "custom options precede target: {args}");
+
+    std::env::remove_var("FAKE_ARGV");
+    std::env::remove_var("SHUNT_HOME");
+    restore_path();
+    std::fs::remove_dir_all(home).ok();
+    std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
@@ -273,10 +334,17 @@ fn scp_passes_serveralive() {
     fake_scp("printf '%s\\n' \"$@\" > \"$FAKE_ARGV\"; exit 0");
     let local = dir.join("bin");
     std::fs::write(&local, "x").unwrap();
-    SshTransport.copy_to(&ssh_client(), &local, "/remote/shunt").unwrap();
+    let mut client = ssh_client();
+    let option = "ProxyCommand=nc -X 5 -x 127.0.0.1:1080 %h %p";
+    client.ssh.options = vec![option.into()];
+    SshTransport.copy_to(&client, &local, "/remote/shunt").unwrap();
     let argv = std::fs::read_to_string(&argfile).unwrap();
     assert!(argv.contains("ServerAliveInterval=15"), "{argv}");
     assert!(argv.contains("ServerAliveCountMax=2"), "{argv}");
+    let lines = argv.lines().collect::<Vec<_>>();
+    let alive = lines.iter().position(|arg| *arg == "ServerAliveCountMax=2").unwrap();
+    let custom = lines.iter().position(|arg| *arg == option).unwrap();
+    assert!(alive < custom, "managed keepalives precede ssh.options: {argv}");
     std::env::remove_var("FAKE_ARGV");
     std::env::remove_var("SHUNT_HOME");
     restore_path();

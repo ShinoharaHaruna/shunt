@@ -21,10 +21,11 @@ pub(super) fn copy_to(client: &ClientEntry, local: &Path, remote_path: &str) -> 
     // base_args is flags-only now: drop its leading `-p PORT`
     // (scp spells it -P), then local source + user@host:path.
     let mut args = vec!["-O".into(), "-P".into(), client.ssh.port.to_string()];
-    args.extend(SshTransport::base_args(client)?.into_iter().skip(2));
     // Same double bound as exec (design.md §5): half-open TCP
-    // dies in ~30s instead of riding the full hard deadline.
+    // dies in ~30s instead of riding the full hard deadline. Keep
+    // managed keepalives before ssh.options, which are appended last.
     args.extend(["-o".into(), "ServerAliveInterval=15".into(), "-o".into(), "ServerAliveCountMax=2".into()]);
+    args.extend(SshTransport::base_args(client)?.into_iter().skip(2));
     args.push(local.display().to_string());
     // Explicit legacy SCP (-O) keeps older remote scp peers usable
     // and makes shell quoting correct regardless of the local

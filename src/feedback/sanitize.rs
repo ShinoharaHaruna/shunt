@@ -35,6 +35,9 @@ pub fn secrets() -> Vec<String> {
                 if let Some(p) = ssh.get("port").and_then(|v| v.as_integer()) {
                     out.push(p.to_string());
                 }
+                if let Some(options) = ssh.get("options").and_then(|v| v.as_array()) {
+                    out.extend(options.iter().filter_map(|v| v.as_str()).map(str::to_string));
+                }
             }
         }
     }
@@ -190,6 +193,32 @@ mod tests {
         let (out, n) = scrub("login root on port 22 hit root cause", &secrets(&["root", "22"]));
         assert_eq!(out, "login root on port 22 hit root cause");
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn secrets_plucks_ssh_option_array_entries() {
+        let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-option-secrets-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join("clients")).unwrap();
+        let proxy = "ProxyCommand=nc -X 5 -x proxy-secret.example:1080 %h %p";
+        let jump = "ProxyJump=jump-user@jump-secret.example";
+        fs::write(home.join("clients/box.toml"), format!("[ssh]\noptions = [{proxy:?}, {jump:?}]\n")).unwrap();
+        let old_home = std::env::var_os("SHUNT_HOME");
+        std::env::set_var("SHUNT_HOME", &home);
+
+        let values = super::secrets();
+        let (out, count) = scrub(&format!("ssh failed with {proxy}; jump {jump}"), &values);
+
+        match old_home {
+            Some(value) => std::env::set_var("SHUNT_HOME", value),
+            None => std::env::remove_var("SHUNT_HOME"),
+        }
+        fs::remove_dir_all(home).unwrap();
+        assert!(values.contains(&proxy.to_string()), "{values:?}");
+        assert!(values.contains(&jump.to_string()), "{values:?}");
+        assert_eq!(out, "ssh failed with <redacted>; jump <redacted>");
+        assert_eq!(count, 2);
     }
 
     #[test]

@@ -51,7 +51,7 @@ impl Fixture {
     }
 
     fn client(&self, name: &str, local: bool) -> Result<ClientEntry> {
-        let c = ClientEntry { name: name.into(), local, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "test".into(), key: String::new(), password: String::new() }, qroot: self.home.join(format!("queue-{name}")).display().to_string(), deploy_root: self.home.display().to_string(), facts: BTreeMap::new(), billing: None, queues: BTreeMap::new(), default_queue: None };
+        let c = ClientEntry { name: name.into(), local, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "test".into(), key: String::new(), password: String::new(), options: Vec::new() }, qroot: self.home.join(format!("queue-{name}")).display().to_string(), deploy_root: self.home.display().to_string(), facts: BTreeMap::new(), billing: None, queues: BTreeMap::new(), default_queue: None };
         registry::save_client(&c)?;
         Ok(c)
     }
