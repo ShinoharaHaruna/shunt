@@ -1,7 +1,7 @@
 //! Orphan adoption + requeue on daemon startup (design.md §3.6)
 //! and the per-cycle leader-exit reaping that finalizes tasks (§3.9).
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
@@ -90,6 +90,13 @@ pub(crate) fn adopt_orphans(root: &Path) -> Result<HashMap<u32, RunHandle>> {
         }
         if queue::is_dir_entry(root, "running", &base) {
             let dir = running.join(&base);
+            // This task had already passed admission before the crash;
+            // orphan recovery must not turn its consumed gate back on.
+            match std::fs::remove_file(dir.join("held")) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).context("cannot clear held marker before orphan requeue"),
+            }
             let old_log = dir.join("log");
             if old_log.exists() {
                 // Not `with_extension("log")`: the timestamp after the
@@ -363,11 +370,13 @@ mod tests {
             panic!("first enqueue must mint");
         };
         assert!(queue::claim(&root, &original).unwrap());
+        std::fs::write(root.join("running").join(&original).join("held"), "consumed gate\n").unwrap();
         assert!(root.join(".dedup").is_file());
 
         adopt_orphans(&root).unwrap();
         let requeued = format!("0000_requeued_{original}");
         assert!(root.join("pending").join(&requeued).is_dir());
+        assert!(!root.join("pending").join(&requeued).join("held").exists(), "orphan requeue must not restore admission");
         assert!(!root.join(".dedup").exists(), "stale basename index survived orphan move");
         match queue::enqueue(&root, "orphan", body).unwrap() {
             queue::EnqueueOutcome::Deduped(n) => assert_eq!(n, requeued),

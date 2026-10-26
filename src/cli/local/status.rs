@@ -18,11 +18,14 @@ fn status_impl(a: &StatusArgs) -> Result<()> {
     // upgraded one. Read unconditionally — a stale pair on a dead
     // daemon is reported honestly as absent-ish state.
     let sidecar = |f: &str| std::fs::read_to_string(root.join(f)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let detail = |track: &str, name: &str| -> EntryDetail { EntryDetail { name: name.to_string(), declared: crate::client::usage::declared(&root, track, name).unwrap_or_default(), usage: crate::client::usage::read_usage(&root, track, name) } };
+    let detail = |track: &str, name: &str| -> Result<EntryDetail> {
+        let hold_reason = crate::client::queue::held_reason(&root, track, name)?;
+        Ok(EntryDetail { name: name.to_string(), declared: crate::client::usage::declared(&root, track, name).unwrap_or_default(), usage: crate::client::usage::read_usage(&root, track, name), held: hold_reason.is_some(), hold_reason: hold_reason.filter(|reason| !reason.is_empty()) })
+    };
     let pending_names = crate::client::queue::pending_list(&root)?;
     let running_names = crate::client::queue::running_list(&root)?;
     let exit_recs = |track: &'static str| -> Vec<ExitRecord> { crate::client::queue::recent_exits(&root, track, 5).into_iter().map(|(name, rc)| ExitRecord { usage: crate::client::usage::read_usage(&root, track, &name), declared: crate::client::usage::declared(&root, track, &name).unwrap_or_default(), name, rc }).collect() };
-    let report = crate::proto::wire::StatusReport { protocol: crate::proto::wire::PROTOCOL_VERSION, daemon: DaemonState { alive: alive.is_some(), pid: alive, ver: sidecar("daemon.ver"), bin: sidecar("daemon.bin") }, workers: crate::client::daemon::resolve_workers(&root), running: running_names.clone(), pending: pending_names.clone(), done_recent: exit_recs("done"), failed_recent: exit_recs("failed"), stop: root.join("STOP").exists(), shutdown: crate::client::shutdown::status(&root)?, resources: Some(crate::client::usage::system_resources()), pending_detail: pending_names.iter().map(|n| detail("pending", n)).collect(), running_detail: running_names.iter().map(|n| detail("running", n)).collect(), needs_glibc: crate::proto::libc::self_glibc_need().map(|(a, b)| format!("{a}.{b}")) };
+    let report = crate::proto::wire::StatusReport { protocol: crate::proto::wire::PROTOCOL_VERSION, daemon: DaemonState { alive: alive.is_some(), pid: alive, ver: sidecar("daemon.ver"), bin: sidecar("daemon.bin") }, workers: crate::client::daemon::resolve_workers(&root), running: running_names.clone(), pending: pending_names.clone(), done_recent: exit_recs("done"), failed_recent: exit_recs("failed"), stop: root.join("STOP").exists(), shutdown: crate::client::shutdown::status(&root)?, resources: Some(crate::client::usage::system_resources()), pending_detail: pending_names.iter().map(|n| detail("pending", n)).collect::<Result<_>>()?, running_detail: running_names.iter().map(|n| detail("running", n)).collect::<Result<_>>()?, needs_glibc: crate::proto::libc::self_glibc_need().map(|(a, b)| format!("{a}.{b}")) };
     if a.json {
         jprint(&report);
         return Ok(());
@@ -53,6 +56,9 @@ fn status_impl(a: &StatusArgs) -> Result<()> {
     }
     let annotate = |d: &EntryDetail| -> String {
         let mut bits = Vec::new();
+        if d.held {
+            bits.push(d.hold_reason.as_ref().map(|reason| format!("held: {reason}")).unwrap_or_else(|| "held".into()));
+        }
         if let Some(m) = d.declared.gpu_mem_mb {
             bits.push(format!("declared vram {m} MiB"));
         }

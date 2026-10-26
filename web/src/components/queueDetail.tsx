@@ -193,6 +193,13 @@ export function EntryList({
                   )}
                 </div>
                 <div className="mt-1 flex flex-wrap gap-1">
+                  {e.held && (
+                    <Pill tone="amber">
+                      {e.hold_reason
+                        ? t('spool.heldReason', { reason: e.hold_reason })
+                        : t('spool.held')}
+                    </Pill>
+                  )}
                   <DeclaredChips d={e.declared} />
                   {e.usage && <UsageChips u={e.usage} />}
                 </div>

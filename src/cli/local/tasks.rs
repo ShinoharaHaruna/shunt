@@ -3,7 +3,7 @@
 use anyhow::{Context as _, Result};
 
 use super::{jfail, jfields, jobj, jprint, local_root, wire};
-use crate::cli::args::{CatArgs, CleanArgs, EnqueueArgs, NewArgs, PatternArgs, PrioArgs};
+use crate::cli::args::{CatArgs, CleanArgs, EnqueueArgs, HoldArgs, NewArgs, PatternArgs, PrioArgs};
 
 pub(crate) fn agent_enqueue(a: &EnqueueArgs) -> Result<()> {
     wire(a.json, enqueue_impl(a))
@@ -29,7 +29,7 @@ fn enqueue_impl(a: &EnqueueArgs) -> Result<()> {
         if let Some(p) = crate::proto::task::slug_problem(&slug) {
             anyhow::bail!("bad slug '{raw_slug}': {p}");
         }
-        crate::client::queue::enqueue(&root, &slug, &body)
+        crate::client::queue::enqueue_with_hold(&root, &slug, &body, a.hold.as_deref())
     };
     match inner() {
         Ok(outcome) => {
@@ -39,6 +39,8 @@ fn enqueue_impl(a: &EnqueueArgs) -> Result<()> {
             } else {
                 if outcome.deduped() {
                     println!("enqueued: {name} (deduped — this delivery already had an entry)");
+                } else if let Some(reason) = &a.hold {
+                    println!("enqueued: {name} (held{})", if reason.is_empty() { String::new() } else { format!(": {reason}") });
                 } else {
                     println!("enqueued: {name}");
                 }
@@ -138,6 +140,45 @@ fn one_match(m: &[String], json: bool, none: &str, several: &str) -> Result<Stri
     }
     jfail(json, if m.is_empty() { none } else { several })?;
     unreachable!("jfail exits under --json and bails otherwise")
+}
+
+pub(crate) fn agent_hold(a: &HoldArgs) -> Result<()> {
+    wire(a.json, hold_impl(a))
+}
+
+fn hold_impl(a: &HoldArgs) -> Result<()> {
+    let root = local_root(&a.root)?;
+    let matches = crate::client::queue::match_pending(&root, &a.pattern)?;
+    if matches.is_empty() {
+        let running: Vec<_> = crate::client::queue::running_list(&root)?.into_iter().filter(|name| name.contains(&a.pattern)).collect();
+        let msg = if running.is_empty() { miss_msg(&root, "pending", &a.pattern) } else { format!("cannot hold '{}': already running ({}); running tasks cannot be re-parked — cancel before claim or submit it again with --hold-on-box", a.pattern, running.join(", ")) };
+        return jfail(a.json, &msg);
+    }
+    let name = one_match(&matches, a.json, &miss_msg(&root, "pending", &a.pattern), &format!("pattern matches several pending tasks, refusing:\n  {}", matches.join("\n  ")))?;
+    crate::client::queue::hold_pending(&root, &name, a.reason.as_deref().unwrap_or_default())?;
+    if a.json {
+        jprint(jobj(jfields(serde_json::json!({"name": name, "held": true}))));
+    } else {
+        println!("held: {name}{}", a.reason.as_ref().filter(|reason| !reason.is_empty()).map(|reason| format!(" — {reason}")).unwrap_or_default());
+    }
+    Ok(())
+}
+
+pub(crate) fn agent_release(a: &PatternArgs) -> Result<()> {
+    wire(a.json, release_impl(a))
+}
+
+fn release_impl(a: &PatternArgs) -> Result<()> {
+    let root = local_root(&a.root)?;
+    let matches = crate::client::queue::match_pending(&root, &a.pattern)?;
+    let name = one_match(&matches, a.json, &miss_msg(&root, "pending", &a.pattern), &format!("pattern matches several pending tasks, refusing:\n  {}", matches.join("\n  ")))?;
+    crate::client::queue::release_pending(&root, &name)?;
+    if a.json {
+        jprint(jobj(jfields(serde_json::json!({"name": name, "held": false}))));
+    } else {
+        println!("released: {name}");
+    }
+    Ok(())
 }
 
 pub(crate) fn agent_cancel(a: &PatternArgs) -> Result<()> {

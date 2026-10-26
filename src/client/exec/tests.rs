@@ -364,6 +364,7 @@ fn reschedule_rc75_requeues_same_name() {
     std::fs::create_dir_all(root.join("failed")).unwrap();
     let head = "#!/usr/bin/env bash\n# shunt:retry=2\n# shunt:retry_delay_s=7\nexec false\n";
     running_entry(&root, "0100_t", head, "=== task 0100_t\nbusy\n");
+    std::fs::write(root.join("running/0100_t/held"), "already admitted\n").unwrap();
     let td = super::task_directives(&root.join("running/0100_t/task.sh"));
     match super::maybe_reschedule(&root, "0100_t", 75, &td).unwrap() {
         super::Resched::Queued { attempt, via, .. } => {
@@ -378,6 +379,7 @@ fn reschedule_rc75_requeues_same_name() {
     let ra: u64 = std::fs::read_to_string(entry.join("retry_after")).unwrap().trim().parse().unwrap();
     assert!(ra >= crate::proto::time::unix_now() + 6, "retry_after not ~7s out: {ra}");
     assert!(!entry.join("pid").exists());
+    assert!(!entry.join("held").exists(), "rescheduled work must not await admission again");
     assert!(root.join("failed/0100_t.attempt1.log").exists(), "failed log not swept");
     assert!(!entry.join("log").exists());
     std::fs::remove_dir_all(&root).ok();

@@ -51,6 +51,37 @@ fn dispatch_skips_not_due_rescheduled_entry() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A held entry remains pending until release; claim rechecks the
+/// gate under the same lock and never carries the marker into running/.
+#[test]
+fn dispatch_skips_held_entry_until_release_then_claims_it() {
+    let root = std::env::temp_dir().join(format!("shunt-held-dispatch-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    crate::client::queue::init(&root).unwrap();
+    let entry = root.join("pending/0100_t");
+    std::fs::create_dir_all(&entry).unwrap();
+    std::fs::write(entry.join("task.sh"), "#!/usr/bin/env bash\nexec sleep 60\n").unwrap();
+    std::fs::write(entry.join("held"), "await approval").unwrap();
+    let mut d = super::core::Daemon { root: root.clone(), runpids: Default::default(), last_workers: None, got_signal: Default::default(), reexec: Default::default(), argv_rest: Default::default() };
+
+    d.dispatch();
+    assert!(d.runpids.is_empty());
+    assert_eq!(crate::client::queue::pending_list(&root).unwrap(), vec!["0100_t"]);
+    assert!(crate::client::shutdown::pending_nonempty(&root), "held work must still block idle shutdown");
+
+    crate::client::queue::release_pending(&root, "0100_t").unwrap();
+    d.dispatch();
+    assert_eq!(d.runpids.len(), 1);
+    assert!(!root.join("running/0100_t/held").exists(), "claim must consume the admission marker");
+    for (pgid, _) in d.runpids.drain() {
+        unsafe {
+            libc::kill(-(pgid as i32), libc::SIGKILL);
+            let mut st = 0;
+            libc::waitpid(pgid as i32, &mut st, 0);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// §3.7/§3.9 timeout marker honesty: when the deadline has passed
 /// but no TERM can be delivered (here: no pid file — the
 /// pid_write_failed blind spot), `timed_out`/`kill_at` must stay

@@ -176,11 +176,11 @@ fn new_task_id(dir: &std::path::Path) -> String {
 /// `shunt submit`: resolve client (+ project binding), build the task
 /// body, stage it. Returns the task id.
 pub fn submit(client_name: &str, project: Option<&str>, guard: Option<&str>, slug: Option<&str>, file: Option<&str>, flags: &TaskFlags, cmd: &[String]) -> Result<String> {
-    submit_to(client_name, None, project, guard, slug, file, flags, None, cmd)
+    submit_to(client_name, None, project, guard, slug, file, flags, None, None, cmd)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn submit_to(client_name: &str, queue: Option<&str>, project: Option<&str>, guard: Option<&str>, slug: Option<&str>, file: Option<&str>, flags: &TaskFlags, hold: Option<String>, cmd: &[String]) -> Result<String> {
+pub fn submit_to(client_name: &str, queue: Option<&str>, project: Option<&str>, guard: Option<&str>, slug: Option<&str>, file: Option<&str>, flags: &TaskFlags, hold: Option<String>, hold_on_box: Option<String>, cmd: &[String]) -> Result<String> {
     let client = registry::load_client(client_name)?;
     // `--project` resolves through the name middleware like `-c` —
     // a case-folded hit substitutes the canonical spelling with a
@@ -272,7 +272,7 @@ pub fn submit_to(client_name: &str, queue: Option<&str>, project: Option<&str>, 
         eprintln!("submit: WARNING: '{}' carries no guard; at-least-once requeue will run it twice (lost ack, orphan requeue). Pass --guard <path> unless the task is naturally idempotent.", meta.slug);
     }
 
-    let entry = SpoolEntry { id: id.clone(), project: project.unwrap_or_default(), client: client.name.clone(), queue: target.name, qroot: Some(target.client.qroot), hold, meta, submitted_at: rfc3339_z_now() };
+    let entry = SpoolEntry { id: id.clone(), project: project.unwrap_or_default(), client: client.name.clone(), queue: target.name, qroot: Some(target.client.qroot), hold, hold_on_box, meta, submitted_at: rfc3339_z_now() };
     stage(&entry, &body)?;
     Ok(id)
 }

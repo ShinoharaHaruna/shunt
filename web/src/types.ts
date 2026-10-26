@@ -68,6 +68,8 @@ export interface EntryDetail {
   name: string
   declared: Declared
   usage: TaskUsage | null
+  held?: boolean
+  hold_reason?: string | null
 }
 
 export interface Declared {
@@ -98,6 +100,7 @@ export interface SpoolEntry {
   queue: string
   qroot?: string | null
   hold?: string | null
+  hold_on_box?: string | null
   meta: { slug: string; [k: string]: unknown }
   submitted_at: string
 }

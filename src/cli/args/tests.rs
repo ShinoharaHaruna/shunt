@@ -11,7 +11,7 @@ fn parse(argv: &[&str]) -> Cli {
 
 #[test]
 fn named_queue_server_forms() {
-    for argv in [vec!["shunt", "submit", "-c", "box", "--queue", "fast", "--", "true"], vec!["shunt", "status", "-c", "box", "--queue", "fast", "--json"], vec!["shunt", "logs", "-c", "box", "--queue", "fast"], vec!["shunt", "cancel", "train", "-c", "box", "--queue", "fast"], vec!["shunt", "prio", "train", "1", "-c", "box", "--queue", "fast"], vec!["shunt", "kill", "train", "-c", "box", "--queue", "fast"], vec!["shunt", "workers", "set", "2", "-c", "box", "--queue", "fast", "--json"], vec!["shunt", "shutdown", "on", "-c", "box", "--queue", "fast", "--json"], vec!["shunt", "upgrade", "-c", "box", "--queue", "fast", "--check"]] {
+    for argv in [vec!["shunt", "submit", "-c", "box", "--queue", "fast", "--hold-on-box=review", "--", "true"], vec!["shunt", "status", "-c", "box", "--queue", "fast", "--json"], vec!["shunt", "logs", "-c", "box", "--queue", "fast"], vec!["shunt", "cancel", "train", "-c", "box", "--queue", "fast"], vec!["shunt", "prio", "train", "1", "-c", "box", "--queue", "fast"], vec!["shunt", "kill", "train", "-c", "box", "--queue", "fast"], vec!["shunt", "workers", "set", "2", "-c", "box", "--queue", "fast", "--json"], vec!["shunt", "shutdown", "on", "-c", "box", "--queue", "fast", "--json"], vec!["shunt", "hold", "train", "review later", "-c", "box", "--queue", "fast"], vec!["shunt", "release", "train", "-c", "box", "--queue", "fast"], vec!["shunt", "upgrade", "-c", "box", "--queue", "fast", "--check"]] {
         parse(&argv);
     }
     let cli = parse(&["shunt", "status", "--queue", "fast"]);
@@ -111,9 +111,10 @@ fn root_accepts_qroot_alias() {
 /// the option and the positional merge into one value.
 #[test]
 fn enqueue_accepts_slug_flag() {
-    let cli = parse(&["shunt", "enqueue", "-", "--slug", "train", "--json"]);
+    let cli = parse(&["shunt", "enqueue", "-", "--slug", "train", "--hold=review", "--json"]);
     let Command::Enqueue(a) = cli.command else { panic!() };
     assert_eq!(a.slug_opt.as_deref(), Some("train"));
+    assert_eq!(a.hold.as_deref(), Some("review"));
     assert!(a.slug.is_none());
 }
 
@@ -121,6 +122,7 @@ fn enqueue_accepts_slug_flag() {
 fn enqueue_slug_flag_conflicts_with_positional() {
     assert!(Cli::try_parse_from(["shunt", "enqueue", "-", "pos", "--slug", "flag"]).is_err());
     assert!(Cli::try_parse_from(["shunt", "enqueue", "-", "pos"]).is_ok());
+    assert!(Cli::try_parse_from(["shunt", "enqueue", "-", "--slug", "x", "--hold", "reason"]).is_err());
 }
 
 /// `--all` is the server aggregate; a local `--root` would be

@@ -62,8 +62,15 @@ fn probe_client(t: &dyn Transport, queue: &registry::ResolvedQueue) -> Reach {
 fn push(t: &dyn Transport, queue: &registry::ResolvedQueue, entry: &crate::proto::task::SpoolEntry, body: &str) -> Result<(String, bool)> {
     let client = &queue.client;
     // `--slug` is the §5 wire spelling; the submit-side slug check
-    // guarantees the value never leads with a dash.
-    let out = queue_exec(t, queue, &["enqueue", "--json", "--slug", &entry.meta.slug, "--", "-"], Some(body))?;
+    // guarantees the value never leads with a dash. Box admission is
+    // opt-in, so old binaries never receive this new flag by default.
+    let hold_flag = entry.hold_on_box.as_ref().map(|reason| if reason.is_empty() { "--hold".to_string() } else { format!("--hold={reason}") });
+    let mut tail = vec!["enqueue", "--json", "--slug", entry.meta.slug.as_str()];
+    if let Some(flag) = hold_flag.as_deref() {
+        tail.push(flag);
+    }
+    tail.extend(["--", "-"]);
+    let out = queue_exec(t, queue, &tail, Some(body))?;
     // Propagate extract failures (no wire line, protocol mismatch):
     // the entry stays spooled and the error names the cause instead
     // of degrading to a generic "enqueue rejected".
@@ -116,8 +123,9 @@ pub fn sweep_at(t: &dyn Transport, idx: u64) -> Result<usize> {
 /// `dispatch --once`, tests) always probes.
 fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
     let entries = spool::list()?;
-    // Held entries are staged but deliberately undelivered (§4.4):
-    // no probe, no push — the box owes them nothing until release.
+    // Server-spool holds still mean "do not deliver". `hold_on_box`
+    // remains in this sweep and is passed to enqueue so the task can be
+    // staged on the client without being admitted to run (§4.4).
     let (held, ready): (Vec<_>, Vec<_>) = entries.into_iter().partition(|e| e.hold.is_some());
     for e in &held {
         let reason = e.hold.as_deref().unwrap_or_default();
@@ -299,6 +307,10 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
 /// boundary — the dispatcher's in-flight state is entirely in
 /// `spool/` plus box-side `# shunt:id=` dedup, so a mid-upgrade
 /// re-exec loses nothing.
+#[cfg(test)]
+#[path = "dispatch_tests.rs"]
+mod tests;
+
 pub fn run(once: bool) -> Result<()> {
     let cfg = registry::load_server_config()?;
     let interval = cfg.poll_interval_s.unwrap_or(DEFAULT_POLL_S);

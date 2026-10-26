@@ -4,6 +4,7 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+mod admission;
 mod clean;
 mod enqueue;
 mod entries;
@@ -13,8 +14,8 @@ mod tests;
 
 pub use clean::{clean, CleanReport, CleanSets};
 pub(crate) use enqueue::invalidate_dedup_index;
-pub use enqueue::{enqueue, EnqueueOutcome};
-pub use entries::{archive_oldest, claim, digits_only, is_dir_entry, list_entries, match_pending, match_running, pending_list, piece_file, recent_exits, remove_pending, running_list, task_file};
+pub use enqueue::{enqueue, enqueue_with_hold, EnqueueOutcome};
+pub use entries::{archive_oldest, claim, digits_only, held_reason, hold_pending, is_dir_entry, list_entries, match_pending, match_running, pending_list, piece_file, recent_exits, release_pending, remove_pending, running_list, task_file};
 pub use seq::{next_seq, seq_lock};
 
 /// Sequence counter starts at 99 so the first task is `0100`;

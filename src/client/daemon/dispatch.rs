@@ -46,23 +46,13 @@ impl Daemon {
             if self.runpids.len() >= workers as usize {
                 break;
             }
-            // A rescheduled entry waits out its `retry_after` delay
-            // (§3.9): not yet due -> skip it this cycle. A garbage
-            // sidecar can't wedge the entry — unparseable = due now,
-            // and the file is cleared on the way through.
-            let ra = queue::piece_file(&self.root, "pending", &next, "retry_after");
-            if ra.exists() {
-                let due = std::fs::read_to_string(&ra).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
-                if due > now {
-                    continue;
-                }
-                let _ = std::fs::remove_file(&ra);
-            }
-            // claim by mv; a concurrent cancel winning the race is the
-            // recheck, not a prior existence test. Dir entries rename
-            // whole; legacy flat files are normalized into dirs here.
+            // claim owns the final held/retry_after check and rename
+            // under the admission lock, so hold/release cannot race past
+            // the gate and reschedules cannot slip through on a stale scan.
+            // Held entries remain in this snapshot and still count as pending.
+
             match queue::claim(&self.root, &next) {
-                Ok(false) => continue, // lost a cancel race; next candidate
+                Ok(false) => continue, // vanished, held, or still retry-delayed
                 Err(e) => {
                     // The entry still exists but cannot be claimed
                     // (name collision in running/, permissions).

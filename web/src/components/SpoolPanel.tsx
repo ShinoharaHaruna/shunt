@@ -51,6 +51,16 @@ export function SpoolPanel({ spool }: { spool: { entries?: SpoolEntry[]; error?:
                           {e.hold ? t('spool.heldReason', { reason: e.hold }) : t('spool.held')}
                         </span>
                       )}
+                      {e.hold_on_box != null && (
+                        <span
+                          title="Held on the box after delivery"
+                          className="ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-amber-400"
+                        >
+                          {e.hold_on_box
+                            ? t('spool.heldReason', { reason: e.hold_on_box })
+                            : t('spool.held')}
+                        </span>
+                      )}
                     </td>
                     <td className={`${td} font-num text-xs text-ink-4`}>
                       {shortTs(e.submitted_at)}

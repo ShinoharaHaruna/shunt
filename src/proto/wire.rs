@@ -125,6 +125,12 @@ pub struct EntryDetail {
     pub declared: Declared,
     #[serde(default)]
     pub usage: Option<TaskUsage>,
+    /// Pending admission gate; absent sidecars are false.
+    #[serde(default)]
+    pub held: bool,
+    /// Free-form reason stored inside the `held` sidecar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_reason: Option<String>,
 }
 
 /// Accumulated usage for one task (design.md §3.16) — in-memory

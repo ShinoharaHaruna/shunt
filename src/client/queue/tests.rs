@@ -24,6 +24,47 @@ fn claim_lost_race_leaves_no_ghost_dir() {
     std::fs::remove_dir_all(&root).ok();
 }
 
+/// A hold is a pending-only sidecar, can be released repeatedly, and
+/// does not move or renumber the entry.
+#[test]
+fn hold_release_round_trip_on_pending_entry() {
+    let root = tmp_root("hold-roundtrip");
+    let name = enqueue(&root, "hold-me", "echo hi\n").unwrap().name().to_string();
+    hold_pending(&root, &name, "awaiting review").unwrap();
+    assert_eq!(held_reason(&root, "pending", &name).unwrap().as_deref(), Some("awaiting review"));
+    assert_eq!(pending_list(&root).unwrap(), vec![name.clone()]);
+    release_pending(&root, &name).unwrap();
+    release_pending(&root, &name).unwrap();
+    assert_eq!(held_reason(&root, "pending", &name).unwrap(), None);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Legacy readers remain supported, but a hold writer refuses a flat
+/// entry because it has no per-entry directory for the sidecar.
+#[test]
+fn hold_refuses_legacy_flat_entry() {
+    let root = tmp_root("hold-flat");
+    let flat = root.join("pending/0100_legacy.sh");
+    std::fs::write(&flat, "echo hi\n").unwrap();
+    let error = hold_pending(&root, "0100_legacy", "review").unwrap_err().to_string();
+    assert!(error.contains("legacy flat entry") && error.contains("enqueue it again"), "{error}");
+    assert!(flat.exists());
+    assert!(!root.join("pending/0100_legacy.sh.held").exists());
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// `enqueue --hold` publishes the sidecar as part of the temporary
+/// entry, so the daemon never observes an unheld intermediate state.
+#[test]
+fn enqueue_installs_held_sidecar() {
+    let root = tmp_root("enqueue-held");
+    let outcome = enqueue_with_hold(&root, "parked", "echo hi\n", Some("review later")).unwrap();
+    let name = outcome.name();
+    assert_eq!(std::fs::read_to_string(root.join("pending").join(name).join("held")).unwrap(), "review later");
+    assert_eq!(held_reason(&root, "pending", name).unwrap().as_deref(), Some("review later"));
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// A legacy flat claim normalizes inside pending/ and lands in
 /// running/ as a complete dir entry — the only state visible to
 /// running_list. At no point may running/<name> appear empty.

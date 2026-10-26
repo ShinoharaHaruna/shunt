@@ -1,7 +1,7 @@
 use super::logs::{render_dlog_line, tail_bytes};
 use super::tasks::find_task;
-use super::{agent_cancel, agent_cat, agent_clean, agent_kill, agent_prio, logs_wire_tail, workers_wire_tail};
-use crate::cli::args::{CatArgs, CleanArgs, LogsArgs, PatternArgs, PrioArgs, WorkerAction, WorkersArgs};
+use super::{agent_cancel, agent_cat, agent_clean, agent_enqueue, agent_hold, agent_kill, agent_prio, agent_release, logs_wire_tail, workers_wire_tail};
+use crate::cli::args::{CatArgs, CleanArgs, EnqueueArgs, HoldArgs, LogsArgs, PatternArgs, PrioArgs, WorkerAction, WorkersArgs};
 
 /// Both the one-shot `dlog` render and `logs -f`'s appended-
 /// line render must go through the same JSONL→text transform
@@ -74,6 +74,32 @@ fn cat_exact_match_wins_over_substrings() {
 
     let err = agent_cat(&cat_args(&root, "zzz")).unwrap_err().to_string();
     assert_eq!(err, "no task matches 'zzz'", "{err}");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The CLI's `enqueue --hold=REASON` path publishes the task with
+/// its admission sidecar, and local hold/release mutate that same gate.
+#[test]
+fn enqueue_hold_and_local_hold_release_round_trip() {
+    let root = tmp_root("enqueue-hold-cli");
+    crate::client::queue::init(&root).unwrap();
+    let task = root.join("task.sh");
+    std::fs::write(&task, "#!/usr/bin/env bash\necho hi\n").unwrap();
+    let args = EnqueueArgs { file: task.display().to_string(), slug: None, slug_opt: Some("parked".into()), root: Some(root.display().to_string()), json: false, hold: Some("await review".into()) };
+    agent_enqueue(&args).unwrap();
+    let name = crate::client::queue::pending_list(&root).unwrap().remove(0);
+    assert_eq!(crate::client::queue::held_reason(&root, "pending", &name).unwrap().as_deref(), Some("await review"));
+
+    let hold = HoldArgs { pattern: name.clone(), reason: Some("new reason".into()), client: None, root: Some(root.display().to_string()), queue: None, json: false };
+    agent_hold(&hold).unwrap();
+    assert_eq!(crate::client::queue::held_reason(&root, "pending", &name).unwrap().as_deref(), Some("new reason"));
+    agent_release(&pat_args(&root, &name)).unwrap();
+    assert_eq!(crate::client::queue::held_reason(&root, "pending", &name).unwrap(), None);
+
+    std::fs::create_dir_all(root.join("running/0101_run")).unwrap();
+    let running = HoldArgs { pattern: "0101_run".into(), reason: None, client: None, root: Some(root.display().to_string()), queue: None, json: false };
+    let error = agent_hold(&running).unwrap_err().to_string();
+    assert!(error.contains("already running") && error.contains("cannot be re-parked"), "{error}");
     std::fs::remove_dir_all(&root).ok();
 }
 

@@ -17,7 +17,7 @@ mod tests;
 pub use misc::{CompletionsArgs, FeedbackAction, FeedbackArgs, ProbeArgs, UpgradeArgs, VersionArgs};
 pub use room::{RoomAction, RoomCmd};
 pub use server::{ClientAction, ClientCmd, DispatchArgs, ProjectAction, ProjectCmd, QueueAction, QueueCmd, ServeAction, ServeArgs, SpoolAction, SpoolCmd, TaskAction, TaskCmd, TunnelAction, TunnelArgs};
-pub use tasks::{CatArgs, CleanArgs, EnqueueArgs, LogsArgs, NewArgs, PatternArgs, PrioArgs, RootArgs, ShutdownAction, ShutdownArgs, StatusArgs, SubmitArgs, WorkerAction, WorkersArgs};
+pub use tasks::{CatArgs, CleanArgs, EnqueueArgs, HoldArgs, LogsArgs, NewArgs, PatternArgs, PrioArgs, RootArgs, ShutdownAction, ShutdownArgs, StatusArgs, SubmitArgs, WorkerAction, WorkersArgs};
 
 #[derive(Parser)]
 #[command(
@@ -100,6 +100,12 @@ pub enum Command {
     /// Print the generated task body to stdout (client)
     #[command(arg_required_else_help = true)]
     Mktask(NewArgs),
+    /// Park a pending task behind its one-shot admission gate
+    #[command(arg_required_else_help = true)]
+    Hold(HoldArgs),
+    /// Release a pending task's admission gate
+    #[command(arg_required_else_help = true)]
+    Release(PatternArgs),
     /// Remove a pending task by name/pattern
     #[command(arg_required_else_help = true)]
     Cancel(PatternArgs),

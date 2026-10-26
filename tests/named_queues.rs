@@ -94,13 +94,13 @@ fn two_queues_run_independently_on_one_client() -> Result<()> {
     wire(&t, "eval", &["enqueue", "--json", "--slug", "seed", "-"])?;
     // `submit` resolves the configured default (train) — staged target pins queue+qroot.
     let flags = TaskFlags::default();
-    spool::submit_to("box", None, None, None, Some("to-train"), None, &flags, None, &["touch".into(), "train-hit".into()])?;
+    spool::submit_to("box", None, None, None, Some("to-train"), None, &flags, None, None, &["touch".into(), "train-hit".into()])?;
     let staged = spool::list()?;
     assert_eq!(staged[0].queue, "train");
     assert_eq!(staged[0].qroot.as_deref(), Some(home.path("q/train").to_str().unwrap()));
 
     // And an explicit queue target beats the configured default.
-    spool::submit_to("box", Some("eval"), None, None, Some("to-eval"), None, &flags, None, &["touch".into(), "eval-hit".into()])?;
+    spool::submit_to("box", Some("eval"), None, None, Some("to-eval"), None, &flags, None, None, &["touch".into(), "eval-hit".into()])?;
     let staged = spool::list()?;
     assert_eq!(staged[1].queue, "eval");
 
@@ -150,7 +150,7 @@ fn changing_default_never_retarguess_staged_tasks() -> Result<()> {
 
     // Stage for train (the default), then flip the default to eval.
     let flags = TaskFlags::default();
-    spool::submit_to("box", None, None, None, Some("pinned"), None, &flags, None, &["true".into()])?;
+    spool::submit_to("box", None, None, None, Some("pinned"), None, &flags, None, None, &["true".into()])?;
     let staged = spool::list()?;
     assert_eq!(staged[0].queue, "train");
     c.default_queue = Some("eval".into());

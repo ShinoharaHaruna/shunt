@@ -13,7 +13,7 @@ mod queue;
 mod tasks;
 
 pub(super) use client::client;
-pub(super) use control::{cancel, clean, kill, prio, shutdown, workers};
+pub(super) use control::{cancel, clean, hold, kill, prio, release, shutdown, workers};
 pub(super) use enqueue::{enqueue, mktask, new};
 pub(super) use misc::{completions, dispatch, probe, serve, tunnel, version};
 pub(super) use observe::{cat, dlog, logs, status};

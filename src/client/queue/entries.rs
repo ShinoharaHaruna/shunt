@@ -1,6 +1,7 @@
 //! Track listings and entry movement: claim, cancel, archive, and
 //! the dir-vs-legacy-file entry shapes (design.md §3.1, §3.9).
 
+use super::admission::admission_lock;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -108,6 +109,60 @@ pub fn piece_file(root: &Path, track: &str, name: &str, piece: &str) -> PathBuf 
     }
 }
 
+/// Hold reason for a current directory entry. `Some("")` is a held
+/// entry without a reason; flat legacy entries cannot carry this gate.
+pub fn held_reason(root: &Path, track: &str, name: &str) -> Result<Option<String>> {
+    if !is_dir_entry(root, track, name) {
+        return Ok(None);
+    }
+    let path = root.join(track).join(name).join("held");
+    match std::fs::read_to_string(&path) {
+        Ok(reason) => Ok(Some(reason)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+fn require_pending_dir(root: &Path, name: &str, operation: &str) -> Result<PathBuf> {
+    let pending = root.join("pending");
+    let entry = pending.join(name);
+    match std::fs::symlink_metadata(&entry) {
+        Ok(meta) if meta.file_type().is_dir() => return Ok(entry),
+        Ok(_) => anyhow::bail!("cannot {operation} {name}: pending/{name} is not an entry directory; legacy flat entries have no sidecar home, so enqueue it again with the current shunt binary"),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).with_context(|| format!("cannot inspect {}", entry.display())),
+        Err(_) => {}
+    }
+    if pending.join(format!("{name}.sh")).is_file() {
+        anyhow::bail!("cannot {operation} legacy flat entry {name}: readers support flat entries, but held sidecars require pending/{name}/; enqueue it again with the current shunt binary")
+    }
+    if root.join("running").join(name).exists() {
+        anyhow::bail!("cannot {operation} {name}: it is already running; running tasks cannot be re-parked or released")
+    }
+    anyhow::bail!("no pending task named {name}; it may have been claimed or removed, so re-run `shunt status` and retry with the pending entry name")
+}
+
+/// Write a pending entry's admission marker. The dedicated lock
+/// makes an acknowledged hold win over a concurrent claim.
+pub fn hold_pending(root: &Path, name: &str, reason: &str) -> Result<()> {
+    let _lock = admission_lock(root)?;
+    let entry = require_pending_dir(root, name, "hold")?;
+    let path = entry.join("held");
+    std::fs::write(&path, reason).with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// Clear a pending entry's one-shot admission marker. Releasing an
+/// already-claimable entry is harmless and idempotent.
+pub fn release_pending(root: &Path, name: &str) -> Result<()> {
+    let _lock = admission_lock(root)?;
+    let entry = require_pending_dir(root, name, "release")?;
+    let path = entry.join("held");
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("cannot remove {}", path.display())),
+    }
+}
+
 /// Remove a pending entry whatever its shape (dir or legacy file).
 pub fn remove_pending(root: &Path, name: &str) -> Result<()> {
     let d = root.join("pending").join(name);
@@ -119,13 +174,36 @@ pub fn remove_pending(root: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Atomic claim: pending/<name> -> running/<name>. Ok(false) when the
-/// entry vanished under us (a concurrent cancel/claim) — the rename
-/// itself is the recheck, never a prior existence test. Err means the
-/// entry still exists but cannot be claimed (name collision in
-/// running/, permissions): the caller quarantines it to failed/
-/// rather than spinning on the same unclaimable head every poll.
+/// Atomic claim: pending/<name> -> running/<name>. Hold/release use
+/// the same lock, so a successful hold cannot race past this final gate.
+/// Ok(false) means the entry vanished, is held, or is waiting out
+/// retry_after; Err means a present entry cannot be claimed.
 pub fn claim(root: &Path, name: &str) -> Result<bool> {
+    let _lock = admission_lock(root)?;
+    let pending = root.join("pending");
+    let entry = pending.join(name);
+    if entry.is_dir() {
+        let held = entry.join("held");
+        match std::fs::symlink_metadata(&held) {
+            Ok(_) => return Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("cannot inspect {}", held.display())),
+        }
+    }
+    let retry_after = piece_file(root, "pending", name, "retry_after");
+    if retry_after.exists() {
+        let due = std::fs::read_to_string(&retry_after).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+        if due > crate::proto::time::unix_now() {
+            return Ok(false);
+        }
+        let _ = std::fs::remove_file(retry_after);
+    }
+    claim_locked(root, name)
+}
+
+/// Caller holds `.admission.lock`; held/retry_after checks and the
+/// move are one admission decision.
+fn claim_locked(root: &Path, name: &str) -> Result<bool> {
     let pending = root.join("pending");
     let dst = root.join("running").join(name);
     if !pending.join(name).is_dir() {

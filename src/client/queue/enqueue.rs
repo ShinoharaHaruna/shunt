@@ -214,12 +214,15 @@ pub(crate) fn invalidate_dedup_index(root: &Path) -> Result<()> {
     }
 }
 
-/// Install a task body into pending/ as `NNNN_<slug>/task.sh`, mode
-/// 0755, via write-temp-dir-then-mv inside pending/ (atomic same-fs
-/// rename). A body carrying `# shunt:id=` that already exists in a
-/// live track returns `Deduped` with the existing name. `.dedup`
-/// lookup, append, mint, and install share the `.seq.lock` hold.
+/// Install an unheld task body into pending/ as `NNNN_<slug>/task.sh`.
 pub fn enqueue(root: &Path, slug: &str, body: &str) -> Result<EnqueueOutcome> {
+    enqueue_with_hold(root, slug, body, None)
+}
+
+/// Install a task body and optional admission marker before publishing
+/// the pending entry. This avoids a window where a requested hold is
+/// visible as ordinary claimable work.
+pub fn enqueue_with_hold(root: &Path, slug: &str, body: &str, hold: Option<&str>) -> Result<EnqueueOutcome> {
     use std::os::unix::fs::PermissionsExt;
     // One critical section serializes retries and keeps same-key
     // enqueue, mint, index append, and install in a single order.
@@ -241,6 +244,9 @@ pub fn enqueue(root: &Path, slug: &str, body: &str) -> Result<EnqueueOutcome> {
         let tf = tmp.join("task.sh");
         std::fs::write(&tf, body)?;
         std::fs::set_permissions(&tf, std::fs::Permissions::from_mode(0o755))?;
+        if let Some(reason) = hold {
+            std::fs::write(tmp.join("held"), reason)?;
+        }
         if let Some(key) = &dedup_key {
             index_growth = Some(append_dedup_index(root, key, &name)?);
         }

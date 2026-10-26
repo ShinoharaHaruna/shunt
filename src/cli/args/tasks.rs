@@ -59,12 +59,15 @@ pub struct SubmitArgs {
     /// Named queue on the selected server client
     #[arg(long)]
     pub queue: Option<String>,
-    /// Stage held: the dispatcher skips this task on every sweep
-    /// until `shunt spool release <id>`. Optionally record why
-    /// (`--hold=REASON`; `=` is required so the reason can't be
-    /// mistaken for a file argument)
+    /// Keep this task in server spool until `shunt spool release <id>`;
+    /// this does not hold a task after box delivery. Optional reason
+    /// uses `--hold=REASON` so it cannot be mistaken for a file argument.
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "", value_name = "REASON")]
     pub hold: Option<String>,
+    /// Deliver now but keep the box-side pending entry unclaimable
+    /// until `shunt release <name>`. Optional reason uses `=`.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "", value_name = "REASON")]
+    pub hold_on_box: Option<String>,
 }
 
 #[derive(Args)]
@@ -154,6 +157,29 @@ pub struct EnqueueArgs {
     pub slug_opt: Option<String>,
     #[arg(long)]
     pub root: Option<String>,
+    #[arg(long)]
+    pub json: bool,
+    /// Hold the installed pending entry until `shunt release <name>`
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "", value_name = "REASON")]
+    pub hold: Option<String>,
+}
+
+#[derive(Args)]
+pub struct HoldArgs {
+    /// Pending task name or unique substring
+    pub pattern: String,
+    /// Optional free-form reason (quote to pass multiple words)
+    pub reason: Option<String>,
+    /// Forward to a client over SSH (server side)
+    #[arg(short, long)]
+    pub client: Option<String>,
+    /// Local queue root (client side)
+    #[arg(long)]
+    pub root: Option<String>,
+    /// Named queue on the selected server client
+    #[arg(long, conflicts_with = "root")]
+    pub queue: Option<String>,
+    /// Emit JSON (wire protocol)
     #[arg(long)]
     pub json: bool,
 }

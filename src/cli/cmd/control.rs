@@ -2,12 +2,54 @@
 //! `workers`, `shutdown`: `-c`/registry default forwards the op
 //! over the wire; a local queue in scope runs the local handler.
 
-use crate::cli::args::{CleanArgs, PatternArgs, PrioArgs, ShutdownAction, ShutdownArgs, WorkersArgs};
+use crate::cli::args::{CleanArgs, HoldArgs, PatternArgs, PrioArgs, ShutdownAction, ShutdownArgs, WorkersArgs};
 use crate::cli::dual_mode;
-use crate::cli::local::{agent_cancel, agent_clean, agent_kill, agent_prio, agent_shutdown, agent_workers, workers_wire_tail};
+use crate::cli::local::{agent_cancel, agent_clean, agent_hold, agent_kill, agent_prio, agent_release, agent_shutdown, agent_workers, workers_wire_tail};
 use crate::cli::server::remote_queue;
 use crate::server::registry;
 use anyhow::Result;
+
+pub fn hold(a: &HoldArgs) -> Result<()> {
+    dual_mode(
+        &a.client,
+        &a.root,
+        &a.queue,
+        "hold",
+        |name| {
+            let tail = hold_wire_tail(a);
+            let refs: Vec<&str> = tail.iter().map(String::as_str).collect();
+            remote_queue(name, a.queue.as_deref(), &refs, None, true)
+        },
+        || agent_hold(a),
+    )
+}
+
+fn hold_wire_tail(a: &HoldArgs) -> Vec<String> {
+    let mut tail = vec!["hold".into(), "--json".into(), "--".into(), a.pattern.clone()];
+    if let Some(reason) = &a.reason {
+        tail.push(reason.clone());
+    }
+    tail
+}
+
+pub fn release(a: &PatternArgs) -> Result<()> {
+    dual_mode(
+        &a.client,
+        &a.root,
+        &a.queue,
+        "release",
+        |name| {
+            let tail = release_wire_tail(&a.pattern);
+            let refs: Vec<&str> = tail.iter().map(String::as_str).collect();
+            remote_queue(name, a.queue.as_deref(), &refs, None, true)
+        },
+        || agent_release(a),
+    )
+}
+
+fn release_wire_tail(pattern: &str) -> Vec<String> {
+    vec!["release".into(), "--json".into(), "--".into(), pattern.into()]
+}
 
 pub fn cancel(a: &PatternArgs) -> Result<()> {
     dual_mode(&a.client, &a.root, &a.queue, "cancel", |name| remote_queue(name, a.queue.as_deref(), &["cancel", "--json", "--", &a.pattern], None, true), || agent_cancel(a))
@@ -114,4 +156,17 @@ pub fn shutdown(a: &ShutdownArgs) -> Result<()> {
         },
         || agent_shutdown(a),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hold_wire_tail, release_wire_tail};
+    use crate::cli::args::HoldArgs;
+
+    #[test]
+    fn hold_and_release_wire_argv_preserve_positional_data() {
+        let hold = HoldArgs { pattern: "0100_train".into(), reason: Some("await approval".into()), client: None, root: None, queue: None, json: false };
+        assert_eq!(hold_wire_tail(&hold), vec!["hold", "--json", "--", "0100_train", "await approval"].into_iter().map(str::to_string).collect::<Vec<_>>());
+        assert_eq!(release_wire_tail("0100_train"), vec!["release", "--json", "--", "0100_train"].into_iter().map(str::to_string).collect::<Vec<_>>());
+    }
 }

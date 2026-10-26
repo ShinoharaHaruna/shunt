@@ -109,6 +109,10 @@ pub struct SpoolEntry {
     /// JSON identical to the pre-hold format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<String>,
+    /// `Some` asks dispatch to deliver the task as held on the box;
+    /// unlike `hold`, this does not exclude the entry from the spool sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_on_box: Option<String>,
     pub meta: TaskMeta,
     pub submitted_at: String,
 }
@@ -184,6 +188,16 @@ pub fn validate_meta(meta: &TaskMeta) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::sanitize_slug;
+
+    #[test]
+    fn legacy_spool_entries_default_to_deliverable() {
+        use super::SpoolEntry;
+        let entry: SpoolEntry = serde_json::from_str(r#"{"id":"id-1","project":"","client":"box","meta":{"slug":"task"},"submitted_at":"now"}"#).unwrap();
+        assert!(entry.hold.is_none());
+        assert!(entry.hold_on_box.is_none());
+        let encoded = serde_json::to_string(&entry).unwrap();
+        assert!(!encoded.contains("hold_on_box"));
+    }
 
     #[test]
     fn slug_keeps_safe_chars() {

@@ -96,6 +96,8 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Enqueue(a) => cmd::enqueue(&a),
         Command::New(a) => cmd::new(&a),
         Command::Mktask(a) => cmd::mktask(&a),
+        Command::Hold(a) => cmd::hold(&a),
+        Command::Release(a) => cmd::release(&a),
         Command::Cancel(a) => cmd::cancel(&a),
         Command::Prio(a) => cmd::prio(&a),
         Command::Kill(a) => cmd::kill(&a),

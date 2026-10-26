@@ -91,6 +91,13 @@ pub fn maybe_reschedule(root: &Path, base: &str, rc: i32, td: &TaskDirectives) -
         // finish line, and the anomaly is visible in failed/.
         return Ok(Resched::No);
     }
+    // Admission was already consumed by the first claim; a stale marker
+    // must not make this retry wait for a second release.
+    match std::fs::remove_file(entry.join("held")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).context("cannot clear held marker before rescheduling"),
+    }
     // Sidecars go in BEFORE the move so a failed write bails while
     // the entry still sits in running/ — the caller then finalizes
     // it normally rather than losing the budget bookkeeping.

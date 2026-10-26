@@ -22,7 +22,7 @@ fn rename_moves_row_keys_state_and_refs() -> Result<()> {
     client_ops::ensure_key(&mut e)?;
     registry::save_client(&e)?;
     // A staged submission + a project binding referencing old-box.
-    spool::stage(&SpoolEntry { id: "t1".into(), project: "p".into(), client: "old-box".into(), queue: "default".into(), qroot: None, hold: None, meta: TaskMeta { id: None, slug: "s".into(), guard: None, workdir: None, env: Default::default(), cmd: vec!["echo".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None }, submitted_at: "2026-01-01T00:00:00Z".into() }, "echo s\n")?;
+    spool::stage(&SpoolEntry { id: "t1".into(), project: "p".into(), client: "old-box".into(), queue: "default".into(), qroot: None, hold: None, hold_on_box: None, meta: TaskMeta { id: None, slug: "s".into(), guard: None, workdir: None, env: Default::default(), cmd: vec!["echo".into()], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None }, submitted_at: "2026-01-01T00:00:00Z".into() }, "echo s\n")?;
     let env_of = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     registry::save_project(&ProjectEntry { name: "p".into(), desc: String::new(), repo: String::new(), defaults: shunt::server::registry::ProjectDefaults { env: env_of(&[("A", "1"), ("B", "2")]) }, bind: vec![Binding { client: "old-box".into(), queue: "default".into(), workdir: "/w".into(), env: env_of(&[("B", "3")]) }] })?;
     // Conn-fail streak file and its sidecar flock (issue #8).
