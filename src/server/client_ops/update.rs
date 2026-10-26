@@ -20,6 +20,10 @@ pub struct EndpointUpdate {
     pub password: Option<String>,
     pub pre_connect: Option<String>,
     pub endpoint_rotates: Option<bool>,
+    /// `Some` replaces ssh.options wholesale (empty clears it);
+    /// `None` leaves the list alone. Managed so a changed list kills
+    /// the mux master — a hand-edit would ride the stale one.
+    pub options: Option<Vec<String>>,
 }
 
 /// `shunt client update <name> [flags]`: rewrite the row's ssh
@@ -34,8 +38,8 @@ pub struct EndpointUpdate {
 /// Server-local: no reachability check; verify with `status -c`.
 pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
     let endpoint_moved = u.host.is_some() || u.port.is_some() || u.user.is_some();
-    if !endpoint_moved && u.key.is_none() && u.password.is_none() && u.pre_connect.is_none() && u.endpoint_rotates.is_none() {
-        anyhow::bail!("nothing to update — pass --host/--port/--user/--key/--password/--pre-connect/--endpoint-rotates (other row fields — qroot, deploy_root, expire, env_setup — are hand-edited in clients/<name>.toml)");
+    if !endpoint_moved && u.key.is_none() && u.password.is_none() && u.pre_connect.is_none() && u.endpoint_rotates.is_none() && u.options.is_none() {
+        anyhow::bail!("nothing to update — pass --host/--port/--user/--key/--password/--pre-connect/--option/--no-options/--endpoint-rotates (other row fields — qroot, deploy_root, expire, env_setup — are hand-edited in clients/<name>.toml)");
     }
     if u.port == Some(0) {
         anyhow::bail!("--port 0 is not a usable endpoint");
@@ -44,6 +48,7 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
     let (old_host, old_port) = (e.ssh.host.clone(), e.ssh.port);
     let mut changes: Vec<String> = Vec::new();
     let mut key_changed = false;
+    let mut options_changed = false;
     if let Some(h) = u.host {
         changes.push(format!("ssh.host: {old_host} -> {h}"));
         e.ssh.host = h;
@@ -82,8 +87,18 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
             e.endpoint_rotates = v;
         }
     }
+    if let Some(options) = u.options {
+        // Never echo option values — a ProxyCommand can carry a
+        // credential path or internal host (same rule as
+        // pre_connect).
+        if options != e.ssh.options {
+            changes.push(if options.is_empty() { "ssh.options: cleared".into() } else { format!("ssh.options: set ({} entries)", options.len()) });
+            e.ssh.options = options;
+            options_changed = true;
+        }
+    }
     let path = registry::save_client(&e)?;
-    if key_changed && !endpoint_moved {
+    if (key_changed || options_changed) && !endpoint_moved {
         kill_mux(&e.name);
     }
     if !e.local && e.ssh.key.is_empty() && e.ssh.password.is_empty() {
@@ -126,6 +141,13 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
         // but a rebuilt container resets authorized_keys entirely —
         // the key is then gone even though the row still points at it.
         eprintln!("note: if the box was rebuilt (fresh authorized_keys), re-run `shunt client bootstrap {name}` to redeploy the key");
+    }
+    // Options feed tunnels too (design.md §334): a recorded tunnel
+    // still forwards under the old list. Surface it rather than
+    // tearing a healthy forward down over an unrelated option — the
+    // endpoint path above already tore it down when it mattered.
+    if options_changed && !endpoint_moved && !e.local && crate::server::tunnel::recorded(name)? {
+        eprintln!("warn: recorded tunnel still runs under the old ssh.options; apply them with `shunt tunnel -c {name} down` then `up`");
     }
     Ok(())
 }
@@ -231,11 +253,30 @@ mod tests {
         client.ssh.password = "pw".into();
         crate::server::registry::save_client(&client).unwrap();
 
-        super::update("key-clear", EndpointUpdate { host: None, port: None, user: None, key: Some(String::new()), password: None, pre_connect: None, endpoint_rotates: None }).unwrap();
+        super::update("key-clear", EndpointUpdate { host: None, port: None, user: None, key: Some(String::new()), password: None, pre_connect: None, endpoint_rotates: None, options: None }).unwrap();
 
         let saved = crate::server::registry::load_client("key-clear").unwrap();
         assert!(saved.ssh.key.is_empty());
         assert!(saved.ssh.password_only());
+        std::env::remove_var("SHUNT_HOME");
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn update_options_replaces_then_clears() {
+        let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-update-opts-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let mut client = entry();
+        client.name = "opts".into();
+        client.ssh.options = vec!["ProxyJump=old".into()];
+        crate::server::registry::save_client(&client).unwrap();
+
+        let bare = || EndpointUpdate { host: None, port: None, user: None, key: None, password: None, pre_connect: None, endpoint_rotates: None, options: None };
+        super::update("opts", EndpointUpdate { options: Some(vec!["ProxyJump=bastion".into(), "ForwardAgent=yes".into()]), ..bare() }).unwrap();
+        assert_eq!(crate::server::registry::load_client("opts").unwrap().ssh.options, ["ProxyJump=bastion", "ForwardAgent=yes"]);
+        super::update("opts", EndpointUpdate { options: Some(Vec::new()), ..bare() }).unwrap();
+        assert!(crate::server::registry::load_client("opts").unwrap().ssh.options.is_empty());
         std::env::remove_var("SHUNT_HOME");
         std::fs::remove_dir_all(home).ok();
     }
