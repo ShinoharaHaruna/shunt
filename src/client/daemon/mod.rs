@@ -28,7 +28,7 @@ mod timeouts;
 mod workers;
 
 pub use core::run;
-pub use lifecycle::{alive, check_alive, restart, start, stop, Restart};
+pub use lifecycle::{alive, check_alive, restart, start, stop, Restart, StartOutcome};
 pub use workers::resolve_workers;
 
 /// Remove the pidfile trio on every exit/eviction path (§3.4):

@@ -112,12 +112,30 @@ fn start_wait() -> Duration {
     std::env::var("SHUNT_START_WAIT_S").ok().and_then(|s| s.parse::<u64>().ok()).filter(|&n| n > 0).map(Duration::from_secs).unwrap_or(Duration::from_secs(15))
 }
 
+/// Outcome of `start`: the daemon is running, or it exited cleanly
+/// under `exit_on_idle` before liveness was observed.
+pub enum StartOutcome {
+    Running { pid: u32 },
+    ExitedIdle,
+}
+
+/// Requiring this child's pid prevents a concurrent start winner's
+/// clean exit from being attributed to a loser that failed its lock.
+fn logged_idle_exit(root: &Path, pid: u32) -> bool {
+    let Ok(log) = std::fs::read_to_string(root.join("daemon.log")) else {
+        return false;
+    };
+    log.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok()).any(|event| event.get("event").and_then(serde_json::Value::as_str) == Some("daemon_exit_idle") && event.get("pid").and_then(serde_json::Value::as_u64) == Some(u64::from(pid)))
+}
+
 /// Self-daemonize: spawn `shunt daemon --root <root>` detached
 /// (process_group(0), stdio → daemon.log) and wait for the pidfile.
-/// Idempotent: returns the live pid when already running.
-pub fn start(root: &Path) -> Result<u32> {
+/// Idempotent: returns the live pid when already running. A child
+/// that exits 0 after logging its own `daemon_exit_idle` is also a
+/// successful start, not a startup failure.
+pub fn start(root: &Path) -> Result<StartOutcome> {
     if let Some(pid) = alive(root)? {
-        return Ok(pid);
+        return Ok(StartOutcome::Running { pid });
     }
     queue::init(root)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(root.join("daemon.log"))?;
@@ -135,17 +153,20 @@ pub fn start(root: &Path) -> Result<u32> {
     let wait = start_wait();
     for _ in 0..wait.as_millis() / 50 {
         if let Some(pid) = alive(root)? {
-            return Ok(pid);
+            return Ok(StartOutcome::Running { pid });
         }
-        if let Ok(Some(_)) = spawned.try_wait() {
+        if let Ok(Some(status)) = spawned.try_wait() {
             // Under a start race the loser exits early (daemon.lock
             // held) while the winner's pidfile may land just after
             // our alive() probe above — re-check before reporting a
             // failure; the surviving daemon's pid is the right answer.
             if let Some(pid) = alive(root)? {
-                return Ok(pid);
+                return Ok(StartOutcome::Running { pid });
             }
-            anyhow::bail!("daemon exited during startup; check {}", root.join("daemon.log").display());
+            if status.success() && logged_idle_exit(root, spawned.id()) {
+                return Ok(StartOutcome::ExitedIdle);
+            }
+            anyhow::bail!("daemon exited during startup; inspect {} and fix the logged cause before retrying `shunt start --root {}`", root.join("daemon.log").display(), root.display());
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -159,11 +180,12 @@ pub fn stop(root: &Path) -> Result<()> {
 }
 
 /// Outcome of `restart`. `HandedOff` sent SIGUSR2 to a live,
-/// handoff-capable daemon; `Started` means no live daemon was found
-/// and a fresh one was spawned (already the new binary).
+/// handoff-capable daemon; `Started` means a dead daemon was replaced
+/// by a live one; `ExitedIdle` means it started and drained cleanly.
 pub enum Restart {
     HandedOff { pid: u32, from_ver: String },
     Started { pid: u32 },
+    ExitedIdle,
 }
 
 /// Handoff-restart the daemon (§3.5a): a live daemon gets SIGUSR2 —
@@ -176,7 +198,10 @@ pub enum Restart {
 /// the new binary anyway.
 pub fn restart(root: &Path) -> Result<Restart> {
     let Some(pid) = alive(root)? else {
-        return start(root).map(|pid| Restart::Started { pid });
+        return match start(root)? {
+            StartOutcome::Running { pid } => Ok(Restart::Started { pid }),
+            StartOutcome::ExitedIdle => Ok(Restart::ExitedIdle),
+        };
     };
     let ver = std::fs::read_to_string(root.join("daemon.ver")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let Some(from_ver) = ver else {
@@ -191,7 +216,7 @@ pub fn restart(root: &Path) -> Result<Restart> {
 
 #[cfg(test)]
 mod tests {
-    use super::{alive_impl, is_daemon_cmdline};
+    use super::{alive_impl, is_daemon_cmdline, logged_idle_exit};
 
     fn argv<'a>(parts: &[&'a str]) -> Vec<&'a [u8]> {
         parts.iter().map(|p| p.as_bytes()).collect()
@@ -233,6 +258,20 @@ mod tests {
         assert!(!is_daemon_cmdline(&argv(&["shunt", "daemonesque"])));
         assert!(!is_daemon_cmdline(&argv(&["shunt", "--root", "/q"])));
         assert!(!is_daemon_cmdline(&[]));
+    }
+
+    /// Only this child's clean exit marker proves it started before
+    /// draining; other pids and unrelated events cannot mask a crash.
+    #[test]
+    fn idle_exit_evidence_is_pid_scoped() {
+        let root = std::env::temp_dir().join(format!("shunt-start-idle-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("daemon.log"), "{\"event\":\"daemon_start\",\"pid\":123}\n{\"event\":\"daemon_exit_idle\",\"pid\":123}\n").unwrap();
+        assert!(logged_idle_exit(&root, 123));
+        assert!(!logged_idle_exit(&root, 456));
+        std::fs::write(root.join("daemon.log"), "{\"event\":\"daemon_exit_idle\"}\n").unwrap();
+        assert!(!logged_idle_exit(&root, 123));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A live pid whose cmdline cannot be read (EACCES, transient

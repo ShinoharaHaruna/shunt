@@ -187,6 +187,18 @@ fn restart_dead_daemon_starts_fresh() {
 }
 
 #[test]
+fn start_accepts_clean_exit_on_idle() {
+    let q = Q::new("startidle");
+    std::fs::write(q.root.join("exit_on_idle"), b"1\n").unwrap();
+    let output = Command::new(common::bin()).args(["start", "--root"]).arg(&q.root).arg("--json").env("POLL", "0.001").env("SHUNT_STATE", q.root.join("boxstate")).output().expect("shunt start failed");
+    assert!(output.status.success(), "start failed: {}", String::from_utf8_lossy(&output.stderr));
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reply["ok"], true, "{reply}");
+    wait_until(|| q.dlog().contains("daemon_exit_idle"), 10, "exit_on_idle drain logged");
+    wait_until(|| q.daemon_pid().is_none(), 5, "idle daemon exits");
+}
+
+#[test]
 fn handoff_picks_up_swapped_binary() {
     // The real upgrade shape: the binary FILE is replaced mid-run,
     // so /proc/self/exe reads `<path> (deleted)` — the stripped path

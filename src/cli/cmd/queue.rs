@@ -44,11 +44,19 @@ pub fn start(a: &RootArgs) -> Result<()> {
         return print_subhelp("start");
     }
     match local_root(&a.root).and_then(|root| crate::client::daemon::start(&root)) {
-        Ok(pid) => {
+        Ok(crate::client::daemon::StartOutcome::Running { pid }) => {
             if a.json {
                 jprint(jobj(jfields(serde_json::json!({"pid": pid}))));
             } else {
                 println!("queue daemon up (pid {pid})");
+            }
+            Ok(())
+        }
+        Ok(crate::client::daemon::StartOutcome::ExitedIdle) => {
+            if a.json {
+                jprint(jobj(jfields(serde_json::json!({"started": true, "exited_idle": true}))));
+            } else {
+                println!("queue daemon started and exited cleanly on idle (exit_on_idle)");
             }
             Ok(())
         }
@@ -91,6 +99,14 @@ pub fn restart(a: &RootArgs) -> Result<()> {
                 jprint(jobj(jfields(serde_json::json!({"pid": pid, "started": true}))));
             } else {
                 println!("no live daemon — started fresh (pid {pid})");
+            }
+            Ok(())
+        }
+        Ok(crate::client::daemon::Restart::ExitedIdle) => {
+            if a.json {
+                jprint(jobj(jfields(serde_json::json!({"started": true, "exited_idle": true}))));
+            } else {
+                println!("no live daemon — started and exited cleanly on idle (exit_on_idle)");
             }
             Ok(())
         }

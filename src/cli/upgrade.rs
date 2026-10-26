@@ -140,6 +140,7 @@ fn handoff_local_daemons() {
         match crate::client::daemon::restart(&qroot) {
             Ok(crate::client::daemon::Restart::HandedOff { pid, from_ver }) => println!("daemon at {} handed off (pid {pid}, was {from_ver})", qroot.display()),
             Ok(crate::client::daemon::Restart::Started { pid }) => println!("daemon at {} was dead; started fresh (pid {pid})", qroot.display()),
+            Ok(crate::client::daemon::Restart::ExitedIdle) => println!("daemon at {} was dead; started and exited cleanly on idle (exit_on_idle)", qroot.display()),
             Err(e) => eprintln!("daemon at {} not handed off: {e:#}", qroot.display()),
         }
     }

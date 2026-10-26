@@ -266,7 +266,7 @@ fn run_registered(root: &Path, argv_rest: Vec<OsString>, handed_off: bool) -> Re
                 // only serves its own queue, so a busy sibling daemon
                 // is no reason to stay, and `status`/dispatch
                 // auto-heal revives it on the next submit.
-                dlog(&d.root, "daemon_exit_idle", Map::new());
+                dlog(&d.root, "daemon_exit_idle", ev(json!({"pid": std::process::id()})));
                 super::drop_daemon_files(&d.root);
                 shutdown::deregister_qroot(&d.root);
                 return Ok(());
