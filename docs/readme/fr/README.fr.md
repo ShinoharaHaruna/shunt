@@ -223,6 +223,8 @@ Exécutez ces commandes sur la machine de dev. Les exemples spécifiques à un c
 | Redimensionner le pool de workers                   | `shunt workers 4 -c lab`                              |
 | Avancer une tâche pending en tête de file           | `shunt prio exp1 0 -c lab`                            |
 | Annuler une tâche pending                           | `shunt cancel exp1 -c lab`                            |
+| Parquer une tâche pending jusqu'à sa libération     | `shunt hold exp1 -c lab "waiting on lease"`           |
+| Libérer une tâche pending parquée                   | `shunt release exp1 -c lab`                           |
 | Arrêter le groupe de processus d'une tâche en cours | `shunt kill exp1 -c lab`                              |
 | Vider et arrêter le daemon d'une queue              | `shunt queue stop eval -c lab`                        |
 | Rafraîchir les informations de la machine           | `shunt client probe lab`                              |
@@ -237,9 +239,9 @@ Exécutez ces commandes sur la machine de dev. Les exemples spécifiques à un c
 | Mettre à niveau le binaire local                    | `shunt upgrade`                                       |
 | Mettre à niveau le binaire d'une queue distante     | `shunt upgrade -c lab --queue eval`                   |
 
-Les motifs de contrôle de tâches comme `exp1` doivent identifier une seule tâche ; utilisez le nom complet de l'entrée de tâche quand un motif est ambigu. Le ledger des tâches fait correspondre un ID de soumission à ce nom d'entrée. `task show` interroge la machine à la demande pour résoudre un résultat ; une entrée hors de la fenêtre de status récent peut apparaître comme `unknown`.
+Les motifs de contrôle de tâches comme `exp1` doivent identifier une seule tâche ; utilisez le nom complet de l'entrée de tâche quand un motif est ambigu. Le ledger des tâches fait correspondre un ID de soumission à ce nom d'entrée. `task show` interroge la machine à la demande pour résoudre un résultat ; une entrée hors de la fenêtre de status récent peut apparaître comme `unknown`. Le travail peut aussi être parqué avant d'être réclamable : `--hold` retient une soumission dans le spool côté dev jusqu'à `spool release`, et `--hold-on-box` la livre en laissant l'entrée côté box non réclamable jusqu'à `shunt release`.
 
-Les mises à niveau vérifient les sommes de contrôle de la release et la version du binaire avant installation. Un daemon distant en cours garde sa version chargée jusqu'à ce que vous le vidiez et le redémarriez avec `queue stop` / `queue start` ; remplacer son binaire laisse le travail en cours tourner. Les mises à niveau par release précompilée ciblent actuellement Linux x86_64.
+Les mises à niveau vérifient les sommes de contrôle de la release et la version du binaire avant installation. Un daemon vivant — celui d'une queue locale, d'une box distante ou du dashboard `serve` — est redémarré par handoff sur le binaire installé : il se ré-exécute sur place, garde le même pid, et le travail en cours continue de tourner ; un daemon arrêté est simplement démarré. Quand l'image en cours précède le gestionnaire de handoff, la mise à niveau la nomme au lieu de la signaler, et arrêter puis démarrer ce daemon (`serve down` + `serve up` pour le dashboard) le fait passer sur le nouveau binaire. Un dispatcher n'a pas de pidfile : une mise à niveau locale se contente de nommer les pid des dispatchers vivants — envoyez `SIGUSR2` à chacun, ou redémarrez-le. Les mises à niveau par release précompilée ciblent actuellement Linux x86_64.
 
 Utilisez `shunt <command> --help` pour les drapeaux et la [référence CLI](../../design.md#10-cli-surface) pour la surface complète. Les commandes de queue comme `status` et `logs` fonctionnent aussi directement sur une machine avec `--root <qroot>`.
 

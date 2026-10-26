@@ -223,6 +223,8 @@ Esegui questi comandi sulla macchina dev. Gli esempi specifici per client usano 
 | Ridimensiona il pool di worker                  | `shunt workers 4 -c lab`                              |
 | Sposta un task pending in testa                 | `shunt prio exp1 0 -c lab`                            |
 | Cancella un task pending                        | `shunt cancel exp1 -c lab`                            |
+| Parcheggia un task pending fino al rilascio     | `shunt hold exp1 -c lab "waiting on lease"`           |
+| Rilascia un task pending parcheggiato           | `shunt release exp1 -c lab`                           |
 | Ferma il process group di un task in esecuzione | `shunt kill exp1 -c lab`                              |
 | Drena e ferma il daemon di una coda             | `shunt queue stop eval -c lab`                        |
 | Aggiorna i dati della macchina                  | `shunt client probe lab`                              |
@@ -237,9 +239,9 @@ Esegui questi comandi sulla macchina dev. Gli esempi specifici per client usano 
 | Aggiorna il binario locale                      | `shunt upgrade`                                       |
 | Aggiorna il binario di una coda remota          | `shunt upgrade -c lab --queue eval`                   |
 
-I pattern di controllo dei task come `exp1` devono identificare un solo task; usa il nome completo della entry del task quando un pattern è ambiguo. Il registro dei task mappa un ID di sottomissione a quel nome di entry. `task show` interroga la macchina in modo lazy per risolvere un esito; una entry fuori dalla finestra dello stato recente può apparire come `unknown`.
+I pattern di controllo dei task come `exp1` devono identificare un solo task; usa il nome completo della entry del task quando un pattern è ambiguo. Il registro dei task mappa un ID di sottomissione a quel nome di entry. `task show` interroga la macchina in modo lazy per risolvere un esito; una entry fuori dalla finestra dello stato recente può apparire come `unknown`. Il lavoro si può anche parcheggiare prima che sia reclamabile: `--hold` trattiene una sottomissione nello spool lato dev fino a `spool release`, e `--hold-on-box` la consegna lasciando la entry lato box non reclamabile fino a `shunt release`.
 
-Gli upgrade verificano checksum della release e versione del binario prima dell'installazione. Un daemon remoto in esecuzione mantiene la versione caricata finché non lo dreni e riavvii con `queue stop` / `queue start`; sostituire il suo binario lascia in esecuzione il lavoro corrente. Gli upgrade a release precompilate attualmente puntano a Linux x86_64.
+Gli upgrade verificano checksum della release e versione del binario prima dell'installazione. Un daemon vivo — di una coda locale, di una box remota o della dashboard `serve` — viene riavviato in handoff sul binario installato: riesegue sul posto, mantiene lo stesso pid e il lavoro in corso continua; un daemon fermo viene semplicemente avviato. Quando l'immagine in esecuzione precede l'handler di handoff, l'upgrade la nomina invece di segnalarla, e fermare poi avviare quel daemon (`serve down` + `serve up` per la dashboard) lo porta sul nuovo binario. Un dispatcher non ha pidfile, quindi un upgrade locale si limita a nominare i pid dei dispatcher vivi — invia `SIGUSR2` a ciascuno, o riavvialo. Gli upgrade a release precompilate attualmente puntano a Linux x86_64.
 
 Usa `shunt <command> --help` per i flag e il [riferimento CLI](../../design.md#10-cli-surface) per la superficie completa. I comandi di coda come `status` e `logs` funzionano anche direttamente su una macchina con `--root <qroot>`.
 

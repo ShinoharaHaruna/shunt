@@ -223,6 +223,8 @@ Ejecuta estos comandos en la máquina de desarrollo. Los ejemplos por client usa
 | Redimensionar el pool de workers                  | `shunt workers 4 -c lab`                              |
 | Mover una tarea pending al frente                 | `shunt prio exp1 0 -c lab`                            |
 | Cancelar una tarea pending                        | `shunt cancel exp1 -c lab`                            |
+| Aparcar una tarea pending hasta liberarla         | `shunt hold exp1 -c lab "waiting on lease"`           |
+| Liberar una tarea pending aparcada                | `shunt release exp1 -c lab`                           |
 | Detener el grupo de proceso de una tarea en curso | `shunt kill exp1 -c lab`                              |
 | Vaciar y detener el demonio de una cola           | `shunt queue stop eval -c lab`                        |
 | Refrescar los datos de la máquina                 | `shunt client probe lab`                              |
@@ -237,9 +239,9 @@ Ejecuta estos comandos en la máquina de desarrollo. Los ejemplos por client usa
 | Actualizar el binario local                       | `shunt upgrade`                                       |
 | Actualizar el binario de una cola remota          | `shunt upgrade -c lab --queue eval`                   |
 
-Los patrones de control de tareas como `exp1` deben identificar una sola tarea; usa el nombre completo de la entrada de la tarea cuando un patrón sea ambiguo. El libro mayor de tareas mapea un ID de envío a ese nombre de entrada. `task show` consulta la máquina de forma perezosa para resolver un resultado; una entrada fuera de la ventana de estado reciente puede aparecer como `unknown`.
+Los patrones de control de tareas como `exp1` deben identificar una sola tarea; usa el nombre completo de la entrada de la tarea cuando un patrón sea ambiguo. El libro mayor de tareas mapea un ID de envío a ese nombre de entrada. `task show` consulta la máquina de forma perezosa para resolver un resultado; una entrada fuera de la ventana de estado reciente puede aparecer como `unknown`. El trabajo también puede aparcarse antes de ser reclamable: `--hold` retiene un envío en el spool del lado dev hasta `spool release`, y `--hold-on-box` lo entrega dejando la entrada del lado de la box sin poder reclamarse hasta `shunt release`.
 
-Las actualizaciones verifican las sumas de comprobación del release y la versión del binario antes de instalar. Un demonio remoto en ejecución mantiene su versión cargada hasta que lo vacíes y reinicies con `queue stop` / `queue start`; reemplazar su binario deja el trabajo actual corriendo. Las actualizaciones a releases precompilados apuntan actualmente a Linux x86_64.
+Las actualizaciones verifican las sumas de comprobación del release y la versión del binario antes de instalar. Un demonio vivo — de una cola local, de una box remota o del dashboard `serve` — se reinicia por handoff sobre el binario instalado: se re-ejecuta en el sitio, conserva el mismo pid y el trabajo en curso sigue corriendo; un demonio detenido simplemente se arranca. Cuando la imagen en ejecución es anterior al gestor de handoff, la actualización la nombra en lugar de señalizarla, y detener y arrancar ese demonio (`serve down` + `serve up` para el dashboard) lo pasa al nuevo binario. Un dispatcher no tiene pidfile, así que una actualización local solo nombra los pid de los dispatcher vivos — envía `SIGUSR2` a cada uno, o reinícialo. Las actualizaciones a releases precompilados apuntan actualmente a Linux x86_64.
 
 Usa `shunt <command> --help` para los flags y la [referencia del CLI](../../design.md#10-cli-surface) para la superficie completa. Los comandos de cola como `status` y `logs` también funcionan directamente en una máquina con `--root <qroot>`.
 

@@ -223,6 +223,8 @@ Jalankan perintah berikut di mesin dev. Contoh khusus client memakai client terd
 | Ubah ukuran pool worker                      | `shunt workers 4 -c lab`                              |
 | Pindahkan tugas pending ke antrean depan     | `shunt prio exp1 0 -c lab`                            |
 | Batalkan tugas pending                       | `shunt cancel exp1 -c lab`                            |
+| Parkir tugas pending sampai dirilis          | `shunt hold exp1 -c lab "waiting on lease"`           |
+| Rilis tugas pending yang diparkir            | `shunt release exp1 -c lab`                           |
 | Hentikan process group tugas yang berjalan   | `shunt kill exp1 -c lab`                              |
 | Drain dan hentikan satu daemon queue         | `shunt queue stop eval -c lab`                        |
 | Segarkan fakta mesin                         | `shunt client probe lab`                              |
@@ -237,9 +239,9 @@ Jalankan perintah berikut di mesin dev. Contoh khusus client memakai client terd
 | Upgrade biner lokal                          | `shunt upgrade`                                       |
 | Upgrade biner satu queue remote              | `shunt upgrade -c lab --queue eval`                   |
 
-Pola kontrol tugas seperti `exp1` harus mengidentifikasi satu tugas; gunakan nama entri tugas lengkap bila polanya ambigu. Ledger tugas memetakan ID pengiriman ke nama entri itu. `task show` meminta ke mesin secara lazy untuk menyelesaikan hasil; entri di luar jendela status terkini bisa tampil sebagai `unknown`.
+Pola kontrol tugas seperti `exp1` harus mengidentifikasi satu tugas; gunakan nama entri tugas lengkap bila polanya ambigu. Ledger tugas memetakan ID pengiriman ke nama entri itu. `task show` meminta ke mesin secara lazy untuk menyelesaikan hasil; entri di luar jendela status terkini bisa tampil sebagai `unknown`. Pekerjaan juga bisa diparkir sebelum bisa diklaim: `--hold` menahan pengiriman di spool sisi dev sampai `spool release`, dan `--hold-on-box` mengirimkannya tetapi membuat entri di sisi box tidak bisa diklaim sampai `shunt release`.
 
-Upgrade memverifikasi checksum rilis dan versi biner sebelum instalasi. Daemon remote yang sedang berjalan mempertahankan versi yang sudah dimuat sampai Anda drain dan restart dengan `queue stop` / `queue start`; mengganti binernya membiarkan pekerjaan berjalan tetap berjalan. Upgrade rilis prebuilt saat ini menargetkan Linux x86_64.
+Upgrade memverifikasi checksum rilis dan versi biner sebelum instalasi. Daemon yang hidup — milik queue lokal, box remote, atau dashboard `serve` — direstart lewat handoff ke biner yang baru dipasang: ia menjalankan re-exec di tempat, pid tetap sama, dan pekerjaan yang sedang berjalan terus berlanjut; daemon yang mati cukup dijalankan. Bila image yang berjalan lebih tua daripada handler handoff, upgrade hanya menyebutkannya tanpa mengirim sinyal, dan menghentikan lalu menjalankan daemon itu (`serve down` + `serve up` untuk dashboard) memindahkannya ke biner baru. Dispatcher tidak punya pidfile, jadi upgrade lokal hanya menyebut pid dispatcher yang hidup — kirim `SIGUSR2` ke masing-masing, atau restart. Upgrade rilis prebuilt saat ini menargetkan Linux x86_64.
 
 Gunakan `shunt <command> --help` untuk melihat flag, dan [referensi CLI](../../design.md#10-cli-surface) untuk permukaan lengkapnya. Perintah queue seperti `status` dan `logs` juga bisa langsung dijalankan di mesin dengan `--root <qroot>`.
 

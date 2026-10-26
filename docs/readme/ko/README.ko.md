@@ -223,6 +223,8 @@ Room은 한 개발 머신에 있으며 그곳에 등록된 client들에 걸칠 �
 | Worker 풀 크기 조정                   | `shunt workers 4 -c lab`                              |
 | Pending task를 맨 앞으로 이동         | `shunt prio exp1 0 -c lab`                            |
 | Pending task 취소                     | `shunt cancel exp1 -c lab`                            |
+| Pending task를 릴리스할 때까지 보류   | `shunt hold exp1 -c lab "waiting on lease"`           |
+| 보류된 pending task 릴리스            | `shunt release exp1 -c lab`                           |
 | 실행 중인 task의 프로세스 그룹 중지   | `shunt kill exp1 -c lab`                              |
 | 한 queue의 daemon 드레인 및 중지      | `shunt queue stop eval -c lab`                        |
 | 머신 정보 갱신                        | `shunt client probe lab`                              |
@@ -237,9 +239,9 @@ Room은 한 개발 머신에 있으며 그곳에 등록된 client들에 걸칠 �
 | 로컬 바이너리 업그레이드              | `shunt upgrade`                                       |
 | 원격 queue 하나의 바이너리 업그레이드 | `shunt upgrade -c lab --queue eval`                   |
 
-`exp1` 같은 task 제어 패턴은 하나의 task를 가리켜야 한다. 패턴이 모호하면 전체 task 항목 이름을 사용한다. Task ledger는 제출 ID를 그 항목 이름에 매핑한다. `task show`는 머신을 지연 조회해 결과를 확인하며, 최근 상태 창 밖의 항목은 `unknown`으로 표시될 수 있다.
+`exp1` 같은 task 제어 패턴은 하나의 task를 가리켜야 한다. 패턴이 모호하면 전체 task 항목 이름을 사용한다. Task ledger는 제출 ID를 그 항목 이름에 매핑한다. `task show`는 머신을 지연 조회해 결과를 확인하며, 최근 상태 창 밖의 항목은 `unknown`으로 표시될 수 있다. 작업은 클레임 가능해지기 전에 보류할 수도 있다. `--hold`는 `spool release`까지 dev 측 spool에 제출을 붙잡아 두고, `--hold-on-box`는 배달하되 box 측 항목을 `shunt release`까지 클레임 불가로 남긴다.
 
-업그레이드는 설치 전에 릴리스 체크섬과 바이너리 버전을 검증한다. 실행 중인 원격 daemon은 `queue stop` / `queue start`로 드레인하고 재시작할 때까지 로드된 버전을 유지하며, 바이너리를 교체해도 현재 작업은 계속 실행된다. 사전 빌드된 릴리스 업그레이드는 현재 Linux x86_64를 대상으로 한다.
+업그레이드는 설치 전에 릴리스 체크섬과 바이너리 버전을 검증한다. 살아 있는 daemon — 로컬 queue의 것, 원격 box의 것, `serve` 대시보드 — 은 handoff로 설치된 바이너리 위에서 재시작된다. 같은 pid를 유지한 채 그 자리에서 re-exec하고, 실행 중인 작업은 계속 실행된다. 멈춰 있는 daemon은 그냥 시작된다. 실행 중인 이미지가 handoff 핸들러보다 이전이면 업그레이드는 시그널을 보내지 않고 그 사실을 알린다. 그 daemon을 중지했다가 시작하면(대시보드는 `serve down` + `serve up`) 새 바이너리로 넘어간다. dispatcher는 pidfile이 없으므로 로컬 업그레이드는 살아 있는 dispatcher의 pid만 알려 준다 — 각 pid에 `SIGUSR2`를 보내거나 재시작한다. 사전 빌드된 릴리스 업그레이드는 현재 Linux x86_64를 대상으로 한다.
 
 플래그는 `shunt <command> --help`로, 전체 명령 표면은 [CLI 레퍼런스](../../design.md#10-cli-surface)에서 확인한다. `status`, `logs` 같은 queue 명령은 `--root <qroot>`를 붙여 머신에서 직접 실행할 수도 있다.
 

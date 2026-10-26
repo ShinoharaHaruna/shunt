@@ -225,6 +225,8 @@ Run these commands on the dev machine. Client-specific examples use the register
 | Resize the worker pool                 | `shunt workers 4 -c lab`                              |
 | Move a pending task to the front       | `shunt prio exp1 0 -c lab`                            |
 | Cancel a pending task                  | `shunt cancel exp1 -c lab`                            |
+| Park a pending task until released     | `shunt hold exp1 -c lab "waiting on lease"`           |
+| Release a parked pending task          | `shunt release exp1 -c lab`                           |
 | Stop a running task's process group    | `shunt kill exp1 -c lab`                              |
 | Drain and stop one queue daemon        | `shunt queue stop eval -c lab`                        |
 | Refresh machine facts                  | `shunt client probe lab`                              |
@@ -239,9 +241,9 @@ Run these commands on the dev machine. Client-specific examples use the register
 | Upgrade the local binary               | `shunt upgrade`                                       |
 | Upgrade one remote queue's binary      | `shunt upgrade -c lab --queue eval`                   |
 
-Task-control patterns such as `exp1` must identify one task; use the full task entry name when a pattern is ambiguous. The task ledger maps a submission ID to that entry name. `task show` queries the machine lazily to resolve an outcome; an entry outside the recent-status window can appear as `unknown`.
+Task-control patterns such as `exp1` must identify one task; use the full task entry name when a pattern is ambiguous. The task ledger maps a submission ID to that entry name. `task show` queries the machine lazily to resolve an outcome; an entry outside the recent-status window can appear as `unknown`. Work can also be parked before it is claimable: `--hold` keeps a submission in the dev-side spool until `spool release`, and `--hold-on-box` delivers it while leaving the box-side entry unclaimable until `shunt release`.
 
-Upgrades verify release checksums and binary version before installation. A running remote daemon keeps its loaded version until you drain and restart it with `queue stop` / `queue start`; replacing its binary leaves current work running. Prebuilt release upgrades currently target Linux x86_64.
+Upgrades verify release checksums and binary version before installation. A live daemon — a local queue's, a remote box's, or the `serve` dashboard — is handoff-restarted onto the installed binary: it re-execs in place, keeps the same pid, and in-flight work keeps running; a stopped daemon is simply started. When an image predates the handoff handler, the upgrade names it instead of signalling it, and stopping then starting that daemon (`serve down` + `serve up` for the dashboard) moves it onto the new binary. A dispatcher carries no pidfile, so a local upgrade only names live dispatcher pids — send each one `SIGUSR2`, or restart it. Prebuilt release upgrades currently target Linux x86_64.
 
 Use `shunt <command> --help` for flags and the [CLI reference](docs/design.md#10-cli-surface) for the full surface. Queue commands such as `status` and `logs` also work directly on a machine with `--root <qroot>`.
 

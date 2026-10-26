@@ -223,6 +223,8 @@ shunt status --all --json --as experiments
 | ワーカープールをリサイズする                    | `shunt workers 4 -c lab`                              |
 | pending タスクを先頭に移す                      | `shunt prio exp1 0 -c lab`                            |
 | pending タスクをキャンセルする                  | `shunt cancel exp1 -c lab`                            |
+| pending タスクをリリースまで保留する            | `shunt hold exp1 -c lab "waiting on lease"`           |
+| 保留中の pending タスクをリリースする           | `shunt release exp1 -c lab`                           |
 | 実行中タスクのプロセスグループを停止する        | `shunt kill exp1 -c lab`                              |
 | 1つのキューデーモンをドレインして停止する       | `shunt queue stop eval -c lab`                        |
 | マシン情報を更新する                            | `shunt client probe lab`                              |
@@ -237,9 +239,9 @@ shunt status --all --json --as experiments
 | ローカルバイナリをアップグレードする            | `shunt upgrade`                                       |
 | リモートキュー1つのバイナリをアップグレードする | `shunt upgrade -c lab --queue eval`                   |
 
-`exp1` のようなタスク制御パターンは1つのタスクを特定しなければならない。パターンが曖昧なら完全なタスクエントリ名を使う。タスク台帳は投入 ID をそのエントリ名にマップする。`task show` は結果を解決するためマシンに遅延問い合わせをする。最近のステータス窓の外にあるエントリは `unknown` と表示されうる。
+`exp1` のようなタスク制御パターンは1つのタスクを特定しなければならない。パターンが曖昧なら完全なタスクエントリ名を使う。タスク台帳は投入 ID をそのエントリ名にマップする。`task show` は結果を解決するためマシンに遅延問い合わせをする。最近のステータス窓の外にあるエントリは `unknown` と表示されうる。作業はクレーム可能になる前にも保留できる。`--hold` は `spool release` まで dev 側スプールに投入を留め、`--hold-on-box` は配送したうえで box 側のエントリを `shunt release` までクレーム不可にする。
 
-アップグレードはインストール前にリリースチェックサムとバイナリバージョンを検証する。実行中のリモートデーモンは、`queue stop` / `queue start` でドレインして再起動するまで読み込み済みのバージョンを使い続ける。バイナリを置き換えても現在の仕事は走り続ける。プレビルドリリースのアップグレードは現在 Linux x86_64 が対象。
+アップグレードはインストール前にリリースチェックサムとバイナリバージョンを検証する。稼働中のデーモン — ローカルキューのもの、リモート box のもの、`serve` ダッシュボード — は handoff でインストール済みバイナリに再起動される。同じ pid のままその場で再 exec し、実行中の仕事は走り続ける。停止中のデーモンは単に起動される。稼働中のイメージが handoff ハンドラより前のものなら、アップグレードはシグナルを送らずにその旨を報告する。そのデーモンを停止して起動し直せば（ダッシュボードは `serve down` + `serve up`）新しいバイナリに切り替わる。dispatcher は pidfile を持たないため、ローカルのアップグレードは稼働中の dispatcher の pid を報告するだけだ — 各 pid に `SIGUSR2` を送るか、再起動する。プレビルドリリースのアップグレードは現在 Linux x86_64 が対象。
 
 フラグは `shunt <command> --help` を、コマンド体系全体は [CLI リファレンス](../../design.md#10-cli-surface) を参照。`status` や `logs` のようなキューコマンドは、`--root <qroot>` でマシン上で直接も動く。
 

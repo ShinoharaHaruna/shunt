@@ -223,6 +223,8 @@ shunt status --all --json --as experiments
 | 调整 worker 池大小           | `shunt workers 4 -c lab`                              |
 | 将 pending 任务移到队首      | `shunt prio exp1 0 -c lab`                            |
 | 取消 pending 任务            | `shunt cancel exp1 -c lab`                            |
+| 暂停 pending 任务直到放行    | `shunt hold exp1 -c lab "waiting on lease"`           |
+| 放行已暂停的 pending 任务    | `shunt release exp1 -c lab`                           |
 | 停止运行中任务的进程组       | `shunt kill exp1 -c lab`                              |
 | 排空并停止一条队列的守护进程 | `shunt queue stop eval -c lab`                        |
 | 刷新机器信息                 | `shunt client probe lab`                              |
@@ -237,9 +239,9 @@ shunt status --all --json --as experiments
 | 升级本地二进制               | `shunt upgrade`                                       |
 | 升级一条远程队列的二进制     | `shunt upgrade -c lab --queue eval`                   |
 
-像 `exp1` 这样的任务控制 pattern 必须能唯一匹配一个任务；存在歧义时，使用完整的任务条目名。任务台账将提交 ID 映射到该条目名。`task show` 按需查询机器以确定结果；超出近期状态窗口的条目可能显示为 `unknown`。
+像 `exp1` 这样的任务控制 pattern 必须能唯一匹配一个任务；存在歧义时，使用完整的任务条目名。任务台账将提交 ID 映射到该条目名。`task show` 按需查询机器以确定结果；超出近期状态窗口的条目可能显示为 `unknown`。任务也可以在可领取之前先挂起：`--hold` 把提交留在 dev 侧 spool，直到 `spool release`；`--hold-on-box` 照常投递，但让 box 侧的条目在 `shunt release` 之前不可领取。
 
-升级会在安装前校验 release 校验和与二进制版本。运行中的远程守护进程会继续使用已加载的版本，直到通过 `queue stop` / `queue start` 排空并重启；替换二进制不会中断当前工作。预构建 release 升级目前面向 Linux x86_64。
+升级会在安装前校验 release 校验和与二进制版本。运行中的守护进程——本地队列的、远程 box 的，或 `serve` dashboard——会被 handoff 重启到新安装的二进制上：原进程原地 re-exec，pid 不变，正在运行的任务继续执行；已停止的守护进程则直接启动。如果运行中的镜像早于 handoff 处理器，升级只会指出这一点而不发送信号；把该守护进程停止后再启动（dashboard 用 `serve down` + `serve up`）即可切换到新二进制。dispatcher 没有 pidfile，因此本地升级只会列出正在运行的 dispatcher pid——向每个 pid 发送 `SIGUSR2`，或重启它。预构建 release 升级目前面向 Linux x86_64。
 
 用 `shunt <command> --help` 查看参数，完整命令见 [CLI 参考](../../design.md#10-cli-surface)。`status`、`logs` 等队列命令也可以加上 `--root <qroot>`，直接在机器上运行。
 

@@ -223,6 +223,8 @@ Execute estes comandos na máquina dev. Exemplos específicos de client usam o c
 | Redimensionar o pool de workers                      | `shunt workers 4 -c lab`                              |
 | Mover uma tarefa pending para o início               | `shunt prio exp1 0 -c lab`                            |
 | Cancelar uma tarefa pending                          | `shunt cancel exp1 -c lab`                            |
+| Estacionar uma tarefa pending até liberá-la          | `shunt hold exp1 -c lab "waiting on lease"`           |
+| Liberar uma tarefa pending estacionada               | `shunt release exp1 -c lab`                           |
 | Parar o grupo de processos de uma tarefa em execução | `shunt kill exp1 -c lab`                              |
 | Drenar e parar o daemon de uma queue                 | `shunt queue stop eval -c lab`                        |
 | Atualizar os fatos da máquina                        | `shunt client probe lab`                              |
@@ -237,9 +239,9 @@ Execute estes comandos na máquina dev. Exemplos específicos de client usam o c
 | Atualizar o binário local                            | `shunt upgrade`                                       |
 | Atualizar o binário de uma queue remota              | `shunt upgrade -c lab --queue eval`                   |
 
-Patterns de controle de tarefa como `exp1` devem identificar uma única tarefa; use o nome completo da entrada de tarefa quando um pattern for ambíguo. O ledger de tarefas mapeia um ID de submissão para esse nome de entrada. `task show` consulta a máquina sob demanda para resolver um resultado; uma entrada fora da janela de status recente pode aparecer como `unknown`.
+Patterns de controle de tarefa como `exp1` devem identificar uma única tarefa; use o nome completo da entrada de tarefa quando um pattern for ambíguo. O ledger de tarefas mapeia um ID de submissão para esse nome de entrada. `task show` consulta a máquina sob demanda para resolver um resultado; uma entrada fora da janela de status recente pode aparecer como `unknown`. O trabalho também pode ser estacionado antes de poder ser reivindicado: `--hold` retém uma submissão no spool do lado dev até `spool release`, e `--hold-on-box` a entrega deixando a entrada do lado da box sem poder ser reivindicada até `shunt release`.
 
-Upgrades verificam checksums de release e a versão do binário antes da instalação. Um daemon remoto em execução mantém sua versão carregada até você drenar e reiniciá-lo com `queue stop` / `queue start`; substituir o binário deixa o trabalho atual rodando. Upgrades de releases pré-compilados atualmente visam Linux x86_64.
+Upgrades verificam checksums de release e a versão do binário antes da instalação. Um daemon vivo — de uma queue local, de uma box remota ou do dashboard `serve` — é reiniciado por handoff sobre o binário instalado: ele faz re-exec no lugar, mantém o mesmo pid e o trabalho em andamento continua rodando; um daemon parado é simplesmente iniciado. Quando a imagem em execução é anterior ao handler de handoff, o upgrade apenas a nomeia em vez de sinalizá-la, e parar e iniciar esse daemon (`serve down` + `serve up` para o dashboard) o move para o novo binário. Um dispatcher não tem pidfile, então um upgrade local apenas nomeia os pid dos dispatchers vivos — envie `SIGUSR2` a cada um, ou reinicie-o. Upgrades de releases pré-compilados atualmente visam Linux x86_64.
 
 Use `shunt <command> --help` para as flags e a [referência da CLI](../../design.md#10-cli-surface) para a superfície completa. Comandos de queue como `status` e `logs` também funcionam diretamente numa máquina com `--root <qroot>`.
 

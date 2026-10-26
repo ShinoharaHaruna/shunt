@@ -223,6 +223,8 @@ shunt status --all --json --as experiments
 | 調整 worker 池大小           | `shunt workers 4 -c lab`                              |
 | 將 pending 任務移到佇列前端  | `shunt prio exp1 0 -c lab`                            |
 | 取消 pending 任務            | `shunt cancel exp1 -c lab`                            |
+| 暫停 pending 任務直到放行    | `shunt hold exp1 -c lab "waiting on lease"`           |
+| 放行已暫停的 pending 任務    | `shunt release exp1 -c lab`                           |
 | 停止執行中任務的程序群組     | `shunt kill exp1 -c lab`                              |
 | 排空並停止一條佇列的守護程式 | `shunt queue stop eval -c lab`                        |
 | 更新機器資訊                 | `shunt client probe lab`                              |
@@ -237,9 +239,9 @@ shunt status --all --json --as experiments
 | 升級本機執行檔               | `shunt upgrade`                                       |
 | 升級一條遠端佇列的執行檔     | `shunt upgrade -c lab --queue eval`                   |
 
-像 `exp1` 這樣的任務控制 pattern 必須能唯一對應一個任務；存在歧義時，使用完整的任務條目名。任務台帳將提交 ID 對應到該條目名。`task show` 按需查詢機器以確定結果；超出近期狀態窗口的條目可能顯示為 `unknown`。
+像 `exp1` 這樣的任務控制 pattern 必須能唯一對應一個任務；存在歧義時，使用完整的任務條目名。任務台帳將提交 ID 對應到該條目名。`task show` 按需查詢機器以確定結果；超出近期狀態窗口的條目可能顯示為 `unknown`。任務也可以在可領取之前先掛起：`--hold` 把提交留在 dev 側 spool，直到 `spool release`；`--hold-on-box` 照常投遞，但讓 box 側的條目在 `shunt release` 之前不可領取。
 
-升級會在安裝前校驗 release 校驗碼與執行檔版本。執行中的遠端守護程式會繼續使用已載入的版本，直到透過 `queue stop` / `queue start` 排空並重新啟動；替換執行檔不會中斷目前工作。預建 release 升級目前面向 Linux x86_64。
+升級會在安裝前校驗 release 校驗碼與執行檔版本。執行中的守護程式——本機佇列的、遠端 box 的，或 `serve` 儀表板——會被 handoff 重新啟動到新安裝的執行檔上：原程序原地 re-exec，pid 不變，正在執行的任務繼續執行；已停止的守護程式則直接啟動。如果執行中的映像早於 handoff 處理器，升級只會指出這一點而不送出訊號；把該守護程式停止後再啟動（儀表板用 `serve down` + `serve up`）即可切換到新執行檔。dispatcher 沒有 pidfile，因此本機升級只會列出正在執行的 dispatcher pid——向每個 pid 送出 `SIGUSR2`，或重新啟動它。預建 release 升級目前面向 Linux x86_64。
 
 用 `shunt <command> --help` 檢視參數，完整指令見 [CLI 參考](../../design.md#10-cli-surface)。`status`、`logs` 等佇列指令也可以加上 `--root <qroot>`，直接在機器上執行。
 
