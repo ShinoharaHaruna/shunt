@@ -11,6 +11,8 @@ export const id: Dict = {
   'conn.connecting': 'menyambung',
   'conn.live': 'terhubung',
   'conn.reconnecting': 'menyambung ulang',
+  'conn.down': 'terputus',
+  'conn.retry': 'coba lagi',
 
   'theme.system': 'otomatis',
   'theme.light': 'terang',
@@ -25,6 +27,9 @@ export const id: Dict = {
   'state.scriptEmpty': 'skrip kosong',
   'state.unreachable': 'tak terjangkau',
   'state.expired': 'KEDALUWARSA',
+  'skip.expired': 'kedaluwarsa — tanpa pemeriksaan otomatis',
+  'skip.gaveUp': 'dijeda setelah {n} percobaan gagal',
+  'skip.backoff': 'pemeriksaan otomatis berikutnya dalam {t}',
 
   'machines.noClients': 'belum ada client terdaftar',
   'machines.up': 'online',
@@ -83,6 +88,8 @@ export const id: Dict = {
   'probe.label': 'probe · {client}',
   'probe.help': 'probe sistem tetap hanya-baca',
   'probe.run': 'jalankan',
+  'probe.recheck': 'periksa sekarang',
+  'probe.ok': 'terjangkau',
   'probe.unknownError': 'error tidak dikenal',
 
   'tasks.ledger': 'Ledger tugas',

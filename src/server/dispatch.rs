@@ -169,8 +169,20 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
             continue;
         }
 
-        if checked.insert(name.clone()) && registry::conn_fail_read(&name) >= registry::CONN_FAIL_ESCALATE && !idx.is_multiple_of(PROBE_BACKOFF_EVERY) {
-            down.insert(name.clone());
+        // Once per client per sweep: two reasons to leave it alone. An
+        // expired subscription is never retried (design.md §9) — the
+        // vendor has reclaimed the box, so every touch spends a full ssh
+        // timeout to learn nothing; the spool entry stays staged and
+        // resumes the moment the row's `expire` moves ahead of now (a
+        // renewal edit). A streak at `CONN_FAIL_ESCALATE` backs off to
+        // every Nth sweep (head-of-line blocking, §4.4).
+        if checked.insert(name.clone()) {
+            if crate::server::status::is_expired(client) {
+                eprintln!("dispatch: {name} expired ({}) — not delivering; renew the row's `expire` to resume", client.expire);
+                down.insert(name.clone());
+            } else if registry::conn_fail_read(&name) >= registry::CONN_FAIL_ESCALATE && !idx.is_multiple_of(PROBE_BACKOFF_EVERY) {
+                down.insert(name.clone());
+            }
         }
         if down.contains(&name) {
             continue;

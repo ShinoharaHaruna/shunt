@@ -11,6 +11,8 @@ export const en = {
   'conn.connecting': 'connecting',
   'conn.live': 'live',
   'conn.reconnecting': 'reconnecting',
+  'conn.down': 'disconnected',
+  'conn.retry': 'retry',
 
   'theme.system': 'auto',
   'theme.light': 'light',
@@ -25,6 +27,9 @@ export const en = {
   'state.scriptEmpty': 'script empty',
   'state.unreachable': 'unreachable',
   'state.expired': 'EXPIRED',
+  'skip.expired': 'expired — no automatic probing',
+  'skip.gaveUp': 'paused after {n} failed probes',
+  'skip.backoff': 'next automatic probe in {t}',
 
   'machines.noClients': 'no clients registered',
   'machines.up': 'up',
@@ -83,6 +88,8 @@ export const en = {
   'probe.label': 'probe · {client}',
   'probe.help': 'fixed read-only system probes',
   'probe.run': 'run',
+  'probe.recheck': 'probe now',
+  'probe.ok': 'reachable',
   'probe.unknownError': 'unknown error',
 
   'tasks.ledger': 'Task ledger',

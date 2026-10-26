@@ -11,6 +11,8 @@ export const ru: Dict = {
   'conn.connecting': 'подключение',
   'conn.live': 'подключено',
   'conn.reconnecting': 'переподключение',
+  'conn.down': 'отключено',
+  'conn.retry': 'повторить',
 
   'theme.system': 'авто',
   'theme.light': 'светлая',
@@ -25,6 +27,9 @@ export const ru: Dict = {
   'state.scriptEmpty': 'скрипт пуст',
   'state.unreachable': 'недоступна',
   'state.expired': 'ПРОСРОЧЕН',
+  'skip.expired': 'срок истёк — автоматические опросы остановлены',
+  'skip.gaveUp': 'приостановлено после {n} неудач',
+  'skip.backoff': 'следующий опрос через {t}',
 
   'machines.noClients': 'нет зарегистрированных клиентов',
   'machines.up': 'онлайн',
@@ -83,6 +88,8 @@ export const ru: Dict = {
   'probe.label': 'exec · {client}',
   'probe.help': 'фиксированные системные проверки только для чтения',
   'probe.run': 'выполнить',
+  'probe.recheck': 'опросить',
+  'probe.ok': 'доступен',
   'probe.unknownError': 'неизвестная ошибка',
 
   'tasks.ledger': 'Журнал задач',

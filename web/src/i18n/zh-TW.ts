@@ -11,6 +11,8 @@ export const zhTW: Dict = {
   'conn.connecting': '連線中',
   'conn.live': '已連線',
   'conn.reconnecting': '重新連線中',
+  'conn.down': '已斷開',
+  'conn.retry': '重試',
 
   'theme.system': '自動',
   'theme.light': '淺色',
@@ -25,6 +27,9 @@ export const zhTW: Dict = {
   'state.scriptEmpty': '腳本為空',
   'state.unreachable': '無法連線',
   'state.expired': '已過期',
+  'skip.expired': '已過期 — 不再自動探測',
+  'skip.gaveUp': '連續 {n} 次失敗，已暫停',
+  'skip.backoff': '下次自動探測還有 {t}',
 
   'machines.noClients': '尚無註冊的 client',
   'machines.up': '線上',
@@ -82,6 +87,8 @@ export const zhTW: Dict = {
   'probe.label': '探測 · {client}',
   'probe.help': '固定唯讀系統探測',
   'probe.run': '執行',
+  'probe.recheck': '立即探測',
+  'probe.ok': '可達',
   'probe.unknownError': '未知錯誤',
 
   'tasks.ledger': '任務台帳',

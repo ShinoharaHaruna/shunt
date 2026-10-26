@@ -11,6 +11,8 @@ export const it: Dict = {
   'conn.connecting': 'connessione',
   'conn.live': 'live',
   'conn.reconnecting': 'riconnessione',
+  'conn.down': 'disconnesso',
+  'conn.retry': 'riprova',
 
   'theme.system': 'auto',
   'theme.light': 'chiaro',
@@ -25,6 +27,9 @@ export const it: Dict = {
   'state.scriptEmpty': 'script vuoto',
   'state.unreachable': 'irraggiungibile',
   'state.expired': 'SCADUTO',
+  'skip.expired': 'scaduto — nessuna verifica automatica',
+  'skip.gaveUp': 'in pausa dopo {n} tentativi falliti',
+  'skip.backoff': 'prossima verifica tra {t}',
 
   'machines.noClients': 'nessun client registrato',
   'machines.up': 'online',
@@ -83,6 +88,8 @@ export const it: Dict = {
   'probe.label': 'probe · {client}',
   'probe.help': 'probe di sistema predefinite in sola lettura',
   'probe.run': 'esegui',
+  'probe.recheck': 'verifica ora',
+  'probe.ok': 'raggiungibile',
   'probe.unknownError': 'errore sconosciuto',
 
   'tasks.ledger': 'Registro dei task',

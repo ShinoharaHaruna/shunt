@@ -9,8 +9,11 @@ use serde_json::{json, Value};
 /// Slow section: parallel wire probes, one thread per registry
 /// client — identical data to `status --all`'s clients object,
 /// including per-queue `resources` (GPU util/VRAM, RAM, load1).
+/// Background mode: the sweep honours the §4.1 probe penalty and the
+/// §9 expiry gate, so a dead or expired box is reported from its row
+/// instead of burning an ssh timeout every tick.
 pub fn clients_section() -> Value {
-    match crate::server::status::probe_all() {
+    match crate::server::status::probe_all(false) {
         Ok(probed) => {
             let mut m = serde_json::Map::new();
             for p in probed {
@@ -106,6 +109,16 @@ pub fn probe(client: &str, probe: &str) -> anyhow::Result<String> {
     let (c, t) = transport::client_transport(client)?;
     let argv: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
     t.exec(&c, &argv, None)
+}
+
+/// Force one status query for a client (`POST /api/reprobe`): exactly
+/// what `status -c` runs, bypassing the §4.1 penalty and the §9 expiry
+/// gate — an explicit click is the decision to spend the ssh, and a
+/// successful answer clears the failure streak on the way through.
+pub fn reprobe(client: &str) -> anyhow::Result<crate::server::status::ClientStatus> {
+    use crate::server::transport;
+    let (c, t) = transport::client_transport(client)?;
+    Ok(crate::server::status::query(t.as_ref(), &c))
 }
 
 #[cfg(test)]

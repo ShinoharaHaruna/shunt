@@ -11,6 +11,8 @@ export const ko: Dict = {
   'conn.connecting': '연결 중',
   'conn.live': 'live',
   'conn.reconnecting': '재연결 중',
+  'conn.down': '연결 끊김',
+  'conn.retry': '재시도',
 
   'theme.system': '자동',
   'theme.light': '라이트',
@@ -25,6 +27,9 @@ export const ko: Dict = {
   'state.scriptEmpty': '스크립트 비어 있음',
   'state.unreachable': '연결 불가',
   'state.expired': '만료됨',
+  'skip.expired': '만료 — 자동 조회 중지',
+  'skip.gaveUp': '{n}회 실패 후 일시 중지',
+  'skip.backoff': '다음 자동 조회까지 {t}',
 
   'machines.noClients': '등록된 client 없음',
   'machines.up': '온라인',
@@ -83,6 +88,8 @@ export const ko: Dict = {
   'probe.label': 'probe · {client}',
   'probe.help': '고정 읽기 전용 시스템 프로브',
   'probe.run': '실행',
+  'probe.recheck': '지금 조회',
+  'probe.ok': '도달 가능',
   'probe.unknownError': '알 수 없는 오류',
 
   'tasks.ledger': 'Task ledger',

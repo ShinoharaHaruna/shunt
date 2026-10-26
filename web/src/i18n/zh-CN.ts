@@ -11,6 +11,8 @@ export const zhCN: Dict = {
   'conn.connecting': '连接中',
   'conn.live': '已连接',
   'conn.reconnecting': '重连中',
+  'conn.down': '已断开',
+  'conn.retry': '重试',
 
   'theme.system': '自动',
   'theme.light': '浅色',
@@ -25,6 +27,9 @@ export const zhCN: Dict = {
   'state.scriptEmpty': '脚本为空',
   'state.unreachable': '不可达',
   'state.expired': '已过期',
+  'skip.expired': '已过期 — 不再自动探测',
+  'skip.gaveUp': '连续 {n} 次失败，已暂停',
+  'skip.backoff': '下次自动探测还有 {t}',
 
   'machines.noClients': '尚无注册的 client',
   'machines.up': '在线',
@@ -82,6 +87,8 @@ export const zhCN: Dict = {
   'probe.label': '探测 · {client}',
   'probe.help': '固定的只读系统探测',
   'probe.run': '运行',
+  'probe.recheck': '立即探测',
+  'probe.ok': '可达',
   'probe.unknownError': '未知错误',
 
   'tasks.ledger': '任务台账',

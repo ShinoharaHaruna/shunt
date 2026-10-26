@@ -13,14 +13,21 @@ import { RoomsPanel } from './components/RoomsPanel'
 import { LANGS, useI18n } from './i18n'
 import type { Lang } from './i18n'
 
-type Conn = 'connecting' | 'open' | 'reconnecting'
+type Conn = 'connecting' | 'open' | 'reconnecting' | 'down'
 type Theme = 'system' | 'light' | 'dark'
 
 const connTone: Record<Conn, 'signal' | 'amber' | 'rose'> = {
   connecting: 'amber',
   open: 'signal',
   reconnecting: 'amber',
+  down: 'rose',
 }
+
+/** Automatic reconnect budget. `serve` writes a new listener within a
+ *  second of USR2 (or a couple on a restart), so five attempts cover
+ *  every recoverable case; past that the port is not coming back on
+ *  its own and the page says so instead of hammering forever. */
+const MAX_RECONNECT_ATTEMPTS = 5
 
 const THEME_KEY = 'shunt-theme'
 
@@ -144,10 +151,13 @@ function LangMenu({ dir }: { dir: 'up' | 'down' }) {
   )
 }
 
-function useSnapshot(): { snap: Snapshot | null; snapAt: number; conn: Conn } {
+function useSnapshot(): { snap: Snapshot | null; snapAt: number; conn: Conn; retry: () => void } {
   const [snap, setSnap] = useState<Snapshot | null>(null)
   const [snapAt, setSnapAt] = useState(0)
   const [conn, setConn] = useState<Conn>('connecting')
+  // A manual retry re-runs the effect, which is where the attempt
+  // budget lives — clicking resets it rather than resuming a spent one.
+  const [nonce, setNonce] = useState(0)
 
   useEffect(() => {
     let ws: WebSocket | null = null
@@ -155,20 +165,15 @@ function useSnapshot(): { snap: Snapshot | null; snapAt: number; conn: Conn } {
     let attempts = 0
     let dead = false
 
-    const schedule = () => {
-      const delay = Math.min(1000 * 2 ** attempts, 10_000)
-
-      attempts += 1
-      timer = window.setTimeout(connect, delay)
-    }
-
     const connect = () => {
       if (dead) return
       setConn(attempts === 0 ? 'connecting' : 'reconnecting')
       try {
         ws = new WebSocket(wsUrl())
       } catch {
-        schedule()
+        attempts += 1
+        if (attempts >= MAX_RECONNECT_ATTEMPTS) setConn('down')
+        else timer = window.setTimeout(connect, 1000 * 2 ** (attempts - 1))
         return
       }
       ws.onopen = () => {
@@ -188,10 +193,17 @@ function useSnapshot(): { snap: Snapshot | null; snapAt: number; conn: Conn } {
       }
       ws.onerror = () => ws?.close()
       ws.onclose = () => {
-        if (!dead) {
-          setConn('reconnecting')
-          schedule()
+        if (dead) return
+        // Each failure doubles the wait (1, 2, 4, 8 s) and the fifth
+        // stops the loop: a stale tab must not poll a dead endpoint
+        // forever — the last snapshot stays on screen, marked offline.
+        attempts += 1
+        if (attempts >= MAX_RECONNECT_ATTEMPTS) {
+          setConn('down')
+          return
         }
+        setConn('reconnecting')
+        timer = window.setTimeout(connect, 1000 * 2 ** (attempts - 1))
       }
     }
 
@@ -201,9 +213,9 @@ function useSnapshot(): { snap: Snapshot | null; snapAt: number; conn: Conn } {
       if (timer !== undefined) window.clearTimeout(timer)
       ws?.close()
     }
-  }, [])
+  }, [nonce])
 
-  return { snap, snapAt, conn }
+  return { snap, snapAt, conn, retry: () => setNonce((n) => n + 1) }
 }
 
 function useHashRoute(): Route {
@@ -214,6 +226,32 @@ function useHashRoute(): Route {
     return () => window.removeEventListener('hashchange', on)
   }, [])
   return route
+}
+
+/** Connection state, and the escape hatch: once the reconnect budget
+ *  is spent the state names itself and offers a fresh attempt — a
+ *  `serve` that is gone stays gone until something changes. */
+function ConnBadge({ conn, retry, ts }: { conn: Conn; retry: () => void; ts?: string | null }) {
+  const { t } = useI18n()
+  return (
+    <span className="flex items-center gap-1.5 text-[11px] text-ink-3">
+      <Dot tone={connTone[conn]} pulse={conn === 'open'} />
+      {conn === 'down' ? (
+        <>
+          <span className="text-ink-4">{t('conn.down')}</span>
+          <button
+            onClick={retry}
+            className="rounded-full border border-edge px-1.5 py-0.5 font-medium text-ink-2 transition-colors hover:bg-hover-2 hover:text-ink-1"
+          >
+            {t('conn.retry')}
+          </button>
+        </>
+      ) : (
+        t(conn === 'open' ? 'conn.live' : `conn.${conn}`)
+      )}
+      {ts && <span className="font-num ml-auto text-ink-4">{hhmm(ts)}</span>}
+    </span>
+  )
 }
 
 function NavItem({
@@ -355,11 +393,9 @@ function WaitCard() {
 
 export default function App() {
   const { t } = useI18n()
-  const { snap, snapAt, conn } = useSnapshot()
+  const { snap, snapAt, conn, retry } = useSnapshot()
   const [theme, setTheme] = useTheme()
   const route = useHashRoute()
-  const tone = connTone[conn]
-  const connLabel = t(conn === 'open' ? 'conn.live' : `conn.${conn}`)
   const local = snap?.local ?? null
 
   const rooms = local && !('error' in local.rooms) ? local.rooms : null
@@ -448,11 +484,7 @@ export default function App() {
           />
         </nav>
         <div className="mt-auto space-y-2 px-3">
-          <div className="flex items-center gap-1.5 text-[11px] text-ink-3">
-            <Dot tone={tone} pulse={conn === 'open'} />
-            {connLabel}
-            {snap?.ts && <span className="font-num ml-auto text-ink-4">{hhmm(snap.ts)}</span>}
-          </div>
+          <ConnBadge conn={conn} retry={retry} ts={snap?.ts} />
           <div className="flex items-center gap-2">
             <ThemeSwitch theme={theme} setTheme={setTheme} />
             <LangMenu dir="up" />
@@ -471,10 +503,7 @@ export default function App() {
               shunt<span className="text-signal-fg">.</span>
             </span>
             <span className="flex-1" />
-            <span className="flex items-center gap-1.5 text-[11px] text-ink-3">
-              <Dot tone={tone} pulse={conn === 'open'} />
-              {connLabel}
-            </span>
+            <ConnBadge conn={conn} retry={retry} />
             <LangMenu dir="down" />
             <ThemeSwitch theme={theme} setTheme={setTheme} />
           </div>

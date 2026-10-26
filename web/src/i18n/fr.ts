@@ -11,6 +11,8 @@ export const fr: Dict = {
   'conn.connecting': 'connexion…',
   'conn.live': 'en direct',
   'conn.reconnecting': 'reconnexion…',
+  'conn.down': 'hors ligne',
+  'conn.retry': 'réessayer',
 
   'theme.system': 'auto',
   'theme.light': 'clair',
@@ -25,6 +27,9 @@ export const fr: Dict = {
   'state.scriptEmpty': 'script vide',
   'state.unreachable': 'injoignable',
   'state.expired': 'EXPIRÉ',
+  'skip.expired': 'expiré — aucune interrogation automatique',
+  'skip.gaveUp': 'en pause après {n} échecs',
+  'skip.backoff': 'prochaine interrogation dans {t}',
 
   'machines.noClients': 'aucun client enregistré',
   'machines.up': 'en ligne',
@@ -83,6 +88,8 @@ export const fr: Dict = {
   'probe.label': 'sonde · {client}',
   'probe.help': 'sondes système fixes en lecture seule',
   'probe.run': 'exécuter',
+  'probe.recheck': 'interroger',
+  'probe.ok': 'accessible',
   'probe.unknownError': 'erreur inconnue',
 
   'tasks.ledger': 'Ledger des tâches',

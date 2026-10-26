@@ -33,9 +33,31 @@ fn conn_fail_lock(name: &str) -> Option<fs::File> {
     Some(f)
 }
 
+/// The sidecar is `<count>\n<epoch-since-last-failure>\n`. The first
+/// line stays the plain count so a file this build did not write
+/// (the pre-timestamp single-line format) still reads as a streak —
+/// the missing epoch only means "no penalty clock", never a lost
+/// count.
+fn read_fail_file(name: &str) -> (u32, Option<i64>) {
+    let Some(raw) = conn_fail_path(name).ok().and_then(|p| fs::read_to_string(p).ok()) else {
+        return (0, None);
+    };
+    let mut lines = raw.lines();
+    let count = lines.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    let at = lines.next().and_then(|s| s.trim().parse().ok());
+    (count, at)
+}
+
 /// Consecutive ssh connect failures recorded for a client.
 pub fn conn_fail_read(name: &str) -> u32 {
-    conn_fail_path(name).ok().and_then(|p| fs::read_to_string(p).ok()).and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+    read_fail_file(name).0
+}
+
+/// Wall-clock (epoch seconds) of the newest recorded connect failure.
+/// `None` for a clean client or a streak file without the timestamp —
+/// the probe scheduler then treats the next attempt as due.
+pub fn conn_fail_at(name: &str) -> Option<i64> {
+    read_fail_file(name).1
 }
 
 /// ssh-level failure (exit 255): bump the streak, return the count.
@@ -48,7 +70,7 @@ pub fn conn_fail_bump(name: &str) -> u32 {
         if let Some(d) = p.parent() {
             let _ = private_dir(d);
         }
-        let _ = write_private(&p, format!("{n}\n"));
+        let _ = write_private(&p, format!("{n}\n{}\n", crate::proto::time::unix_now()));
     }
     n
 }

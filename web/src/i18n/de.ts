@@ -11,6 +11,8 @@ export const de: Dict = {
   'conn.connecting': 'verbinde',
   'conn.live': 'live',
   'conn.reconnecting': 'verbinde neu',
+  'conn.down': 'getrennt',
+  'conn.retry': 'erneut versuchen',
 
   'theme.system': 'auto',
   'theme.light': 'hell',
@@ -25,6 +27,9 @@ export const de: Dict = {
   'state.scriptEmpty': 'Skript leer',
   'state.unreachable': 'unerreichbar',
   'state.expired': 'ABGELAUFEN',
+  'skip.expired': 'abgelaufen — keine automatische Abfrage',
+  'skip.gaveUp': 'pausiert nach {n} Fehlversuchen',
+  'skip.backoff': 'nächste Abfrage in {t}',
 
   'machines.noClients': 'keine Clients registriert',
   'machines.up': 'online',
@@ -83,6 +88,8 @@ export const de: Dict = {
   'probe.label': 'Probe · {client}',
   'probe.help': 'feste schreibgeschützte System-Probes',
   'probe.run': 'ausführen',
+  'probe.recheck': 'jetzt abfragen',
+  'probe.ok': 'erreichbar',
   'probe.unknownError': 'unbekannter Fehler',
 
   'tasks.ledger': 'Task-Ledger',

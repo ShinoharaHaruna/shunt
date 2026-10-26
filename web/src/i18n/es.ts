@@ -11,6 +11,8 @@ export const es: Dict = {
   'conn.connecting': 'conectando',
   'conn.live': 'en vivo',
   'conn.reconnecting': 'reconectando',
+  'conn.down': 'desconectado',
+  'conn.retry': 'reintentar',
 
   'theme.system': 'auto',
   'theme.light': 'claro',
@@ -25,6 +27,9 @@ export const es: Dict = {
   'state.scriptEmpty': 'script vacío',
   'state.unreachable': 'inaccesible',
   'state.expired': 'CADUCADO',
+  'skip.expired': 'caducado — sin sondeo automático',
+  'skip.gaveUp': 'en pausa tras {n} fallos',
+  'skip.backoff': 'próximo sondeo en {t}',
 
   'machines.noClients': 'no hay clients registrados',
   'machines.up': 'en línea',
@@ -83,6 +88,8 @@ export const es: Dict = {
   'probe.label': 'sondeo · {client}',
   'probe.help': 'sondeos de sistema fijos de solo lectura',
   'probe.run': 'ejecutar',
+  'probe.recheck': 'sondear ahora',
+  'probe.ok': 'accesible',
   'probe.unknownError': 'error desconocido',
 
   'tasks.ledger': 'Libro mayor de tareas',

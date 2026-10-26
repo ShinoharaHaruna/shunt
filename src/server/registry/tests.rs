@@ -59,6 +59,34 @@ fn ssh_options_default_when_absent_and_omit_when_empty() {
     assert!(!serialized.contains("options"), "{serialized}");
 }
 
+/// The `.fail` sidecar records the streak and the epoch of the newest
+/// failure (design.md §4.1 probe penalty). A file in the pre-timestamp
+/// single-line format still yields its count with no clock — a
+/// downgraded or hand-written streak never loses the count.
+#[test]
+fn conn_fail_sidecar_keeps_count_and_epoch() {
+    let _g = HOME_LOCK.lock().unwrap();
+    let tmp = std::env::temp_dir().join(format!("shunt-test-fail-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &tmp);
+    assert_eq!(conn_fail_read("box"), 0);
+    assert_eq!(conn_fail_at("box"), None);
+
+    assert_eq!(conn_fail_bump("box"), 1);
+    assert_eq!(conn_fail_bump("box"), 2);
+    let at = conn_fail_at("box").expect("a bump stamps the clock");
+    let now = crate::proto::time::unix_now() as i64;
+    assert!((now - at).abs() <= 5, "stamped {at} vs now {now}");
+
+    // Pre-upgrade format: count only, no epoch.
+    std::fs::write(tmp.join("state/box.fail"), "7\n").unwrap();
+    assert_eq!(conn_fail_read("box"), 7);
+    assert_eq!(conn_fail_at("box"), None);
+
+    conn_fail_reset("box");
+    assert_eq!(conn_fail_read("box"), 0);
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
 /// Registry privacy: client rows can carry ssh.password
 /// plaintext, so dirs are 0700 and files 0600 regardless of
 /// umask — including re-tightening a pre-existing loose file.

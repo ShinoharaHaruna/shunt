@@ -26,6 +26,18 @@ export interface ClientStatus {
   connect_failures?: number | null
   endpoint_rotates: boolean
   facts?: Record<string, unknown> | null
+  /** Present when a background sweep chose not to touch the row: the
+   *  card reports the registry's own data and `queues` is empty
+   *  because nobody asked (see ProbeSkip). */
+  skip?: ProbeSkip | null
+}
+
+/** Why a background sweep skipped a client — mirrors the server's
+ *  `ProbeSkip` (`expired` | `backoff` | `gave_up`). */
+export interface ProbeSkip {
+  reason: 'expired' | 'backoff' | 'gave_up'
+  fails?: number | null
+  retry_in_s?: number | null
 }
 
 export interface QueueStatus {

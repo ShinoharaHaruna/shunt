@@ -24,6 +24,36 @@ impl Transport for Capture {
     }
 }
 
+/// An expired row is never retried (design.md §9): the sweep leaves the
+/// spool entry staged and never touches the transport, so a box the
+/// vendor has already reclaimed costs nothing per poll.
+struct NoTouch;
+
+impl Transport for NoTouch {
+    fn exec(&self, _: &ClientEntry, _: &[String], _: Option<&str>) -> Result<String> {
+        unreachable!("an expired row must never be probed")
+    }
+
+    fn copy_to(&self, _: &ClientEntry, _: &Path, _: &str) -> Result<()> {
+        unreachable!("an expired row must never receive a task")
+    }
+}
+
+#[test]
+fn expired_client_is_never_dispatched() {
+    let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+    let tmp = std::env::temp_dir().join(format!("shunt-test-expired-sweep-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &tmp);
+    std::fs::create_dir_all(tmp.join("clients")).unwrap();
+    std::fs::write(tmp.join("clients/box.toml"), "name = \"box\"\nqroot = \"/queue\"\ndeploy_root = \"/root\"\nexpire = \"2020-01-01T00:00:00Z\"\n[ssh]\nhost = \"127.0.0.1\"\nport = 1\nuser = \"u\"\n").unwrap();
+    let entry = SpoolEntry { id: "task-1".into(), project: String::new(), client: "box".into(), queue: "default".into(), qroot: Some("/queue".into()), hold: None, hold_on_box: None, meta: TaskMeta { id: Some("task-1".into()), slug: "train-task1".into(), guard: None, workdir: None, env: Default::default(), cmd: vec![], timeout_s: None, retry: None, retry_delay_s: None, gpu_mem_mb: None, ram_mb: None, cpu_cores: None }, submitted_at: "now".into() };
+    crate::server::spool::stage(&entry, "#!/bin/sh\ntrue\n").unwrap();
+
+    assert_eq!(super::sweep_with(&NoTouch).unwrap(), 0);
+    assert_eq!(crate::server::spool::list().unwrap().len(), 1, "the entry stays staged for a renewal");
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
 #[test]
 fn dispatcher_forwards_box_hold_only_when_requested() {
     let transport = Capture::default();

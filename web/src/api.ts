@@ -1,4 +1,4 @@
-import type { RoomDetail, Snapshot } from './types'
+import type { ClientStatus, RoomDetail, Snapshot } from './types'
 
 export function getToken(): string | null {
   return new URLSearchParams(window.location.search).get('token')
@@ -65,6 +65,27 @@ export async function postProbe(
     body: JSON.stringify({ client, probe }),
   })
   return (await r.json()) as { ok: boolean; out?: string; error?: string }
+}
+
+/** Force one status probe for a client — the deliberate "probe now"
+ *  behind an expired row or a sweep that gave up. The server merges the
+ *  answer into the snapshot it broadcasts; the returned status is the
+ *  same object, for the caller that wants it without waiting a tick. */
+export async function reprobe(client: string): Promise<{
+  ok: boolean
+  status?: ClientStatus
+  error?: string
+}> {
+  const token = getToken()
+  const r = await fetch('/api/reprobe', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(token !== null ? { 'x-shunt-token': token } : {}),
+    },
+    body: JSON.stringify({ client }),
+  })
+  return (await r.json()) as { ok: boolean; status?: ClientStatus; error?: string }
 }
 
 /** Parse a ws text frame; returns null for anything that isn't a snapshot. */

@@ -11,6 +11,8 @@ export const ptBR: Dict = {
   'conn.connecting': 'conectando',
   'conn.live': 'conectado',
   'conn.reconnecting': 'reconectando',
+  'conn.down': 'desconectado',
+  'conn.retry': 'tentar novamente',
 
   'theme.system': 'auto',
   'theme.light': 'claro',
@@ -25,6 +27,9 @@ export const ptBR: Dict = {
   'state.scriptEmpty': 'script vazio',
   'state.unreachable': 'inacessível',
   'state.expired': 'EXPIRADO',
+  'skip.expired': 'expirado — sem sondagem automática',
+  'skip.gaveUp': 'pausado após {n} falhas',
+  'skip.backoff': 'próxima sondagem em {t}',
 
   'machines.noClients': 'nenhum client registrado',
   'machines.up': 'online',
@@ -83,6 +88,8 @@ export const ptBR: Dict = {
   'probe.label': 'sondagem · {client}',
   'probe.help': 'sondagens fixas e somente leitura',
   'probe.run': 'executar',
+  'probe.recheck': 'sondar agora',
+  'probe.ok': 'acessível',
   'probe.unknownError': 'erro desconhecido',
 
   'tasks.ledger': 'Ledger de tarefas',

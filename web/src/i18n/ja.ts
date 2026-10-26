@@ -11,6 +11,8 @@ export const ja: Dict = {
   'conn.connecting': '接続中',
   'conn.live': '接続済み',
   'conn.reconnecting': '再接続中',
+  'conn.down': '切断',
+  'conn.retry': '再接続',
 
   'theme.system': '自動',
   'theme.light': 'ライト',
@@ -25,6 +27,9 @@ export const ja: Dict = {
   'state.scriptEmpty': 'スクリプトは空',
   'state.unreachable': '到達不能',
   'state.expired': '期限切れ',
+  'skip.expired': '期限切れ — 自動照会を停止',
+  'skip.gaveUp': '{n} 回失敗のため停止中',
+  'skip.backoff': '次の自動照会まで {t}',
 
   'machines.noClients': 'クライアント未登録',
   'machines.up': 'オンライン',
@@ -83,6 +88,8 @@ export const ja: Dict = {
   'probe.label': 'プローブ · {client}',
   'probe.help': '固定の読み取り専用システムプローブ',
   'probe.run': '実行',
+  'probe.recheck': '今すぐ照会',
+  'probe.ok': '到達可能',
   'probe.unknownError': '不明なエラー',
 
   'tasks.ledger': 'タスク台帳',

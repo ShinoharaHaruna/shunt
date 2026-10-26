@@ -546,6 +546,11 @@ struct ProbeRequest {
     probe: String,
 }
 
+#[derive(serde::Deserialize)]
+struct ReprobeRequest {
+    client: String,
+}
+
 fn authorized(req: &http::Request, token: &Option<String>) -> bool {
     let Some(expected) = token else {
         return true;
@@ -583,6 +588,32 @@ fn handle(mut stream: TcpStream, latest: &Latest, hub: &ws::Hub, token: &Option<
         }
         return match snapshot::probe(&body.client, &body.probe) {
             Ok(out) => http::json(&mut stream, 200, &json!({"ok": true, "out": out})),
+            Err(e) => http::json(&mut stream, 200, &json!({"ok": false, "error": format!("{e:#}")})),
+        };
+    }
+    if req.method == "POST" && req.path == "/api/reprobe" {
+        // The deliberate "probe now" (§4.1, §18): an explicit status
+        // query for one client, bypassing the background penalty and
+        // the expiry gate — this call IS the decision to spend an ssh.
+        // The answer merges into the live snapshot so every dashboard
+        // keeps reading one truth (the next sweep recomputes it).
+        let body: ReprobeRequest = match serde_json::from_slice(&req.body) {
+            Ok(v) => v,
+            Err(_) => return http::json(&mut stream, 400, &json!({"error": "body must be JSON {client}"})),
+        };
+        if body.client.is_empty() {
+            return http::json(&mut stream, 400, &json!({"error": "expected {client}"}));
+        }
+        return match snapshot::reprobe(&body.client) {
+            Ok(st) => {
+                let name = body.client.clone();
+                publish(latest, hub, |s| {
+                    if let Some(clients) = s["clients"].as_object_mut() {
+                        clients.insert(name.clone(), json!(st));
+                    }
+                });
+                http::json(&mut stream, 200, &json!({"ok": true, "status": st}))
+            }
             Err(e) => http::json(&mut stream, 200, &json!({"ok": false, "error": format!("{e:#}")})),
         };
     }
@@ -712,5 +743,16 @@ mod tests {
         let response = response_for(&raw, "127.0.0.1");
         assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
         assert!(response.contains("unknown probe \\\"unknown\\\"; valid probes: ps, gpu, df, mem, uptime"));
+    }
+
+    /// The "probe now" route is a status query, not a command: an empty
+    /// or absent client is refused before anything touches the registry.
+    #[test]
+    fn reprobe_requires_a_client_and_never_runs_a_command() {
+        let body = r#"{"client":""}"#;
+        let raw = format!("POST /api/reprobe HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        let response = response_for(&raw, "127.0.0.1");
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+        assert!(response.contains("expected {client}"));
     }
 }
