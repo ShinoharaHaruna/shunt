@@ -121,7 +121,7 @@ Notes:
 ```bash
 shunt serve up                   # detached dashboard on 127.0.0.1:8747
 shunt serve status               # liveness + endpoint + log path
-shunt serve restart              # SIGUSR2 re-exec handoff (§3.5a)
+shunt serve restart              # hard down+up onto the installed binary
 shunt serve down
 shunt serve run --port 8799      # foreground (dev loop: just web + vite proxy)
 ```
@@ -132,7 +132,7 @@ A read-only embedded web UI + websocket snapshots of clients, spool, tasks, and 
 
 `shunt upgrade` self-upgrades the dev binary from the latest GitHub release (`--check`/`--json` read-only, `--force` to reinstall); `shunt upgrade -c rw-a` upgrades the box's binary to the latest musl build through the normal bootstrap path — that is also how wire-protocol drift gets fixed after a dev-side upgrade. `shunt version [-c rw-a]` reports either side's build.
 
-Upgrade handoff (§3.5a/§16): every live queue daemon and a pidfile'd `serve` get a SIGUSR2 — the image re-execs its own argv in place, adopting in-flight tasks; a pre-handler image is refused via `daemon.ver`/`serve.ver`, never killed. A dispatcher carries no pidfile, so upgrade discovers live ones by a /proc cmdline scan and names their pids — send USR2 or restart them yourself (a pre-handler dispatcher would die; spool + dedup make a restart lossless anyway). `upgrade -c` on a `local = true` row is an explicit no-op — local daemons run the dev machine's own image.
+Upgrade handoffs: every live queue daemon gets a SIGUSR2 (§3.5a) — the image re-execs its own argv in place, keeping the pid and adopting in-flight tasks; a pre-handler image is refused via `daemon.ver`, never killed. The `serve` dashboard is the exception: it holds only the merged snapshot, never in-flight work, so upgrade restarts it the plain way (`down` then `up`) — a brief port gap and one dropped websocket per open page, no capability gate, so any running image moves onto the new binary. A stopped daemon is started (and immediately exits again on an `exit_on_idle` box with an empty queue); a stopped dashboard is left alone. A dispatcher carries no pidfile, so upgrade discovers live ones by a /proc cmdline scan and names their pids — send USR2 or restart them yourself (a pre-handler dispatcher would die; spool + dedup make a restart lossless anyway). `upgrade -c` on a `local = true` row is an explicit no-op — local daemons run the dev machine's own image.
 
 ## Reporting problems with shunt
 

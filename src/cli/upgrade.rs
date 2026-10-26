@@ -222,6 +222,13 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Re
         }
     }
     anyhow::ensure!(t.exec(c, &["uname".into(), "-m".into()], None).map(|s| s.trim() == "x86_64").unwrap_or(false), "release assets are x86_64-only; {name} is not x86_64 — upgrade it by shipping a locally built binary: `client bootstrap {name} --bin-path <build>`");
+    // Bootstrap starts a stopped daemon and SIGUSR2-handoffs a live
+    // one, so the post-install expectation differs: only a box that
+    // HAD a daemon can lose a handoff, and a row whose daemon exits on
+    // idle legitimately ends the verification poll with no daemon at
+    // all (§3.11a). Both facts must be read BEFORE the install.
+    let was_live = matches!(remote::remote_status(t.as_ref(), &resolved), remote::StatusAnswer::Report { report, .. } if report.daemon.alive);
+    let exits_on_idle = resolved.client.exit_on_idle;
     let tb = release::fetch_tag_asset(&release.tag, release::MUSL_TARGET)?;
     verify_release(tb.path(), latest)?;
     client_ops::bootstrap_queue(t.as_ref(), name, queue, tb.path().to_str())?;
@@ -259,6 +266,7 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Re
             // handoff lost the daemon — §3.5a keeps the old image
             // running on exec failure, so one dead poll means nothing.
             let mut dead_streak = 0u32;
+            let mut alive_now = false;
             while std::time::Instant::now() < deadline {
                 if let remote::StatusAnswer::Report { report, .. } = remote::remote_status(t.as_ref(), &resolved) {
                     // daemon.ver is SHUNT_VERSION — "0.9.1 (<sha>
@@ -271,6 +279,7 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Re
                         flipped = true;
                         break;
                     }
+                    alive_now = report.daemon.alive;
                     dead_streak = if report.daemon.alive { 0 } else { dead_streak + 1 };
                     if dead_streak >= 3 {
                         break;
@@ -278,16 +287,38 @@ fn upgrade_remote(a: &UpgradeArgs, name: &str, release: &release::Release) -> Re
                 }
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
-            if flipped {
-                println!("{name}/{queue}: daemon handed off to {latest}");
-            } else {
-                stale("restart was sent but daemon.ver did not reach the target");
+            match handoff_outcome(was_live, exits_on_idle, flipped, alive_now) {
+                Handoff::HandedOff => println!("{name}/{queue}: daemon handed off to {latest}"),
+                Handoff::Started => println!("{name}/{queue}: daemon started on {latest}"),
+                Handoff::ExitedIdle => println!("{name}/{queue}: installed {latest}; no daemon was live and the one bootstrap started exited on idle (exit_on_idle) — expected on an idle box"),
+                Handoff::Stale => stale("restart was sent but daemon.ver did not reach the target"),
             }
         }
         remote::WireCall::RemoteErr(e) => stale(&format!("restart refused: {e:#}")),
         remote::WireCall::ConnDown(e) => stale(&format!("connection down: {e:#}")),
     }
     Ok(())
+}
+
+/// What the post-install poll concluded. Split out from the polling
+/// loop so the idle-exit case is decidable without a box: only a
+/// daemon that was live can lose a handoff, and a daemon that is gone
+/// afterwards is expected only when the row exits on idle.
+#[derive(Debug, PartialEq)]
+enum Handoff {
+    HandedOff,
+    Started,
+    ExitedIdle,
+    Stale,
+}
+
+fn handoff_outcome(was_live: bool, exits_on_idle: bool, flipped: bool, alive_now: bool) -> Handoff {
+    match (was_live, flipped, alive_now) {
+        (true, true, _) => Handoff::HandedOff,
+        (false, true, _) => Handoff::Started,
+        (false, false, false) if exits_on_idle => Handoff::ExitedIdle,
+        _ => Handoff::Stale,
+    }
 }
 
 /// The downloaded binary must report the tag's version — a stale or
@@ -315,6 +346,27 @@ fn install_over(src: &std::path::Path, dst: &PathBuf) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::{handoff_outcome, Handoff};
+
+    /// The verification poll must not read a clean idle exit as a lost
+    /// handoff: a box that never had a daemon, whose `exit_on_idle`
+    /// daemon came up and drained, installs correctly and reports no
+    /// daemon afterwards. Anything else stays loud — a daemon that WAS
+    /// live may never be excused, and without the flag a vanished
+    /// daemon is a real failure.
+    #[test]
+    fn idle_exit_is_not_a_lost_handoff() {
+        assert_eq!(handoff_outcome(false, true, false, false), Handoff::ExitedIdle);
+        assert_eq!(handoff_outcome(false, false, false, false), Handoff::Stale);
+        assert_eq!(handoff_outcome(true, true, false, false), Handoff::Stale);
+        assert_eq!(handoff_outcome(true, false, false, false), Handoff::Stale);
+        assert_eq!(handoff_outcome(false, false, true, true), Handoff::Started);
+        assert_eq!(handoff_outcome(true, false, true, true), Handoff::HandedOff);
+        // Alive but on the wrong image is stale, whatever the row says.
+        assert_eq!(handoff_outcome(false, true, false, true), Handoff::Stale);
+        assert_eq!(handoff_outcome(true, true, false, true), Handoff::Stale);
+    }
+
     /// The /proc scan is the feature — and identity is the cmdline,
     /// not the executable (same rule as the §3.4 liveness needle):
     /// `exec -a shunt yes dispatch` makes a `yes` process read as
