@@ -101,6 +101,9 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
     if (key_changed || options_changed) && !endpoint_moved {
         kill_mux(&e.name);
     }
+    if options_changed && !endpoint_moved {
+        registry::conn_fail_reset(&e.name);
+    }
     if !e.local && e.ssh.key.is_empty() && e.ssh.password.is_empty() {
         eprintln!("warn: client {name} has no auth path — set --key or --password");
     }
@@ -271,12 +274,16 @@ mod tests {
         client.name = "opts".into();
         client.ssh.options = vec!["ProxyJump=old".into()];
         crate::server::registry::save_client(&client).unwrap();
+        crate::server::registry::conn_fail_bump("opts");
 
         let bare = || EndpointUpdate { host: None, port: None, user: None, key: None, password: None, pre_connect: None, endpoint_rotates: None, options: None };
         super::update("opts", EndpointUpdate { options: Some(vec!["ProxyJump=bastion".into(), "ForwardAgent=yes".into()]), ..bare() }).unwrap();
         assert_eq!(crate::server::registry::load_client("opts").unwrap().ssh.options, ["ProxyJump=bastion", "ForwardAgent=yes"]);
+        assert_eq!(crate::server::registry::conn_fail_read("opts"), 0);
+        crate::server::registry::conn_fail_bump("opts");
         super::update("opts", EndpointUpdate { options: Some(Vec::new()), ..bare() }).unwrap();
         assert!(crate::server::registry::load_client("opts").unwrap().ssh.options.is_empty());
+        assert_eq!(crate::server::registry::conn_fail_read("opts"), 0);
         std::env::remove_var("SHUNT_HOME");
         std::fs::remove_dir_all(home).ok();
     }

@@ -251,9 +251,9 @@ pub enum ClientAction {
         #[arg(long)]
         pre_connect: Option<String>,
         /// Per-client OpenSSH -o option (repeatable; replaces the
-        /// whole ssh.options list when given). Kills the mux master
-        /// so the new options take hold — a hand-edited row rides
-        /// the stale master until it exits (design.md §4.1)
+        /// whole ssh.options list when given). Kills the mux and
+        /// resets the conn-fail streak; hand-editing rides the stale
+        /// master until it exits (design.md §4.1)
         #[arg(long, overrides_with = "no_options")]
         option: Vec<String>,
         /// Clear the row's ssh.options list
