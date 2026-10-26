@@ -24,7 +24,7 @@ pub const DEFAULT_INTERVAL_S: u64 = 10;
 /// passed on the command line, so `up`/`restart` can tell an
 /// explicit flag from a built-in default when converging against
 /// a live instance's own argv.
-#[derive(clap::Args, Clone)]
+#[derive(clap::Args, Clone, Default)]
 pub struct ServeFlags {
     /// Listen address (default 127.0.0.1 — reach a remote dev
     /// machine with `ssh -L PORT:127.0.0.1:PORT <dev>`)

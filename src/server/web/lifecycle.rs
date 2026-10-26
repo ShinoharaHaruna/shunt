@@ -106,14 +106,6 @@ fn log_file() -> Result<PathBuf> {
     Ok(crate::server::registry::shunt_home()?.join("serve.log"))
 }
 
-/// `$SHUNT_HOME/serve.ver` — the §3.5a capability gate, same role
-/// as the queue daemon's `daemon.ver`: written only by an image
-/// that HAS the USR2 handler, so `restart` can signal without
-/// default-killing a pre-handler instance.
-pub(super) fn ver_file() -> Result<PathBuf> {
-    Ok(crate::server::registry::shunt_home()?.join("serve.ver"))
-}
-
 /// Serve identity for `proto::proc::probe`: shunt-family argv[0]
 /// basename + argv[1] == `serve` + argv[2] == `run`. Anchoring the
 /// leaf keeps a recycled pid from false-identifying (§3.4).
@@ -161,8 +153,13 @@ pub fn up(flags: &ServeFlags) -> Result<()> {
         }
         anyhow::bail!("already running (pid {pid}) on different flags: {} — `serve down` first to change them", miss.join(", "));
     }
-    let opts: ServeOpts = flags.resolve();
-    guard::ensure_bind_allowed(&opts)?;
+    spawn_up(&flags.resolve())
+}
+
+/// The spawn-and-wait half of `up`, shared with `restart`: a restart
+/// has just proved nothing is live, so it skips the `up` converge.
+fn spawn_up(opts: &ServeOpts) -> Result<()> {
+    guard::ensure_bind_allowed(opts)?;
     let dir = crate::server::registry::shunt_home()?;
     std::fs::create_dir_all(&dir)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(log_file()?)?;
@@ -228,52 +225,64 @@ pub fn down() -> Result<()> {
                 std::thread::sleep(Duration::from_millis(50));
             }
             let _ = std::fs::remove_file(&pidf);
-            let _ = std::fs::remove_file(ver_file()?);
+            // A ≤0.10 image wrote this USR2-capability marker. Nothing
+            // reads it since restart became a hard down+up, and leaving
+            // it behind would advertise a mechanism that no longer
+            // exists.
+            if let Ok(home) = crate::server::registry::shunt_home() {
+                let _ = std::fs::remove_file(home.join("serve.ver"));
+            }
             println!("serve down: stopped pid {pid}");
         }
     }
     Ok(())
 }
 
-/// The §3.5a signal half of `restart`: `serve.ver` gate + USR2 +
-/// report on a live instance, `None` when nothing runs. `upgrade`
-/// calls this directly — it must hand off a live serve but never
-/// start one.
-pub(crate) fn handoff_if_running() -> Result<Option<u32>> {
-    let Some((pid, _)) = running_instance()? else {
-        return Ok(None);
-    };
-    let ver = std::fs::read_to_string(ver_file()?).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let Some(from_ver) = ver else {
-        anyhow::bail!("serve (pid {pid}) predates handoff support — no serve.ver, and SIGUSR2 would kill it; `shunt serve down` then `serve up` to move onto the new binary");
-    };
-    let rc = unsafe { libc::kill(pid as i32, libc::SIGUSR2) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error()).with_context(|| format!("cannot SIGUSR2 serve pid {pid}"));
-    }
-    println!("serve handed off (pid {pid}, was {from_ver}) — re-execs its own argv on the new image");
-    Ok(Some(pid))
+/// Effective options for a restart: explicit flags win, then the
+/// live instance's own argv, then the built-in defaults. Recovered
+/// from argv rather than remembered — a hard restart spawns a fresh
+/// process, so nothing carries over implicitly.
+fn restart_opts(flags: &ServeFlags, live: &LiveFlags) -> ServeOpts {
+    ServeOpts { bind: flags.bind.clone().or_else(|| live.bind.clone()).unwrap_or_else(|| DEFAULT_BIND.to_string()), port: flags.port.or(live.port).unwrap_or(DEFAULT_PORT), token: flags.token.clone().or_else(|| live.token.clone()), interval_s: flags.interval_s.or(live.interval_s).unwrap_or(DEFAULT_INTERVAL_S) }
 }
 
-/// `serve restart`: converge on a running new-image instance.
-/// Nothing live → fall through to `up` (`queue restart` → `start`
-/// is the same posture). Live → SIGUSR2 handoff; explicit flags
-/// warn rather than apply, because re-exec preserves the running
-/// argv and only down+up can change them.
+/// `serve restart`: a hard down+up on the installed image. Serve
+/// holds only the merged snapshot (§18) — every section is recomputed
+/// on the next sweep and the §4.1 probe penalty lives in the registry,
+/// not in the process — so unlike the daemon (§3.5a) it has no
+/// in-flight work a signal handoff would protect. What it buys: no
+/// capability gate, so a restart works on ANY running image, and an
+/// exec can never leave a stale image running while claiming success.
+/// Flags: explicit ones win over the live argv, which a down+up CAN
+/// change.
 pub fn restart(flags: &ServeFlags) -> Result<()> {
-    let Some((_pid, live)) = running_instance()? else {
-        return up(flags);
-    };
-    let miss = flag_mismatches(flags, &live);
-    if !miss.is_empty() {
-        eprintln!("note: running instance keeps its own flags ({}); `serve down`+`serve up` to change them", miss.join(", "));
+    match running_instance()? {
+        None => up(flags),
+        Some((pid, live)) => restart_live(flags, pid, &live),
     }
-    handoff_if_running().map(|_| ())
 }
 
-/// `serve status`: liveness, recorded version, endpoint parsed out
-/// of the running argv, handoff capability (`serve.ver` present),
-/// and the log path — one human line or `--json`.
+/// `upgrade`'s entry (§16): restart a live serve onto the new image,
+/// never start one that is stopped — an upgrade is not a start. The
+/// bool reports whether an instance was there to restart.
+pub(crate) fn restart_if_running() -> Result<bool> {
+    match running_instance()? {
+        None => Ok(false),
+        Some((pid, live)) => restart_live(&ServeFlags::default(), pid, &live).map(|()| true),
+    }
+}
+
+fn restart_live(flags: &ServeFlags, pid: u32, live: &LiveFlags) -> Result<()> {
+    let opts = restart_opts(flags, live);
+    println!("serve restart: stopping pid {pid} — down+up on {}:{}", opts.bind, opts.port);
+    down()?;
+    spawn_up(&opts)
+}
+
+/// `serve status`: liveness, the endpoint parsed out of the running
+/// argv, and the log path — one human line or `--json`. Deliberately
+/// no version field: a hard restart means the running image IS the
+/// installed one, so a recorded version would only be able to lie.
 pub fn status(json: bool) -> Result<()> {
     match running_instance()? {
         None => {
@@ -284,16 +293,12 @@ pub fn status(json: bool) -> Result<()> {
             }
         }
         Some((pid, live)) => {
-            let ver = std::fs::read_to_string(ver_file()?).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-            let handoff = ver.is_some();
             let bind = live.bind.unwrap_or_else(|| DEFAULT_BIND.to_string());
             let port = live.port.unwrap_or(DEFAULT_PORT);
             if json {
-                println!("{}", json!({"running": true, "pid": pid, "ver": ver, "bind": bind, "port": port, "handoff": handoff, "log": log_file()?.display().to_string()}));
+                println!("{}", json!({"running": true, "pid": pid, "bind": bind, "port": port, "log": log_file()?.display().to_string()}));
             } else {
-                let v = ver.unwrap_or_else(|| "unknown".into());
-                let hf = if handoff { "handoff-capable" } else { "pre-handoff image — restart refuses; `serve down`+`serve up` to upgrade" };
-                println!("serve up: pid {pid} — http://{bind}:{port} — {v} — {hf} — log {}", log_file()?.display());
+                println!("serve up: pid {pid} — http://{bind}:{port} — log {}", log_file()?.display());
             }
         }
     }

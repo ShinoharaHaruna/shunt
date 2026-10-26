@@ -22,7 +22,7 @@ mod tests;
 mod ws;
 
 pub use flags::{ServeFlags, ServeOpts};
-pub(crate) use lifecycle::handoff_if_running;
+pub(crate) use lifecycle::restart_if_running;
 pub use lifecycle::{down, restart, status, up};
 
 use anyhow::{Context as _, Result};
@@ -90,35 +90,20 @@ pub fn run(opts: ServeOpts) -> Result<()> {
         std::fs::create_dir_all(dir).ok();
     }
     std::fs::write(&pidf, format!("{}", std::process::id()))?;
-    let verf = lifecycle::ver_file()?;
-    std::fs::write(&verf, format!("{}\n", env!("SHUNT_VERSION")))?;
-    // TERM/INT remove the lifecycle files and exit. USR2 re-execs
-    // this image in place (§3.5a): the listener is CLOEXEC, so
-    // execve drops it and the new image rebinds the same port — a
-    // sub-second refusal window plus one dropped WS conn, never a
-    // drain. An exec failure keeps the old image running.
+    // TERM/INT remove the pidfile and exit. USR2 is deliberately
+    // unhandled: nothing sends it. `serve restart` and `upgrade` do a
+    // hard down+up because serve holds only the merged snapshot, never
+    // in-flight work (§18) — which also means a restart needs no
+    // capability gate to stay safe on any running image.
     {
-        let verf = verf.clone();
-        let argv_rest: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-        let mut sigs = signal_hook::iterator::Signals::new([signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT, signal_hook::consts::SIGUSR2]).context("cannot install signal handlers")?;
+        let mut sigs = signal_hook::iterator::Signals::new([signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT]).context("cannot install signal handlers")?;
         std::thread::spawn(move || {
-            for sig in sigs.forever() {
-                if sig == signal_hook::consts::SIGUSR2 {
-                    eprintln!("serve: SIGUSR2 — re-exec in place");
-                    let Err(e) = crate::handoff::exec_self(&argv_rest);
-                    eprintln!("serve: handoff failed: {e} — continuing on the old image");
-                } else {
-                    let _ = std::fs::remove_file(&pidf);
-                    let _ = std::fs::remove_file(&verf);
-                    std::process::exit(0);
-                }
-            }
+            // TERM and INT take the same path, so wait for whichever
+            // arrives first and stop — no second chance to handle.
+            sigs.forever().next();
+            let _ = std::fs::remove_file(&pidf);
+            std::process::exit(0);
         });
-    }
-    crate::handoff::unblock_usr2();
-    if std::env::var_os(crate::handoff::HANDOFF_ENV).is_some() {
-        std::env::remove_var(crate::handoff::HANDOFF_ENV);
-        eprintln!("serve: re-exec'd via handoff");
     }
 
     let auth = Arc::new(opts.token);

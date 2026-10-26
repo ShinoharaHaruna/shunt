@@ -29,14 +29,13 @@ pub enum ServeAction {
     /// Stop the background instance (SIGTERM, verifies the pidfile's
     /// cmdline before signaling; a no-op when nothing runs)
     Down,
-    /// Handoff-restart the background instance (SIGUSR2 re-exec,
-    /// §3.5a; a pre-handler image is refused, not killed). Falls
-    /// through to `up` when nothing runs; on a live instance the
-    /// flags are ignored with a warning — re-exec keeps the
-    /// running argv
+    /// Hard restart the background instance: stop, then start on the
+    /// installed binary (serve holds no in-flight work, so the cost is
+    /// a brief port gap plus one dropped websocket per open page).
+    /// Falls through to `up` when nothing runs; the live argv's flags
+    /// carry over unless an explicit flag overrides them
     Restart(crate::server::web::ServeFlags),
-    /// Liveness, version, endpoint, and handoff capability of the
-    /// running instance
+    /// Liveness, endpoint, and log path of the running instance
     Status {
         /// JSON output
         #[arg(long)]

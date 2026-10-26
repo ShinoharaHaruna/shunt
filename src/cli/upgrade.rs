@@ -62,12 +62,13 @@ fn upgrade_local(a: &UpgradeArgs, release: &release::Release) -> Result<()> {
         println!("upgraded {current} → {latest} ({target}) at {}", exe.display());
     }
     handoff_local_daemons();
-    // The dashboard re-execs under the same §3.5a gate: a
-    // pre-handler serve image is refused with the down+up
-    // remediation rather than killed by an unhandled USR2. Signal-
-    // only — a stopped serve must not be started by an upgrade.
-    if let Err(e) = crate::server::web::handoff_if_running() {
-        eprintln!("serve not handed off: {e:#}");
+    // The dashboard hard-restarts onto the new image: a serve holds
+    // only the merged snapshot (§18), so a down+up costs a brief port
+    // gap and nothing else — and unlike a signal handoff it needs no
+    // capability gate, so ANY running image (including one older than
+    // this change) moves onto the new binary.
+    if let Err(e) = crate::server::web::restart_if_running() {
+        eprintln!("serve not restarted: {e:#} — check `shunt serve status` and serve.log, then `shunt serve up`");
     }
     // The dispatcher has no pidfile (§16): the /proc scan is the
     // only discovery path, and the signal stays the operator's call —
