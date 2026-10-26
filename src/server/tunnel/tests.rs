@@ -281,6 +281,71 @@ fn tunnel_argv_disables_mux_before_conn_args() {
     assert!(argv.contains(&"/k".to_string()) && argv.contains(&"u@h".to_string()), "{argv:?}");
 }
 
+/// Password-only tunnel creation also goes through sshpass, with the
+/// secret kept in SSHPASS rather than the wrapper's argv.
+#[test]
+fn password_only_tunnel_spawn_uses_sshpass_env() {
+    let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+    let _g = crate::server::transport::ENV_LOCK.lock().unwrap();
+    let home = tmp("password-up-home");
+    let old_home = std::env::var_os("SHUNT_HOME");
+    std::env::set_var("SHUNT_HOME", &home);
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let argv = home.join("sshpass-argv");
+    let password = home.join("sshpass-password");
+    std::env::set_var("FAKE_ARGV", &argv);
+    std::env::set_var("FAKE_PASSWORD", &password);
+    let ssh = bin.join("ssh");
+    std::fs::write(&ssh, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    let sshpass = bin.join("sshpass");
+    std::fs::write(
+        &sshpass,
+        r#"#!/bin/sh
+printf '%s\n' "$@" > "$FAKE_ARGV"
+printf '%s' "${SSHPASS-unset}" > "$FAKE_PASSWORD"
+[ "$1" = -e ] || exit 91
+shift
+tool=$1
+shift
+exec "$tool" "$@"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&sshpass, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let old_path = std::env::var_os("PATH");
+    std::env::set_var("PATH", format!("{}:{}", bin.display(), old_path.as_deref().unwrap_or_default().to_string_lossy()));
+
+    let root = tmp("password-up-q");
+    let mut client = entry(&root);
+    client.local = false;
+    client.ssh.host = "host".into();
+    client.ssh.user = "user".into();
+    client.ssh.password = "tunnel secret".into();
+    let pid = super::up(&LocalTransport::default(), &client, Some(1080)).unwrap();
+
+    let args = std::fs::read_to_string(&argv).unwrap();
+    assert_eq!(args.lines().next(), Some("-e"));
+    assert_eq!(args.lines().nth(1), Some("ssh"));
+    assert!(!args.contains("tunnel secret"), "the password must never appear in argv: {args}");
+    assert_eq!(std::fs::read_to_string(password).unwrap(), "tunnel secret");
+
+    let _ = crate::client::exec::signal_pgid(pid, "KILL");
+    std::env::remove_var("FAKE_ARGV");
+    std::env::remove_var("FAKE_PASSWORD");
+    match old_path {
+        Some(path) => std::env::set_var("PATH", path),
+        None => std::env::remove_var("PATH"),
+    }
+    match old_home {
+        Some(home) => std::env::set_var("SHUNT_HOME", home),
+        None => std::env::remove_var("SHUNT_HOME"),
+    }
+    std::fs::remove_dir_all(home).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// `up`'s spawn has no retry loop of its own (design.md §4.1): a
 /// spawn dead inside the setup window gets exactly ONE retry behind
 /// the client's pre_connect hook — the hook fires once, between

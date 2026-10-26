@@ -1,5 +1,6 @@
 /target/
 reference/
 .pi/
+.unipi/
 web/node_modules/
 web/dist/

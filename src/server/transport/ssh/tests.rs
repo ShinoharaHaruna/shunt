@@ -38,12 +38,71 @@ fn restore_path() {
     }
 }
 
+fn fake_sshpass(script: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("shunt-fakesshpass-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sshpass");
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let old = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{}:{old}", dir.display()));
+    dir
+}
+
 fn ssh_client() -> ClientEntry {
     let mut c = local_client();
     c.local = false;
     c.ssh.host = "127.0.0.1".into();
     c.ssh.user = "u".into();
     c
+}
+
+#[test]
+fn password_only_base_args_select_password_auth_and_keep_mux() {
+    let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("shunt-ssh-password-args-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &home);
+    let mut client = ssh_client();
+    client.ssh.password = "pw".into();
+
+    let args = SshTransport::base_args(&client).unwrap();
+    assert!(!args.iter().any(|arg| arg == "BatchMode=yes"), "password auth must not use BatchMode: {args:?}");
+    for option in ["PreferredAuthentications=password", "PubkeyAuthentication=no", "NumberOfPasswordPrompts=1"] {
+        assert!(args.iter().any(|arg| arg == option), "missing {option}: {args:?}");
+    }
+    assert!(args.iter().any(|arg| arg.starts_with("ControlPath=")), "password-only auth must keep muxing: {args:?}");
+    assert!(!args.iter().any(|arg| arg == "-i"), "password-only auth must not select a private key: {args:?}");
+
+    let mut keyed = client.clone();
+    keyed.ssh.key = "/key".into();
+    let keyed_args = SshTransport::base_args(&keyed).unwrap();
+    assert!(keyed_args.iter().any(|arg| arg == "BatchMode=yes"));
+    assert!(!keyed_args.iter().any(|arg| arg == "PreferredAuthentications=password"));
+    assert!(keyed_args.windows(2).any(|pair| pair == ["-i", "/key"]));
+
+    std::env::remove_var("SHUNT_HOME");
+    std::fs::remove_dir_all(home).ok();
+}
+
+#[test]
+fn password_only_requires_sshpass_with_actionable_error() {
+    let _g = ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("shunt-no-sshpass-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", dir.join("sh")).unwrap();
+    let old_path = std::env::var_os("PATH");
+    std::env::set_var("PATH", &dir);
+    let mut client = ssh_client();
+    client.ssh.password = "pw".into();
+    let err = super::ssh_tool_cmd(&client, "ssh").unwrap_err();
+    assert!(err.to_string().contains("install `sshpass` or set ssh.key"), "{err}");
+    match old_path {
+        Some(path) => std::env::set_var("PATH", path),
+        None => std::env::remove_var("PATH"),
+    }
+    std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
@@ -61,6 +120,44 @@ fn ssh_exec_passes_serveralive() {
     assert!(argv.contains("ServerAliveCountMax=2"), "{argv}");
     std::env::remove_var("FAKE_ARGV");
     restore_path();
+}
+
+#[test]
+fn password_only_exec_uses_sshpass_env_not_argv() {
+    let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("shunt-ssh-password-exec-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &home);
+    let dir = std::env::temp_dir().join(format!("shunt-sshpass-observe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let argv = dir.join("argv");
+    let password = dir.join("password");
+    std::env::set_var("FAKE_ARGV", &argv);
+    std::env::set_var("FAKE_PASSWORD", &password);
+    let old_path = std::env::var_os("PATH");
+    fake_ssh("exit 0");
+    fake_sshpass("printf '%s\\n' \"$@\" > \"$FAKE_ARGV\"; printf '%s' \"${SSHPASS-unset}\" > \"$FAKE_PASSWORD\"; [ \"$1\" = -e ] || exit 91; shift; tool=$1; shift; exec \"$tool\" \"$@\"");
+
+    let mut client = ssh_client();
+    client.ssh.password = "secret value".into();
+    SshTransport.exec(&client, &["status".into()], None).unwrap();
+
+    let args = std::fs::read_to_string(&argv).unwrap();
+    assert_eq!(args.lines().next(), Some("-e"));
+    assert_eq!(args.lines().nth(1), Some("ssh"));
+    assert!(!args.lines().any(|arg| arg == "-i"), "password-only transport must not pass a private key: {args}");
+    assert!(!args.contains("secret value"), "the password must never appear in argv: {args}");
+    assert_eq!(std::fs::read_to_string(password).unwrap(), "secret value");
+
+    std::env::remove_var("FAKE_ARGV");
+    std::env::remove_var("FAKE_PASSWORD");
+    match old_path {
+        Some(path) => std::env::set_var("PATH", path),
+        None => std::env::remove_var("PATH"),
+    }
+    std::env::remove_var("SHUNT_HOME");
+    std::fs::remove_dir_all(home).ok();
+    std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
@@ -183,6 +280,45 @@ fn scp_passes_serveralive() {
     std::env::remove_var("FAKE_ARGV");
     std::env::remove_var("SHUNT_HOME");
     restore_path();
+}
+
+#[test]
+fn password_only_scp_uses_sshpass_wrapper() {
+    let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("shunt-scp-password-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &home);
+    let dir = std::env::temp_dir().join(format!("shunt-scp-password-observe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let argv = dir.join("argv");
+    let password = dir.join("password");
+    std::env::set_var("FAKE_ARGV", &argv);
+    std::env::set_var("FAKE_PASSWORD", &password);
+    let old_path = std::env::var_os("PATH");
+    fake_scp("exit 0");
+    fake_sshpass("printf '%s\\n' \"$@\" > \"$FAKE_ARGV\"; printf '%s' \"${SSHPASS-unset}\" > \"$FAKE_PASSWORD\"; [ \"$1\" = -e ] || exit 91; shift; tool=$1; shift; exec \"$tool\" \"$@\"");
+
+    let mut client = ssh_client();
+    client.ssh.password = "scp secret".into();
+    let local = dir.join("local");
+    std::fs::write(&local, "payload").unwrap();
+    SshTransport.copy_to(&client, &local, "/remote/path").unwrap();
+
+    let args = std::fs::read_to_string(&argv).unwrap();
+    assert_eq!(args.lines().next(), Some("-e"));
+    assert_eq!(args.lines().nth(1), Some("scp"));
+    assert_eq!(std::fs::read_to_string(password).unwrap(), "scp secret");
+    assert!(!args.contains("scp secret"), "the password must never appear in argv: {args}");
+
+    std::env::remove_var("FAKE_ARGV");
+    std::env::remove_var("FAKE_PASSWORD");
+    match old_path {
+        Some(path) => std::env::set_var("PATH", path),
+        None => std::env::remove_var("PATH"),
+    }
+    std::env::remove_var("SHUNT_HOME");
+    std::fs::remove_dir_all(home).ok();
+    std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]

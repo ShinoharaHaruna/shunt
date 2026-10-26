@@ -42,9 +42,10 @@ pub fn ensure_key(entry: &mut ClientEntry) -> Result<()> {
 /// the vendor console or a manual ssh-copy-id. A `shared` row never
 /// auto-deploys: appending to authorized_keys is the one write shunt
 /// makes outside `<qroot>`, and other tenants' consent is not ours
-/// to assume — the manual/console path is the shared-box answer.
+/// to assume. Empty `ssh.key` also means password-only transport, not
+/// a key to deploy (§4.1).
 pub fn deploy_key(entry: &ClientEntry) -> Result<bool> {
-    if entry.shared || entry.ssh.password.is_empty() {
+    if entry.shared || entry.ssh.password.is_empty() || entry.ssh.key.is_empty() {
         return Ok(false);
     }
     let have_sshpass = std::process::Command::new("sh").args(["-c", "command -v sshpass >/dev/null 2>&1"]).status().map(|s| s.success()).unwrap_or(false);
@@ -132,5 +133,13 @@ mod tests {
         let mut e = pw_client(std::path::Path::new("/nope/id"));
         e.shared = true;
         assert!(!deploy_key(&e).unwrap(), "shared rows must never auto-deploy");
+    }
+
+    #[test]
+    fn deploy_key_skips_password_only_row_without_reading_pubkey() {
+        let mut e = pw_client(std::path::Path::new("/missing/private-key"));
+        e.ssh.key.clear();
+        assert!(e.ssh.password_only());
+        assert!(!deploy_key(&e).unwrap(), "password-only rows have no key to deploy");
     }
 }

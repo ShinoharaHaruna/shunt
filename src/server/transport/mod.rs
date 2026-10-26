@@ -9,6 +9,7 @@ mod local;
 mod ssh;
 
 pub use local::LocalTransport;
+pub(crate) use ssh::ssh_tool_cmd;
 pub use ssh::SshTransport;
 
 use crate::server::registry::{self, ClientEntry};

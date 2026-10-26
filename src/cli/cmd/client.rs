@@ -15,12 +15,13 @@ pub fn client(c: &ClientCmd) -> Result<()> {
         // Fold the --endpoint-rotates / --no-endpoint-rotates pair
         // into tri-state: Some(true) sets, Some(false) clears,
         // None leaves the row field untouched.
-        ClientAction::Update { name, host, port, user, password, endpoint_rotates, no_endpoint_rotates, pre_connect } => crate::server::client_ops::update(
+        ClientAction::Update { name, host, port, user, key, password, endpoint_rotates, no_endpoint_rotates, pre_connect } => crate::server::client_ops::update(
             name,
             crate::server::client_ops::EndpointUpdate {
                 host: host.clone(),
                 port: *port,
                 user: user.clone(),
+                key: key.clone(),
                 password: password.clone(),
                 pre_connect: pre_connect.clone(),
                 endpoint_rotates: if *endpoint_rotates {

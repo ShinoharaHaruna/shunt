@@ -132,6 +132,28 @@ fn fixture(name: &str) -> (std::path::PathBuf, ClientEntry) {
     (tmp, e)
 }
 
+/// Password-only bootstrap skips key generation and owner claim because
+/// there is no public-key identity to deploy or claim with.
+#[test]
+fn bootstrap_password_only_skips_key_generation_and_owner_claim() {
+    let _g = HOME_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("shunt-test-boot-password-only-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &home);
+    let mut entry = base_entry();
+    entry.name = "password-only".into();
+    entry.ssh.password = "pw".into();
+    registry::save_client(&entry).unwrap();
+
+    let t = stub("ldd (GNU libc) 99.0", "FOREIGN", Smoke::Clean);
+    bootstrap(&t, "password-only", None).unwrap();
+
+    assert!(registry::load_client("password-only").unwrap().ssh.key.is_empty());
+    assert!(!t.calls.lock().unwrap().iter().any(|(_, argv, _)| argv.iter().any(|arg| arg.contains(".shunt-owner"))), "without a pubkey the owner claim must be skipped");
+    assert!(!home.join("keys/password-only").exists(), "password-only bootstrap must not generate a keypair");
+    std::env::remove_var("SHUNT_HOME");
+    std::fs::remove_dir_all(&home).ok();
+}
+
 /// §4.1 owner claim: a qroot already carrying a foreign
 /// .shunt-owner refuses before the first write — two installs
 /// must never merge into one queue.

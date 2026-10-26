@@ -35,13 +35,17 @@ fn bootstrap_selected(t: &dyn Transport, name: &str, queue: Option<&str>, bin_pa
         None => registry::all_queues(&entry)?,
     };
     let original_key = entry.ssh.key.clone();
-    ensure_key(&mut entry)?;
+    if !entry.ssh.password_only() {
+        ensure_key(&mut entry)?;
+    }
     if entry.ssh.key != original_key {
         registry::save_client(&entry)?;
     }
     if deploy_key(&entry)? {
         eprintln!("key deployed: {}", entry.ssh.key);
-    } else if !entry.local && entry.ssh.password.is_empty() || entry.shared {
+    } else if !entry.local && entry.ssh.password_only() {
+        eprintln!("note: password-only auth — authorized_keys untouched; transport runs via sshpass");
+    } else if !entry.local && (entry.ssh.password.is_empty() || entry.shared) {
         let why = if entry.shared { "shared row — authorized_keys is never modified automatically" } else { "no ssh.password in the row" };
         eprintln!("note: {why} — install {}.pub on the box once\n      (vendor console or: ssh-copy-id -i {}.pub -p {} {}@{})", entry.ssh.key, entry.ssh.key, entry.ssh.port, entry.ssh.user, entry.ssh.host);
     }

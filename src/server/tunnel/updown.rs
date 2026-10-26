@@ -2,12 +2,12 @@
 //! publication, and ALL_PROXY env reconciliation.
 
 use crate::server::registry::ClientEntry;
-use crate::server::transport::{ssh_conn_args, Transport};
+use crate::server::transport::{ssh_conn_args, ssh_tool_cmd, Transport};
 use anyhow::{Context, Result};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use super::env::env_write;
@@ -61,7 +61,7 @@ pub(super) fn up_locked(dir: &Path, t: &dyn Transport, client: &ClientEntry, por
     }
     let mut child = loop {
         // ExitOnForwardFailure makes a bad bind exit fast; give it a beat.
-        let mut c = Command::new("ssh").args(&args[1..]).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log.try_clone()?).process_group(0).spawn().context("spawn ssh tunnel")?;
+        let mut c = ssh_tool_cmd(client, "ssh")?.args(&args[1..]).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log.try_clone()?).process_group(0).spawn().context("spawn ssh tunnel")?;
         std::thread::sleep(Duration::from_millis(500));
         if c.try_wait().context("check ssh tunnel during setup")?.is_none() {
             break c;

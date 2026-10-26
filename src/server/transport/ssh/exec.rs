@@ -3,16 +3,16 @@
 //! rc-255 retry, the §4.1 pre_connect hook, wire-error surfacing,
 //! and a hard deadline that treats a hang as a fault, not a flap.
 
-use super::{unreachable_err, PreConnect, SshTransport, RETRY};
+use super::{ssh_tool_cmd, unreachable_err, PreConnect, SshTransport, RETRY};
 use crate::server::registry::{self, ClientEntry};
 use crate::server::transport::{exec_timeout_s, join_argv, wait_deadline};
 use anyhow::{Context, Result};
 use std::io::Write;
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub(super) fn exec(client: &ClientEntry, argv: &[String], stdin: Option<&str>) -> Result<String> {
-    let mut cmd = Command::new("ssh");
+    let mut cmd = ssh_tool_cmd(client, "ssh")?;
     cmd.args(SshTransport::base_args(client)?)
         // Half-open TCP detection — not in base_args because the
         // tunnel sets its own ServerAlive policy. scp spells the

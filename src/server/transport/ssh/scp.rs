@@ -4,13 +4,13 @@
 //! bootstrap pushes the binary through here, so one
 //! `Exceeded MaxStartups` flap must not fail the copy.
 
-use super::{unreachable_err, PreConnect, SshTransport, RETRY};
+use super::{ssh_tool_cmd, unreachable_err, PreConnect, SshTransport, RETRY};
 use crate::server::registry::{self, ClientEntry};
 use crate::server::transport::{exec_timeout_s, shell_quote, wait_deadline};
 use anyhow::{Context, Result};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub(super) fn copy_to(client: &ClientEntry, local: &Path, remote_path: &str) -> Result<()> {
     // scp shares the ssh flags — including the ControlMaster mux,
@@ -39,8 +39,10 @@ pub(super) fn copy_to(client: &ClientEntry, local: &Path, remote_path: &str) -> 
     // pre_connect fires identically to exec: eager on a nonzero
     // streak, else after the first rc-255, once per call.
     let mut hook = PreConnect::new(client);
+    let mut cmd = ssh_tool_cmd(client, "scp")?;
+    cmd.args(&args);
     for attempt in 1..=RETRY {
-        let child = Command::new("scp").args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).spawn().context("spawn scp")?;
+        let child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).spawn().context("spawn scp")?;
         let out = wait_deadline(child, exec_timeout_s(), "scp")?;
         if out.status.success() {
             registry::conn_fail_reset(&client.name);

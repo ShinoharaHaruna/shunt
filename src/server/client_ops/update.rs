@@ -8,14 +8,15 @@ use crate::server::transport;
 use anyhow::Result;
 
 /// Field-level changes for `client update` (endpoint drift, design.md
-/// §4.1). Any unset Option leaves the row field untouched; an empty
-/// `--password ""` clears it. `endpoint_rotates` is tri-state:
+/// §4.1). Any unset Option leaves the row field untouched; empty
+/// `--key ""` and `--password ""` clear their fields. `endpoint_rotates` is tri-state:
 /// Some(true) marks, Some(false) clears a mislabeled row, None leaves
 /// the flag alone — a one-way bool had no path back to false.
 pub struct EndpointUpdate {
     pub host: Option<String>,
     pub port: Option<u16>,
     pub user: Option<String>,
+    pub key: Option<String>,
     pub password: Option<String>,
     pub pre_connect: Option<String>,
     pub endpoint_rotates: Option<bool>,
@@ -33,8 +34,8 @@ pub struct EndpointUpdate {
 /// Server-local: no reachability check; verify with `status -c`.
 pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
     let endpoint_moved = u.host.is_some() || u.port.is_some() || u.user.is_some();
-    if !endpoint_moved && u.password.is_none() && u.pre_connect.is_none() && u.endpoint_rotates.is_none() {
-        anyhow::bail!("nothing to update — pass --host/--port/--user/--password/--pre-connect/--endpoint-rotates (other row fields — qroot, deploy_root, expire, env_setup — are hand-edited in clients/<name>.toml)");
+    if !endpoint_moved && u.key.is_none() && u.password.is_none() && u.pre_connect.is_none() && u.endpoint_rotates.is_none() {
+        anyhow::bail!("nothing to update — pass --host/--port/--user/--key/--password/--pre-connect/--endpoint-rotates (other row fields — qroot, deploy_root, expire, env_setup — are hand-edited in clients/<name>.toml)");
     }
     if u.port == Some(0) {
         anyhow::bail!("--port 0 is not a usable endpoint");
@@ -42,6 +43,7 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
     let mut e = registry::load_client(name)?;
     let (old_host, old_port) = (e.ssh.host.clone(), e.ssh.port);
     let mut changes: Vec<String> = Vec::new();
+    let mut key_changed = false;
     if let Some(h) = u.host {
         changes.push(format!("ssh.host: {old_host} -> {h}"));
         e.ssh.host = h;
@@ -53,6 +55,13 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
     if let Some(user) = u.user {
         changes.push(format!("ssh.user: {} -> {user}", e.ssh.user));
         e.ssh.user = user;
+    }
+    if let Some(key) = u.key {
+        if key != e.ssh.key {
+            e.ssh.key = key;
+            changes.push(if e.ssh.key.is_empty() { "ssh.key: cleared".into() } else { "ssh.key: set".into() });
+            key_changed = true;
+        }
     }
     if let Some(pw) = u.password {
         // Never echo the secret into terminal output or logs.
@@ -74,6 +83,12 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
         }
     }
     let path = registry::save_client(&e)?;
+    if key_changed && !endpoint_moved {
+        kill_mux(&e.name);
+    }
+    if !e.local && e.ssh.key.is_empty() && e.ssh.password.is_empty() {
+        eprintln!("warn: client {name} has no auth path — set --key or --password");
+    }
     println!("updated {name}: {}", changes.join(", "));
     println!("wrote {}", path.display());
     // Two rows at one host:port is legal (NAT fronts several boxes
@@ -174,7 +189,7 @@ fn queue_roots(client: &ClientEntry) -> Vec<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{endpoint_peers, ClientEntry};
+    use super::{endpoint_peers, ClientEntry, EndpointUpdate};
 
     use super::super::test_entry as entry;
 
@@ -203,6 +218,26 @@ mod tests {
         assert!(endpoint_peers("a", "", 0).is_empty());
         std::env::remove_var("SHUNT_HOME");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn update_key_empty_clears_to_password_only_auth() {
+        let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-update-key-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let mut client = entry();
+        client.name = "key-clear".into();
+        client.ssh.key = "/old/key".into();
+        client.ssh.password = "pw".into();
+        crate::server::registry::save_client(&client).unwrap();
+
+        super::update("key-clear", EndpointUpdate { host: None, port: None, user: None, key: Some(String::new()), password: None, pre_connect: None, endpoint_rotates: None }).unwrap();
+
+        let saved = crate::server::registry::load_client("key-clear").unwrap();
+        assert!(saved.ssh.key.is_empty());
+        assert!(saved.ssh.password_only());
+        std::env::remove_var("SHUNT_HOME");
+        std::fs::remove_dir_all(home).ok();
     }
 
     #[test]

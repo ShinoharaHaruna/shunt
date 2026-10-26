@@ -134,13 +134,20 @@ pub struct SshEndpoint {
     pub user: String,
     #[serde(default)]
     pub key: String,
-    /// Password for the one-time `ssh-copy-id` key deploy
-    /// (`sshpass`). AutoDL boxes default to password auth, so this is
-    /// how `bootstrap` installs the generated key unattended. Empty
-    /// = no password path; deploy must happen via console or a manual
-    /// ssh-copy-id.
+    /// Password for one-time key deployment (`sshpass`), or for SSH
+    /// transport authentication when `key` is empty. Empty = no
+    /// password path; deployment must happen via console or a manual
+    /// `ssh-copy-id`.
     #[serde(default)]
     pub password: String,
+}
+
+impl SshEndpoint {
+    /// Empty key plus a password selects password-only transport auth
+    /// (§4.1); a configured key always takes precedence.
+    pub fn password_only(&self) -> bool {
+        self.key.is_empty() && !self.password.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

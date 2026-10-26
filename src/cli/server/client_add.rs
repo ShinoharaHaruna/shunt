@@ -36,6 +36,7 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
     anyhow::ensure!(!row.exists(), "client '{name}' already exists (use `client update` or `client rm` first)");
 
     let qroot_explicit = opts.qroot.is_some();
+    let suppress_key_generation = opts.key.as_deref() == Some("");
     let mut entry = match template {
         Some(t) => load_vendor_template(t)?,
         None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new() }, qroot: String::new(), queues: Default::default(), default_queue: None, deploy_root: String::new(), facts: Default::default(), billing: None },
@@ -117,12 +118,12 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
     let execution = crate::server::registry::resolve_queue(&entry, Some(initial_queue))?.client;
     // Dedicated keypair per client (design.md §4.1): generated at
     // registration so the row is usable immediately.
-    if !entry.local {
+    if !entry.local && !suppress_key_generation {
         crate::server::client_ops::ensure_key(&mut entry)?;
     }
     let p = crate::server::registry::save_client(&entry)?;
     println!("wrote {}", p.display());
-    if !entry.local && (entry.ssh.host.is_empty() || entry.ssh.key.is_empty() || entry.ssh.port == 0) {
+    if !entry.local && (entry.ssh.host.is_empty() || entry.ssh.port == 0 || (entry.ssh.key.is_empty() && entry.ssh.password.is_empty())) {
         eprintln!("note: ssh fields still incomplete; edit the row before bootstrap");
     }
     // §4.1 shared: the template default may collide with another
@@ -181,4 +182,34 @@ pub(crate) fn load_vendor_template(name: &str) -> Result<crate::server::registry
     have.dedup();
     let note = if have.is_empty() { format!("no templates found in any of: {}", dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")) } else { format!("available templates: {}", have.join(", ")) };
     anyhow::bail!("no vendor template named {name}; {note}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{client_add, ClientAddOpts};
+
+    fn opts(key: Option<&str>) -> ClientAddOpts {
+        ClientAddOpts { queue: None, host: Some("example.invalid".into()), port: Some(22), user: Some("user".into()), key: key.map(str::to_string), qroot: Some("/data/queue".into()), deploy_root: Some("/data".into()), local: false, expire: None, env_setup: None, shell: None, endpoint_rotates: false, password: Some("pw".into()), bin_path: None, pre_connect: None, shared: false, exit_on_idle: false }
+    }
+
+    #[test]
+    fn explicit_empty_key_suppresses_generation_but_password_alone_does_not() {
+        let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("shunt-add-key-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+
+        client_add("password-only", None, opts(Some(""))).unwrap();
+        let password_only = crate::server::registry::load_client("password-only").unwrap();
+        assert!(password_only.ssh.key.is_empty());
+        assert!(password_only.ssh.password_only());
+
+        client_add("generated", None, opts(None)).unwrap();
+        let generated = crate::server::registry::load_client("generated").unwrap();
+        assert!(!generated.ssh.key.is_empty());
+        assert!(std::path::Path::new(&generated.ssh.key).exists());
+        assert!(std::path::Path::new(&format!("{}.pub", generated.ssh.key)).exists());
+
+        std::env::remove_var("SHUNT_HOME");
+        std::fs::remove_dir_all(home).ok();
+    }
 }

@@ -1,7 +1,5 @@
-//! Real SSH transport: `ssh -p PORT -o BatchMode=yes
-//! -o ConnectTimeout=15 -o ServerAliveInterval=…
-//! -o ServerAliveCountMax=… -i KEY USER@HOST '<quoted argv>'`,
-//! plus `scp` for `copy_to`. ControlMaster mux per client under
+//! Real SSH transport: managed key auth or password-only `sshpass -e`
+//! auth, plus `scp` for `copy_to`. ControlMaster mux per client under
 //! `$SHUNT_HOME/cm/` (design.md §4.1).
 //!
 //! - `exec` — remote argv: rc-255 retry, wire-error surfacing
@@ -16,10 +14,10 @@ use super::{cm_dir, run_pre_connect};
 use crate::server::registry::ClientEntry;
 use anyhow::Result;
 use std::path::Path;
+use std::process::Command;
 
-/// Real transport: `ssh -p PORT -o BatchMode=yes -o ConnectTimeout=15
-/// -o ServerAliveInterval=… -o ServerAliveCountMax=…
-/// -i KEY USER@HOST '<quoted argv>'`.
+/// Real transport: key-auth rows use `BatchMode=yes` and may add `-i KEY`;
+/// password-only rows use sshpass and password-auth flags.
 pub struct SshTransport;
 
 /// rc-255 retries per call so one flap never surfaces; an exhausted
@@ -86,7 +84,7 @@ impl PreConnect {
 }
 
 impl SshTransport {
-    /// ssh connection flags (-p, BatchMode, timeouts, TOFU known_hosts,
+    /// ssh connection flags (-p, auth mode, timeouts, TOFU known_hosts,
     /// key, user@host, mux). Shared by exec, scp, and the tunnel
     /// manager.
     /// There is no safe fallback for a failed `shunt_home()` (HOME
@@ -106,7 +104,13 @@ impl SshTransport {
         // fix, not retries. The socket lives under $SHUNT_HOME/cm/ so
         // nothing touches the user's own ssh config.
         crate::server::fsutil::private_dir(&cm_dir()?)?;
-        let mut v = vec!["-p".into(), client.ssh.port.to_string(), "-o".into(), "BatchMode=yes".into(), "-o".into(), format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)), "-o".into(), "StrictHostKeyChecking=accept-new".into(), "-o".into(), format!("UserKnownHostsFile={kh}"), "-o".into(), "ControlMaster=auto".into(), "-o".into(), format!("ControlPath={}", cm_sock(client)?), "-o".into(), "ControlPersist=60".into()];
+        let mut v = vec!["-p".into(), client.ssh.port.to_string()];
+        if client.ssh.password_only() {
+            v.extend(["-o".into(), "PreferredAuthentications=password".into(), "-o".into(), "PubkeyAuthentication=no".into(), "-o".into(), "NumberOfPasswordPrompts=1".into()]);
+        } else {
+            v.extend(["-o".into(), "BatchMode=yes".into()]);
+        }
+        v.extend(["-o".into(), format!("ConnectTimeout={}", client.ssh_timeout_s.unwrap_or(15)), "-o".into(), "StrictHostKeyChecking=accept-new".into(), "-o".into(), format!("UserKnownHostsFile={kh}"), "-o".into(), "ControlMaster=auto".into(), "-o".into(), format!("ControlPath={}", cm_sock(client)?), "-o".into(), "ControlPersist=60".into()]);
         if !client.ssh.key.is_empty() {
             v.push("-i".into());
             v.push(client.ssh.key.clone());
@@ -121,6 +125,20 @@ impl SshTransport {
     pub(crate) fn target(client: &ClientEntry) -> String {
         format!("{}@{}", client.ssh.user, client.ssh.host)
     }
+}
+
+/// Wrap password-only SSH tools without exposing the secret in argv.
+/// The prompt-capable transport is explicit; ordinary key/agent auth
+/// keeps its existing direct spawn path (§4.1).
+pub(crate) fn ssh_tool_cmd(client: &ClientEntry, tool: &str) -> Result<Command> {
+    if !client.ssh.password_only() {
+        return Ok(Command::new(tool));
+    }
+    let have_sshpass = Command::new("sh").args(["-c", "command -v sshpass >/dev/null 2>&1"]).status().map(|s| s.success()).unwrap_or(false);
+    anyhow::ensure!(have_sshpass, "ssh.password is set with empty ssh.key — install `sshpass` or set ssh.key");
+    let mut cmd = Command::new("sshpass");
+    cmd.args(["-e", tool]).env("SSHPASS", &client.ssh.password);
+    Ok(cmd)
 }
 
 impl super::Transport for SshTransport {

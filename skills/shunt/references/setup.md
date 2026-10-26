@@ -7,10 +7,11 @@ Read this before `client add`, `client rm`, `client update`, `queue add|set`, `p
 shunt touches a machine the user may share with other people. Before registering a box, ask the user these questions — the agent's job is to record the answers, not to choose them:
 
 1. **Is the box shared with other people or workloads?** If yes, register with `--shared`: server-side `shutdown on` then refuses to arm idle poweroff — powering off would kill other users' jobs — and `bootstrap` never auto-deploys the ssh key. On a shared box also prefer `--exit-on-idle` (below) and never suggest `shutdown on` at all.
-2. **SSH identity — three options, let the user pick:**
-   - dedicated shunt keypair + auto-deploy: needs `ssh.password` once; appends one line to `~/.ssh/authorized_keys` on the box (the only write shunt makes outside `<qroot>`). Dedicated boxes only — a `shared` row skips this automatically;
-   - reuse an already-authorized key: `--key ~/.ssh/id_ed25519`, no password, zero `authorized_keys` writes — the recommended choice on a shared box;
-   - manual: leave `ssh.password` empty; bootstrap prints the generated `.pub` for the user to install via the vendor console.
+2. **SSH identity — let the user pick:**
+   - dedicated shunt keypair + auto-deploy: needs `ssh.password` once; appends one line to `~/.ssh/authorized_keys` on the box (the only write shunt makes outside `<qroot>`). Dedicated boxes only — a `shared` row skips this automatically; `client add --password` without `--key` still generates this key for bootstrap to deploy;
+   - reuse an already-authorized key: `--key ~/.ssh/id_ed25519`, no password, zero `authorized_keys` writes;
+   - manual: leave `ssh.password` empty; bootstrap prints the generated `.pub` for the user to install via the vendor console;
+   - password-only transport auth: `client add --key "" --password <password>` (or `client update --key ""` on a row with a password); requires `sshpass` on the dev machine, uses no private key, never touches `authorized_keys`, and skips the `.shunt-owner` claim, so same-qroot collision protection is weaker.
 3. **qroot — REQUIRED: ask for the exact path, never silently take a default.** The whole footprint — queue, binary, daemon state — lives inside `<qroot>`. Vendor templates seed `<deploy_root>/queue`, which is fine on a dedicated box but can collide with another tenant's queue on a shared one; get the user to name an explicit `--qroot` they own (e.g. under their work dir). Outside qroot, shunt writes only the optional authorized_keys line and a small self-cleaned daemon-registry entry under `$XDG_STATE_HOME`/`/tmp`. shunt also guards collisions itself: bootstrap claims the qroot via `<qroot>/.shunt-owner` (the client's ssh pubkey) and refuses a queue already claimed by a different install.
 4. **Daemon residency.** By default `shunt daemon` stays resident after the queue drains. `--exit-on-idle` makes it exit cleanly on drain (the next submit revives it automatically) — the polite choice on shared or heavily-monitored boxes.
 5. **Reachability precondition.** Can the dev machine ssh the box directly, or must something local be established first — a VPN, an overlay interface, a port-forward, a gate to open? Record it as `pre_connect = "<cmd>"` (`--pre-connect` at `client add`/`update`): a `sh -c` snippet that fires once per call after the first connect failure — and before the first attempt while the box is already marked unreachable — then the retries ride whatever it set up. The snippet must be idempotent and non-interactive (stdin is null — no prompts). A precondition needing a resident process hands off to a supervisor (`nmcli`, `systemd`, `autossh`, `openconnect -b`): arranging and supervising whatever keeps it alive is the user's own deployment, never shunt's — a foreground keepalive is killed at the hook's deadline and accomplishes nothing. Where the precondition cannot be automated (manual OTP), write a check that fails fast with a remediation message instead; its stderr rides the unreachable error.
@@ -30,9 +31,11 @@ shunt client add rw-a --template autodl
 #      pre_connect (reachability precondition, design.md §4.1)
 
 #    `shunt client templates` lists what --template accepts.
-# 2. Bootstrap: deploys the pubkey via sshpass when ssh.password is
-#    set (prints the .pub to install once otherwise), probes over raw
-#    SSH, scp's the binary, remote init + start. Host keys are
+# 2. Bootstrap: normally deploys the generated pubkey via sshpass
+#    when ssh.password is set (prints the .pub to install once
+#    otherwise). With explicit --key "" and a password, transport uses
+#    sshpass without generating/deploying a key. Then probes, scp's the
+#    binary, and runs remote init + start. Host keys are
 #    TOFU-accepted into ~/.config/shunt/known_hosts — no known_hosts
 #    maintenance. All execs ride one muxed connection per client
 #    (~/.config/shunt/cm/<name>.sock) — vendors whose sshd sits behind

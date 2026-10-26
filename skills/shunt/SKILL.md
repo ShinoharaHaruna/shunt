@@ -34,7 +34,7 @@ An unread `say` or `decide` is exactly what changes what you were about to do: V
 Before registering a box, ask the user — record their answers, don't choose them:
 
 1. **Shared?** `yes` → `--shared` (blocks idle poweroff and key auto-deploy); never suggest `shutdown on`.
-2. **SSH identity?** dedicated keypair + auto-deploy (needs `ssh.password`), reuse an authorized key (`--key`, the shared-box choice), or manual `.pub` install.
+2. **SSH identity?** dedicated keypair + auto-deploy (needs `ssh.password`), reuse an authorized key (`--key`), manual `.pub` install, or password-only auth (`--key "" --password`; requires dev-machine `sshpass`, leaves `authorized_keys` untouched but skips the `.shunt-owner` claim).
 3. **qroot?** REQUIRED — ask for the exact path; the whole footprint lives inside it. Templates seed `<deploy_root>/queue`, which can collide on shared boxes.
 4. **Residency?** daemon stays resident by default; `--exit-on-idle` exits on drain — polite on shared boxes.
 5. **Reachability?** VPN/overlay/port-forward first → record `pre_connect` (idempotent, non-interactive; resident parts are the user's supervisor problem).
