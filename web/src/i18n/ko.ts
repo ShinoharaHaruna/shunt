@@ -28,7 +28,8 @@ export const ko: Dict = {
   'state.unreachable': '연결 불가',
   'state.expired': '만료됨',
   'skip.expired': '만료 — 자동 조회 중지',
-  'skip.gaveUp': '{n}회 실패 후 일시 중지',
+  'skip.disabled': '비활성화됨 — 자동 조회 중지',
+  'skip.quarantined': '{n}회 연속 연결 실패로 격리됨',
   'skip.backoff': '다음 자동 조회까지 {t}',
 
   'machines.noClients': '등록된 client 없음',

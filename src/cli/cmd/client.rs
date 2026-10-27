@@ -73,7 +73,10 @@ pub fn client(c: &ClientCmd) -> Result<()> {
             Ok(())
         }
         ClientAction::Show { name } => {
-            let e = registry::load_client(name)?;
+            let e = registry::load_client_entry(name)?;
+            if let Some(inactive) = registry::inactive_reason(&e, registry::conn_fail_streak(&e)) {
+                println!("# inactive: {inactive}");
+            }
             println!("{}", toml::to_string_pretty(&e)?);
             Ok(())
         }

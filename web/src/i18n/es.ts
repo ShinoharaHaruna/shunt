@@ -28,7 +28,8 @@ export const es: Dict = {
   'state.unreachable': 'inaccesible',
   'state.expired': 'CADUCADO',
   'skip.expired': 'caducado — sin sondeo automático',
-  'skip.gaveUp': 'en pausa tras {n} fallos',
+  'skip.disabled': 'deshabilitado — sin sondeo automático',
+  'skip.quarantined': 'en cuarentena tras {n} fallos de conexión consecutivos',
   'skip.backoff': 'próximo sondeo en {t}',
 
   'machines.noClients': 'no hay clients registrados',

@@ -28,7 +28,8 @@ export const ptBR: Dict = {
   'state.unreachable': 'inacessível',
   'state.expired': 'EXPIRADO',
   'skip.expired': 'expirado — sem sondagem automática',
-  'skip.gaveUp': 'pausado após {n} falhas',
+  'skip.disabled': 'desativado — sem sondagem automática',
+  'skip.quarantined': 'em quarentena após {n} falhas de conexão consecutivas',
   'skip.backoff': 'próxima sondagem em {t}',
 
   'machines.noClients': 'nenhum client registrado',

@@ -28,7 +28,8 @@ export const fr: Dict = {
   'state.unreachable': 'injoignable',
   'state.expired': 'EXPIRÉ',
   'skip.expired': 'expiré — aucune interrogation automatique',
-  'skip.gaveUp': 'en pause après {n} échecs',
+  'skip.disabled': 'désactivé — aucune interrogation automatique',
+  'skip.quarantined': 'en quarantaine après {n} échecs de connexion consécutifs',
   'skip.backoff': 'prochaine interrogation dans {t}',
 
   'machines.noClients': 'aucun client enregistré',

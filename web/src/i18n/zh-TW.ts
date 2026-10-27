@@ -28,7 +28,8 @@ export const zhTW: Dict = {
   'state.unreachable': '無法連線',
   'state.expired': '已過期',
   'skip.expired': '已過期 — 不再自動探測',
-  'skip.gaveUp': '連續 {n} 次失敗，已暫停',
+  'skip.disabled': '已停用 — 不再自動探測',
+  'skip.quarantined': '連續 {n} 次連線失敗，已隔離',
   'skip.backoff': '下次自動探測還有 {t}',
 
   'machines.noClients': '尚無註冊的 client',

@@ -28,7 +28,8 @@ export const zhCN: Dict = {
   'state.unreachable': '不可达',
   'state.expired': '已过期',
   'skip.expired': '已过期 — 不再自动探测',
-  'skip.gaveUp': '连续 {n} 次失败，已暂停',
+  'skip.disabled': '已禁用 — 不再自动探测',
+  'skip.quarantined': '连续 {n} 次连接失败，已隔离',
   'skip.backoff': '下次自动探测还有 {t}',
 
   'machines.noClients': '尚无注册的 client',

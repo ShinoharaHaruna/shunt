@@ -28,7 +28,8 @@ export const ja: Dict = {
   'state.unreachable': '到達不能',
   'state.expired': '期限切れ',
   'skip.expired': '期限切れ — 自動照会を停止',
-  'skip.gaveUp': '{n} 回失敗のため停止中',
+  'skip.disabled': '無効 — 自動照会なし',
+  'skip.quarantined': '{n} 回連続の接続失敗により隔離中',
   'skip.backoff': '次の自動照会まで {t}',
 
   'machines.noClients': 'クライアント未登録',

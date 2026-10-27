@@ -102,24 +102,29 @@ pub(crate) fn load_client_row(name: &str) -> Result<ClientEntry> {
 }
 
 pub fn load_client(name: &str) -> Result<ClientEntry> {
-    // `localhost` is a peer client (design.md §4.1): the first access
-    // materializes clients/localhost.toml with the defaults
-    // (qroot=$SHUNT_HOME/queue, deploy_root=$HOME), so it sits on disk
-    // editable like any other row. The write is best-effort — an
-    // unwritable HOME still yields the synthesized defaults. `local`
-    // always stands for this name regardless of file contents.
-    if name == "localhost" {
-        let path = shunt_home()?.join("clients").join("localhost.toml");
-        if !path.exists() {
-            let entry = localhost_default()?;
-            let _ = save_client(&entry); // materialize; best-effort
-            return Ok(entry);
-        }
-        let mut entry = load_client_row(name)?;
-        entry.local = true;
-        return usable(entry);
+    usable(load_client_entry(name)?)
+}
+
+/// Load a client row without rejecting `disabled = true`. Scheduling
+/// consumers need the row to classify it before attempting transport;
+/// ordinary client operations still go through `load_client`.
+pub(crate) fn load_client_entry(name: &str) -> Result<ClientEntry> {
+    if name != "localhost" {
+        return load_client_row(name);
     }
-    usable(load_client_row(name)?)
+    // `localhost` is a peer client (design.md §4.1): the first access
+    // materializes the editable defaults. The write is best-effort —
+    // an unwritable HOME still yields the synthesized row. `local`
+    // always stands for this name regardless of file contents.
+    let path = shunt_home()?.join("clients").join("localhost.toml");
+    if !path.exists() {
+        let entry = localhost_default()?;
+        let _ = save_client(&entry);
+        return Ok(entry);
+    }
+    let mut entry = load_client_row(name)?;
+    entry.local = true;
+    Ok(entry)
 }
 
 /// Disabled rows are visible on disk but unusable as clients — and
@@ -142,6 +147,18 @@ fn usable(entry: ClientEntry) -> Result<ClientEntry> {
 fn localhost_default() -> Result<ClientEntry> {
     let home = std::env::var("HOME").context("HOME not set")?;
     Ok(ClientEntry { name: "localhost".into(), local: true, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: "unlimited".into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: shunt_home()?.join("queue").display().to_string(), queues: BTreeMap::new(), default_queue: None, deploy_root: home, facts: BTreeMap::new(), billing: None })
+}
+
+/// Every registered client filename plus the implicit `localhost` row,
+/// including disabled rows so status can expose their reason without loading
+/// them as usable execution targets.
+pub fn list_client_names() -> Result<Vec<String>> {
+    let mut names = list_names("clients")?;
+    if !names.iter().any(|name| name == "localhost") && !shunt_home()?.join("clients/localhost.toml").exists() {
+        names.push("localhost".into());
+    }
+    names.sort();
+    Ok(names)
 }
 
 /// Client names including the pre-registered `localhost`. Disabled

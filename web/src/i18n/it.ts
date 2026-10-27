@@ -28,7 +28,8 @@ export const it: Dict = {
   'state.unreachable': 'irraggiungibile',
   'state.expired': 'SCADUTO',
   'skip.expired': 'scaduto — nessuna verifica automatica',
-  'skip.gaveUp': 'in pausa dopo {n} tentativi falliti',
+  'skip.disabled': 'disabilitato — nessuna verifica automatica',
+  'skip.quarantined': 'in quarantena dopo {n} errori di connessione consecutivi',
   'skip.backoff': 'prossima verifica tra {t}',
 
   'machines.noClients': 'nessun client registrato',

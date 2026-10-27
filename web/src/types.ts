@@ -30,12 +30,16 @@ export interface ClientStatus {
    *  card reports the registry's own data and `queues` is empty
    *  because nobody asked (see ProbeSkip). */
   skip?: ProbeSkip | null
+  inactive?: {
+    reason: 'disabled' | 'expired' | 'quarantined'
+    consecutive_failures?: number
+  } | null
 }
 
 /** Why a background sweep skipped a client — mirrors the server's
- *  `ProbeSkip` (`expired` | `backoff` | `gave_up`). */
+ *  `ProbeSkip` reasons. `gave_up` remains accepted for older servers. */
 export interface ProbeSkip {
-  reason: 'expired' | 'backoff' | 'gave_up'
+  reason: 'disabled' | 'expired' | 'backoff' | 'quarantined' | 'gave_up'
   fails?: number | null
   retry_in_s?: number | null
 }

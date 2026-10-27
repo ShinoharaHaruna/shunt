@@ -28,7 +28,8 @@ export const en = {
   'state.unreachable': 'unreachable',
   'state.expired': 'EXPIRED',
   'skip.expired': 'expired — no automatic probing',
-  'skip.gaveUp': 'paused after {n} failed probes',
+  'skip.disabled': 'disabled — no automatic probing',
+  'skip.quarantined': 'quarantined after {n} consecutive connection failures',
   'skip.backoff': 'next automatic probe in {t}',
 
   'machines.noClients': 'no clients registered',

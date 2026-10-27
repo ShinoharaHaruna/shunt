@@ -10,8 +10,10 @@ type T = ReturnType<typeof useI18n>['t']
 /** Label for a row the background sweep deliberately skipped: why it
  *  is not being asked, in the reader's language. */
 function skipLabel(skip: ProbeSkip, t: T): string {
+  if (skip.reason === 'disabled') return t('skip.disabled')
   if (skip.reason === 'expired') return t('skip.expired')
-  if (skip.reason === 'gave_up') return t('skip.gaveUp', { n: skip.fails ?? 0 })
+  if (skip.reason === 'quarantined' || skip.reason === 'gave_up')
+    return t('skip.quarantined', { n: skip.fails ?? 0 })
   return t('skip.backoff', { t: humanizeSecs(skip.retry_in_s ?? 0) })
 }
 
@@ -37,13 +39,15 @@ function ProbeLine({
           above already carries that answer, and repeating it as
           "unreachable" adds noise until the next sweep re-skips. */}
       {skip && <span>{skipLabel(skip, t)}</span>}
-      <button
-        disabled={probe.busy}
-        onClick={onProbe}
-        className="rounded-full border border-edge px-2 py-0.5 text-[11px] font-medium text-ink-2 transition-colors hover:bg-hover-2 hover:text-ink-1 disabled:opacity-50"
-      >
-        {probe.busy ? t('state.loading') : t('probe.recheck')}
-      </button>
+      {skip?.reason !== 'disabled' && (
+        <button
+          disabled={probe.busy}
+          onClick={onProbe}
+          className="rounded-full border border-edge px-2 py-0.5 text-[11px] font-medium text-ink-2 transition-colors hover:bg-hover-2 hover:text-ink-1 disabled:opacity-50"
+        >
+          {probe.busy ? t('state.loading') : t('probe.recheck')}
+        </button>
+      )}
       {(probe.result || probe.error) && (
         <span className={`w-full ${probe.error ? 'text-c-rse' : 'text-ink-3'}`}>
           {probe.error ?? probe.result}

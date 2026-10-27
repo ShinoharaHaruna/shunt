@@ -101,7 +101,7 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
     if (key_changed || options_changed) && !endpoint_moved {
         kill_mux(&e.name);
     }
-    if options_changed && !endpoint_moved {
+    if !endpoint_moved {
         registry::conn_fail_reset(&e.name);
     }
     if !e.local && e.ssh.key.is_empty() && e.ssh.password.is_empty() {

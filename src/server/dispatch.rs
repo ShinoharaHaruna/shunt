@@ -42,10 +42,7 @@ fn probe_client(t: &dyn Transport, queue: &registry::ResolvedQueue) -> Reach {
             eprintln!("dispatch: {} status reply unparseable (protocol drift?): {e:#}", client.name);
             Reach::Down
         }
-        remote::StatusAnswer::ConnDown(e) => {
-            eprintln!("dispatch: {} queue at {} status failed: {e:#}", client.name, client.qroot);
-            Reach::ConnectionDown
-        }
+        remote::StatusAnswer::ConnDown(_) => Reach::ConnectionDown,
         remote::StatusAnswer::Transport(e) => {
             eprintln!("dispatch: {} queue at {} status failed: {e:#}", client.name, client.qroot);
             Reach::Down
@@ -157,7 +154,7 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
     for (name, entry) in work {
         let client = match clients.entry(name.clone()) {
             std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::btree_map::Entry::Vacant(v) => match registry::load_client(&name) {
+            std::collections::btree_map::Entry::Vacant(v) => match registry::load_client_entry(&name) {
                 Ok(c) => v.insert(c),
                 Err(e) => {
                     eprintln!("dispatch: {name}: {e:#}");
@@ -169,18 +166,11 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
             continue;
         }
 
-        // Once per client per sweep: two reasons to leave it alone. An
-        // expired subscription is never retried (design.md §9) — the
-        // vendor has reclaimed the box, so every touch spends a full ssh
-        // timeout to learn nothing; the spool entry stays staged and
-        // resumes the moment the row's `expire` moves ahead of now (a
-        // renewal edit). A streak at `CONN_FAIL_ESCALATE` backs off to
-        // every Nth sweep (head-of-line blocking, §4.4).
+        // Viability precedes queue resolution and every transport op. Inactive
+        // rows stay quiet; edits renew expired rows and clear old failure state.
         if checked.insert(name.clone()) {
-            if crate::server::status::is_expired(client) {
-                eprintln!("dispatch: {name} expired ({}) — not delivering; renew the row's `expire` to resume", client.expire);
-                down.insert(name.clone());
-            } else if registry::conn_fail_streak(client) >= registry::CONN_FAIL_ESCALATE && !idx.is_multiple_of(PROBE_BACKOFF_EVERY) {
+            let failures = registry::conn_fail_streak(client);
+            if registry::inactive_reason(client, failures).is_some() || failures >= registry::CONN_FAIL_ESCALATE && !idx.is_multiple_of(PROBE_BACKOFF_EVERY) {
                 down.insert(name.clone());
             }
         }

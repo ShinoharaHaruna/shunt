@@ -13,9 +13,15 @@ use std::path::PathBuf;
 /// fires (design.md §4.1 endpoint drift). Agents watch
 /// `connect_failures`/`endpoint_stale` in `status --all --json`.
 pub const CONN_FAIL_ESCALATE: u32 = 3;
+/// Automatic dispatch and background probes quarantine at this streak.
+pub const CONN_FAIL_QUARANTINE: u32 = 9;
 
 fn conn_fail_path(name: &str) -> Result<PathBuf> {
     Ok(shunt_home()?.join("state").join(format!("{name}.fail")))
+}
+
+fn is_quarantined(name: &str, failures: u32) -> bool {
+    super::io::load_client_entry(name).ok().is_some_and(|client| matches!(super::viability::inactive_reason(&client, failures), Some(super::viability::InactiveReason::Quarantined { .. })))
 }
 
 /// Sidecar flock serializing the `.fail` read-modify-write / unlink
@@ -104,11 +110,14 @@ pub fn conn_fail_bump(name: &str) -> u32 {
     // exec`) would interleave read→write and lose a bump.
     let _lock = conn_fail_lock(name);
     let n = conn_fail_read(name) + 1;
-    if let Ok(p) = conn_fail_path(name) {
+    let written = conn_fail_path(name).ok().is_some_and(|p| {
         if let Some(d) = p.parent() {
             let _ = private_dir(d);
         }
-        let _ = write_private(&p, format!("{n}\n{}\n", crate::proto::time::unix_now()));
+        write_private(&p, format!("{n}\n{}\n", crate::proto::time::unix_now())).is_ok()
+    });
+    if written && n == CONN_FAIL_QUARANTINE && is_quarantined(name, n) {
+        eprintln!("client {name} quarantined after {n} consecutive connect failures — edit the row or use `shunt client update` to retry");
     }
     n
 }
@@ -120,10 +129,11 @@ pub fn conn_fail_reset(name: &str) {
     // Same sidecar lock as the bump: without it a concurrent bump's
     // write could recreate the file this unlink just removed.
     let _lock = conn_fail_lock(name);
-    if let Ok(p) = conn_fail_path(name) {
-        if p.exists() {
-            let _ = fs::remove_file(p);
-        }
+    let failures = conn_fail_read(name);
+    let was_quarantined = failures >= CONN_FAIL_QUARANTINE && is_quarantined(name, failures);
+    let cleared = conn_fail_path(name).ok().is_some_and(|p| !p.exists() || fs::remove_file(p).is_ok());
+    if cleared && was_quarantined {
+        eprintln!("client {name} quarantine cleared — automatic probes resumed");
     }
     if let Ok(kh) = super::paths::known_hosts_path(name) {
         if kh.exists() {

@@ -28,7 +28,8 @@ export const id: Dict = {
   'state.unreachable': 'tak terjangkau',
   'state.expired': 'KEDALUWARSA',
   'skip.expired': 'kedaluwarsa — tanpa pemeriksaan otomatis',
-  'skip.gaveUp': 'dijeda setelah {n} percobaan gagal',
+  'skip.disabled': 'dinonaktifkan — tanpa pemeriksaan otomatis',
+  'skip.quarantined': 'dikarantina setelah {n} kegagalan koneksi berturut-turut',
   'skip.backoff': 'pemeriksaan otomatis berikutnya dalam {t}',
 
   'machines.noClients': 'belum ada client terdaftar',

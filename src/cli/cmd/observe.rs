@@ -9,6 +9,23 @@ use crate::cli::server::{print_subhelp, remote_queue, rootless};
 use anyhow::Result;
 
 pub fn status(a: &StatusArgs) -> Result<()> {
+    // Ordinary client resolution excludes disabled rows. Status is the
+    // exception: it can report the registry state without contacting them.
+    if !a.all && a.as_label.is_none() && a.queue.is_none() {
+        if let Some(typed) = a.client.as_deref() {
+            use crate::server::registry::names::Resolution;
+            let disabled = match crate::server::registry::names::resolve(typed, &crate::server::registry::list_names("clients")?) {
+                Resolution::Exact(name) | Resolution::Canonical { canonical: name, .. } if crate::server::registry::load_client_row(&name).is_ok_and(|row| row.disabled) => Some(name),
+                _ => None,
+            };
+            if let Some(name) = disabled {
+                if name != typed {
+                    eprintln!("note: resolved '{typed}' → disabled client '{name}'");
+                }
+                return crate::server::status::run_client(&name, a.json);
+            }
+        }
+    }
     // --as only makes sense on the server aggregate (§17.5:
     // the rooms block); its presence implies --all. clap
     // already rejects combining it with -c/--root.

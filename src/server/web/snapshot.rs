@@ -111,10 +111,9 @@ pub fn probe(client: &str, probe: &str) -> anyhow::Result<String> {
     t.exec(&c, &argv, None)
 }
 
-/// Force one status query for a client (`POST /api/reprobe`): exactly
-/// what `status -c` runs, bypassing the §4.1 penalty and the §9 expiry
-/// gate — an explicit click is the decision to spend the ssh, and a
-/// successful answer clears the failure streak on the way through.
+/// Force one status query for a client (`POST /api/reprobe`): bypasses
+/// quarantine and expiry, but `client_transport` rejects disabled rows.
+/// A successful answer clears the failure streak on the way through.
 pub fn reprobe(client: &str) -> anyhow::Result<crate::server::status::ClientStatus> {
     use crate::server::transport;
     let (c, t) = transport::client_transport(client)?;

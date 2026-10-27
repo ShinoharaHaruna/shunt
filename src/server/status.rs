@@ -2,9 +2,10 @@
 //! per-client `status --json` over SSH plus registry billing metadata.
 //! Unreachable clients are reported, never fatal.
 
-use crate::server::registry::{self, ClientEntry};
+use crate::server::registry::{self, ClientEntry, InactiveReason};
+use crate::server::registry::{expire_epoch, expires_left_s};
 use crate::server::remote;
-use crate::server::transport::{client_transport, transport_for, Transport};
+use crate::server::transport::{transport_for, Transport};
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -60,15 +61,19 @@ pub struct ClientStatus {
     /// answered with nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skip: Option<ProbeSkip>,
+    /// The row is intentionally or automatically inactive, even when an
+    /// explicit probe was requested and returned a fresh answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inactive: Option<InactiveReason>,
 }
 
 /// Why a background sweep skipped a client (design.md §4.1, §9, §18).
-/// `reason` is a stable token (`expired`, `backoff`, `gave_up`) the
-/// dashboard maps to a label; both surfaces stay on the same truth.
+/// `reason` is a stable token the dashboard maps to a label; both surfaces
+/// stay on the same truth.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProbeSkip {
     pub reason: &'static str,
-    /// Consecutive connect failures behind a `backoff`/`gave_up` skip.
+    /// Consecutive connect failures behind a `backoff`/`quarantined` skip.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fails: Option<u32>,
     /// Seconds until the next automatic attempt (`backoff` only).
@@ -79,63 +84,14 @@ pub struct ProbeSkip {
 /// Automatic-probe penalty (design.md §4.1). Once a client's ssh
 /// streak reaches `CONN_FAIL_ESCALATE` the background sweep retries it
 /// on a doubling clock instead of every tick — 30 s, 1 min, 2 min …
-/// capped at 10 min — and at `PROBE_GIVE_UP` consecutive failures it
-/// stops entirely: a box gone this long (~30 min of the schedule) gets
-/// one deliberate action from a human or agent, never another
-/// background ssh.
+/// capped at 10 min — and at `CONN_FAIL_QUARANTINE` consecutive failures
+/// it stops entirely until an explicit probe or row update.
 const PROBE_PENALTY_BASE_S: i64 = 30;
 const PROBE_PENALTY_CAP_S: i64 = 600;
-pub const PROBE_GIVE_UP: u32 = 9;
-
-/// Howard Hinnant's days-from-civil: proleptic-Gregorian days since
-/// 1970-01-01. std has no datetime math, so we carry the tiny
-/// formula ourselves rather than add a dependency for it.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
-
-/// Epoch seconds for an `expire` string that parses as an ISO-8601
-/// datetime WITH an offset (`+08:00`/`Z`). Without an offset we
-/// cannot know the zone (std has no local-tz) — return None and the
-/// row's raw string still reports.
-fn expire_epoch(s: &str) -> Option<i64> {
-    use toml::value::{Datetime, Offset};
-    let dt = s.trim().parse::<Datetime>().ok()?;
-    let d = dt.date?;
-    let t = dt.time.unwrap_or(toml::value::Time { hour: 0, minute: 0, second: 0, nanosecond: 0 });
-    let secs = days_from_civil(i64::from(d.year), i64::from(d.month), i64::from(d.day)) * 86400 + i64::from(t.hour) * 3600 + i64::from(t.minute) * 60 + i64::from(t.second);
-    let off = match dt.offset {
-        Some(Offset::Z) => 0i64,
-        Some(Offset::Custom { minutes }) => i64::from(minutes) * 60,
-        None => return None,
-    };
-    Some(secs - off)
-}
+pub const PROBE_GIVE_UP: u32 = registry::CONN_FAIL_QUARANTINE;
 
 fn now_epoch() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
-}
-
-/// Seconds until the row's `expire` deadline; `None` when the field
-/// carries no timestamp with an offset (`unlimited`, `metered`, empty,
-/// or a zoneless datetime — §9).
-fn expires_left_s(client: &ClientEntry) -> Option<i64> {
-    expire_epoch(&client.expire).map(|e| e - now_epoch())
-}
-
-/// The subscription behind this row is over (`expire` is a timestamp
-/// in the past). Such a row is never retried automatically — the
-/// vendor has reclaimed the box, so every further ssh is a wasted
-/// ConnectTimeout against an endpoint that will not answer again
-/// (design.md §9). Editing `expire` (renewal) or an explicit probe is
-/// the only thing that brings it back.
-pub fn is_expired(client: &ClientEntry) -> bool {
-    expires_left_s(client).is_some_and(|left| left < 0)
+    crate::proto::time::unix_now() as i64
 }
 
 /// Seconds the background sweep waits after the `streak`-th failure.
@@ -144,18 +100,15 @@ fn probe_penalty_s(streak: u32) -> i64 {
     PROBE_PENALTY_BASE_S.saturating_mul(1 << steps.min(5)).min(PROBE_PENALTY_CAP_S)
 }
 
-/// Decide whether a background probe may touch this client. Three
-/// gates, in order: an expired subscription (never again), a streak at
-/// `PROBE_GIVE_UP` (the box has been gone for tens of minutes — stop
-/// and let a human act), and the doubling penalty window since the
-/// last failure. An explicit `status -c`/`--all` or the dashboard's
-/// "probe now" bypasses all three.
+/// Decide whether a background probe may touch this client. Inactive
+/// rows are always skipped; an explicit probe bypasses expiry/quarantine,
+/// but never a disabled row. Remaining failures use the doubling penalty.
 fn probe_skip(client: &ClientEntry, streak: u32, last_fail: Option<i64>, now: i64) -> Option<ProbeSkip> {
-    if is_expired(client) {
-        return Some(ProbeSkip { reason: "expired", fails: None, retry_in_s: None });
-    }
-    if streak >= PROBE_GIVE_UP {
-        return Some(ProbeSkip { reason: "gave_up", fails: Some(streak), retry_in_s: None });
+    match registry::inactive_reason(client, streak) {
+        Some(InactiveReason::Disabled) => return Some(ProbeSkip { reason: "disabled", fails: None, retry_in_s: None }),
+        Some(InactiveReason::Expired) => return Some(ProbeSkip { reason: "expired", fails: None, retry_in_s: None }),
+        Some(InactiveReason::Quarantined { consecutive_failures }) => return Some(ProbeSkip { reason: "quarantined", fails: Some(consecutive_failures), retry_in_s: None }),
+        None => {}
     }
     if streak < registry::CONN_FAIL_ESCALATE {
         return None;
@@ -170,16 +123,17 @@ fn probe_skip(client: &ClientEntry, streak: u32, last_fail: Option<i64>, now: i6
 /// itself knows, plus why. `queues` is empty because nobody asked.
 fn skipped_status(client: &ClientEntry, skip: ProbeSkip) -> ClientStatus {
     let fails = registry::conn_fail_streak(client);
-    ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: None, billing: client.billing.clone(), expire: (!client.expire.is_empty()).then(|| client.expire.clone()), expires_in_s: expires_left_s(client), connect_failures: (fails > 0).then_some(fails), endpoint_rotates: client.endpoint_rotates, facts: (!client.facts.is_empty()).then(|| client.facts.clone()), skip: Some(skip) }
+    ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: None, billing: client.billing.clone(), expire: (!client.expire.is_empty()).then(|| client.expire.clone()), expires_in_s: expires_left_s(client), connect_failures: (fails > 0).then_some(fails), endpoint_rotates: client.endpoint_rotates, facts: (!client.facts.is_empty()).then(|| client.facts.clone()), skip: Some(skip), inactive: registry::inactive_reason(client, fails) }
 }
 
-/// Query one client; used by `status -c` and the aggregate loop. Always
-/// probes — the skip policy lives in `probe_all`'s background mode.
+/// Query one client; used by `status -c` and the aggregate loop. Explicit
+/// probes may bypass expiry/quarantine, but disabled rows never reach transport.
 pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
+    if client.disabled {
+        return skipped_status(client, ProbeSkip { reason: "disabled", fails: None, retry_in_s: None });
+    }
     let expire = (!client.expire.is_empty()).then(|| client.expire.clone());
     let expires_in_s = expires_left_s(client);
-    let fails = registry::conn_fail_streak(client);
-    let connect_failures = (fails > 0).then_some(fails);
     let endpoint_rotates = client.endpoint_rotates;
     let mut queues = BTreeMap::new();
     let mut errors = Vec::new();
@@ -208,7 +162,10 @@ pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
         Err(e) => errors.push(format!("cannot resolve queues: {e:#}")),
     }
     let report = if queues.len() == 1 { queues.values().next().and_then(|q| q.report.clone()) } else { None };
-    ClientStatus { reachable: queues.values().any(|q| q.reachable), queues, report, error: (!errors.is_empty()).then(|| errors.join("; ")), billing: client.billing.clone(), expire, expires_in_s, connect_failures, endpoint_rotates, facts: (!client.facts.is_empty()).then(|| client.facts.clone()), skip: None }
+    let fails = registry::conn_fail_streak(client);
+    let connect_failures = (fails > 0).then_some(fails);
+    let inactive = registry::inactive_reason(client, fails);
+    ClientStatus { reachable: queues.values().any(|q| q.reachable), queues, report, error: (!errors.is_empty()).then(|| errors.join("; ")), billing: client.billing.clone(), expire, expires_in_s, connect_failures, endpoint_rotates, facts: (!client.facts.is_empty()).then(|| client.facts.clone()), skip: None, inactive }
 }
 
 /// §15 three-state verdict for a binary that answered: the wire
@@ -241,16 +198,22 @@ fn compat_footnotes(name: &str, status: &ClientStatus) {
 /// Preserve the single-queue wire surface, but never hide sibling queues
 /// behind a configured execution default when an instance status is requested.
 pub fn run_client(name: &str, json: bool) -> Result<()> {
-    let (client, transport) = client_transport(name)?;
+    let client = registry::load_client_entry(name)?;
+    let transport = transport_for(&client);
     let status = query(transport.as_ref(), &client);
     compat_footnotes(name, &status);
     if status.queues.len() == 1 {
         let queue = status.queues.values().next().unwrap();
         if let Some(report) = &queue.report {
-            println!("{}", serde_json::to_string_pretty(report)?);
+            let mut report = report.clone();
+            if let Some(inactive) = &status.inactive {
+                report["inactive"] = serde_json::to_value(inactive)?;
+            }
+            println!("{}", serde_json::to_string_pretty(&report)?);
             return Ok(());
         }
-        anyhow::bail!("{}: {}; re-run `shunt client bootstrap {name}` if the queue binary is missing or stale", name, queue.error.as_deref().unwrap_or("queue status unavailable"));
+        let reason = status.inactive.as_ref().map(|inactive| format!("; inactive: {inactive}")).unwrap_or_default();
+        anyhow::bail!("{}{reason}: {}; re-run `shunt client bootstrap {name}` if the queue binary is missing or stale", name, queue.error.as_deref().unwrap_or("queue status unavailable"));
     }
     if json {
         let mut value = serde_json::to_value(&status)?;
@@ -280,17 +243,16 @@ pub struct ProbedClient {
 /// sorted order regardless of join timing.
 ///
 /// `force` picks the policy: `true` is an explicit request (`status
-/// --all`, the dashboard's "probe now") and always pays the ssh;
-/// `false` is the background sweep and honours `probe_skip` — an
-/// expired subscription, a gone-quiet box, or a failure still inside
-/// its penalty window is reported from the registry alone.
+/// --all`, the dashboard's "probe now") and bypasses expiry/quarantine;
+/// disabled rows remain non-probeable. `false` is the background sweep
+/// and honours `probe_skip`, reporting inactive/backoff rows from the registry.
 pub fn probe_all(force: bool) -> Result<Vec<ProbedClient>> {
-    let names = registry::list_clients()?;
-    let clients: Vec<Result<ClientEntry>> = names.iter().map(|n| registry::load_client(n)).collect();
+    let names = registry::list_client_names()?;
+    let clients: Vec<Result<ClientEntry>> = names.iter().map(|n| registry::load_client_entry(n)).collect();
     // Skipped rows never reach `spawn`: the saving IS the point.
     let now = now_epoch();
     let skip_for = |c: &ClientEntry| probe_skip(c, registry::conn_fail_streak(c), registry::conn_fail_at(&c.name), now);
-    let skips: Vec<Option<ProbeSkip>> = clients.iter().map(|c| if force { None } else { c.as_ref().ok().and_then(skip_for) }).collect();
+    let skips: Vec<Option<ProbeSkip>> = clients.iter().map(|c| c.as_ref().ok().and_then(|c| if force && !c.disabled { None } else { skip_for(c) })).collect();
     // Scoped threads borrow `clients`; each builds its own transport
     // (`Box<dyn Transport>` is not Sync, and transports are cheap).
     let statuses: Vec<ClientStatus> = std::thread::scope(|s| {
@@ -314,8 +276,8 @@ pub fn probe_all(force: bool) -> Result<Vec<ProbedClient>> {
                 // A panicked probe degrades to an error row like
                 // every other failure mode here — one bad thread
                 // must never abort the whole aggregate.
-                (None, Some(h)) => h.join().unwrap_or_else(|_| ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: Some("probe panicked".into()), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None, skip: None }),
-                (None, None) => ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: Some(format!("cannot load row: {:#}", c.as_ref().unwrap_err())), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None, skip: None },
+                (None, Some(h)) => h.join().unwrap_or_else(|_| ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: Some("probe panicked".into()), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None, skip: None, inactive: None }),
+                (None, None) => ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: Some(format!("cannot load row: {:#}", c.as_ref().unwrap_err())), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None, skip: None, inactive: None },
             })
             .collect()
     });
@@ -443,8 +405,9 @@ fn rows_for(client: &ClientEntry, st: &ClientStatus) -> Vec<Vec<String>> {
 /// (design.md §4.1 penalty, §9 expiry).
 fn skip_note(skip: &ProbeSkip) -> String {
     match skip.reason {
+        "disabled" => "disabled — automatic probing off".into(),
         "expired" => "expired — automatic probing off".into(),
-        "gave_up" => format!("paused after {} failed probes — manual probe only", skip.fails.unwrap_or_default()),
+        "quarantined" | "gave_up" => format!("quarantined ({} consecutive failures)", skip.fails.unwrap_or_default()),
         "backoff" => format!("paused: {} failed probes, next try in {}m", skip.fails.unwrap_or_default(), (skip.retry_in_s.unwrap_or(0) + 59) / 60),
         other => format!("skipped ({other})"),
     }
@@ -485,15 +448,20 @@ fn row_for(client: &ClientEntry, st: &ClientStatus, queue: Option<&QueueStatus>)
                 // the state tag only.
                 note = format!("{note} bin:{}", c.split(':').next().unwrap_or(c)).trim().into();
             }
+            if let Some(inactive) = &st.inactive {
+                note = format!("{note} inactive: {inactive}").trim().into();
+            }
             vec![client.name.clone(), transport, daemon, pending, running, expire, note]
         }
         None => {
-            let note = match &st.skip {
-                Some(skip) => skip_note(skip),
-                None => {
-                    let err = error.unwrap_or("unreachable").lines().next().unwrap_or("unreachable");
-                    err.chars().take(60).collect()
-                }
+            let inactive = st.inactive.as_ref().map(ToString::to_string);
+            let skip = st.skip.as_ref().map(skip_note);
+            let err = error.map(|err| err.lines().next().unwrap_or("unreachable").chars().take(60).collect::<String>());
+            let note = match (inactive.or(skip), err) {
+                (Some(reason), Some(error)) => format!("{reason}: {error}"),
+                (Some(reason), None) => reason,
+                (None, Some(error)) => error,
+                (None, None) => "unreachable".into(),
             };
             vec![client.name.clone(), transport, "-".into(), "-".into(), "-".into(), expire, note]
         }
@@ -506,16 +474,6 @@ mod tests {
 
     fn row(expire: &str) -> ClientEntry {
         ClientEntry { name: "box".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: expire.into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: registry::SshEndpoint::default(), qroot: "/q".into(), deploy_root: "/root".into(), facts: Default::default(), billing: None, queues: Default::default(), default_queue: None }
-    }
-
-    #[test]
-    fn expired_means_a_past_timestamp_only() {
-        assert!(is_expired(&row("2020-01-01T00:00:00Z")));
-        assert!(!is_expired(&row("2999-01-01T00:00:00Z")));
-        // Keywords and zoneless datetimes carry no deadline: never expired.
-        for v in ["unlimited", "metered", "", "2020-01-01T00:00:00"] {
-            assert!(!is_expired(&row(v)), "{v:?} must not read as expired");
-        }
     }
 
     /// The penalty doubles from 30 s per failure past the escalation
@@ -542,7 +500,7 @@ mod tests {
         // No timestamp (pre-upgrade streak file) never blocks a probe.
         assert_eq!(probe_skip(&live, 3, None, now), None);
         // The cap stops the background sweep outright.
-        assert_eq!(probe_skip(&live, PROBE_GIVE_UP, Some(now), now), Some(ProbeSkip { reason: "gave_up", fails: Some(PROBE_GIVE_UP), retry_in_s: None }));
+        assert_eq!(probe_skip(&live, PROBE_GIVE_UP, Some(now), now), Some(ProbeSkip { reason: "quarantined", fails: Some(PROBE_GIVE_UP), retry_in_s: None }));
         // Expiry outranks every streak state — infinite failures never
         // earn another background attempt.
         assert_eq!(probe_skip(&row("2020-01-01T00:00:00Z"), 0, None, now), Some(ProbeSkip { reason: "expired", fails: None, retry_in_s: None }));
@@ -561,26 +519,10 @@ mod tests {
         assert_eq!(st.skip.as_ref().map(|s| s.reason), Some("expired"));
         assert!(st.expires_in_s.is_some_and(|left| left < 0));
         let note = rows_for(&client, &st)[0][6].clone();
-        assert_eq!(note, "expired — automatic probing off");
-        let gave_up = skip_note(&ProbeSkip { reason: "gave_up", fails: Some(PROBE_GIVE_UP), retry_in_s: None });
-        assert!(gave_up.contains(&PROBE_GIVE_UP.to_string()) && gave_up.contains("manual probe only"), "{gave_up}");
+        assert_eq!(note, "expired");
+        let quarantined = skip_note(&ProbeSkip { reason: "quarantined", fails: Some(PROBE_GIVE_UP), retry_in_s: None });
+        assert_eq!(quarantined, "quarantined (9 consecutive failures)");
         let backoff = skip_note(&ProbeSkip { reason: "backoff", fails: Some(4), retry_in_s: Some(61) });
         assert!(backoff.contains("2m"), "{backoff}");
-    }
-
-    #[test]
-    fn expire_parsing() {
-        // Keywords and unknowns never produce an epoch.
-        assert_eq!(expire_epoch("unlimited"), None);
-        assert_eq!(expire_epoch("metered"), None);
-        assert_eq!(expire_epoch(""), None);
-        assert_eq!(expire_epoch("next friday"), None);
-        // Offset-bearing timestamps do; 2026-01-20T18:00+08:00 = 10:00Z.
-        let e = expire_epoch("2026-01-20T18:00:00+08:00").unwrap();
-        assert_eq!(e, expire_epoch("2026-01-20T10:00:00Z").unwrap());
-        // Naive timestamp (no offset): raw reports, epoch skips.
-        assert_eq!(expire_epoch("2026-01-20T18:00:00"), None);
-        // Date-only parses but carries no offset — same rule.
-        assert_eq!(expire_epoch("2026-01-20"), None);
     }
 }
