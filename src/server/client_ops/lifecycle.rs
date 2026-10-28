@@ -178,10 +178,14 @@ pub fn remove(name: &str, purge: bool) -> Result<()> {
     }
     // After rekey's `ssh -O exit` ask: a dead master never removes
     // cm/<name>.sock itself — §4.1 counts it among the deregistered
-    // state (rename already unlinks its old socket above).
+    // state (rename already unlinks its old socket above). The
+    // askpass script is the same name-keyed credential state —
+    // rekey's kill_mux already dropped it, this catches a row that
+    // errored out before that point.
     if let Ok(sock) = crate::server::transport::cm_dir().map(|d| d.join(format!("{name}.sock"))) {
         let _ = std::fs::remove_file(sock);
     }
+    super::hygiene::drop_askpass(name);
     std::fs::remove_file(&row)?;
     let default_key = registry::client_key_path(name)?;
     if e.ssh.key == default_key.display().to_string() {

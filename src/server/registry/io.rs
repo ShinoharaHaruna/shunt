@@ -52,7 +52,8 @@ const CLIENT_HEADER: &str = "\
 #   local_bin                          loopback transport: binary to exec (default: running shunt)
 #   timeout_s                          loopback transport: exec timeout seconds
 #   ssh_timeout_s                      ssh transport: ConnectTimeout (default 15)
-#   ssh.password                       plaintext; key deploy or sshpass transport auth when ssh.key is empty
+#   ssh.password                       plaintext; key deploy, or password transport auth (SSH_ASKPASS,
+#                                      sshpass on pre-8.4 ssh) when ssh.key is empty
 #   ssh.options                        per-client OpenSSH -o options (ProxyCommand/ProxyJump, etc.);
 #                                      prefer `shunt client update <name> --option` — it kills the mux
 #                                      and resets the conn-fail streak. A hand-edit rides the

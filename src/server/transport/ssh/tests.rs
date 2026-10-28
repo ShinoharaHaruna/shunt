@@ -119,6 +119,10 @@ fn base_args_append_client_options_after_managed_flags_and_skip_blanks() {
 #[test]
 fn password_only_requires_sshpass_with_actionable_error() {
     let _g = ENV_LOCK.lock().unwrap();
+    // Pin the pre-8.4 branch: with an empty PATH the real `ssh -V`
+    // probe would be unanswerable, and the OnceLock may already
+    // hold another test's modern version.
+    std::env::set_var("SHUNT_SSH_VERSION", "OpenSSH_8.0p1");
     let dir = std::env::temp_dir().join(format!("shunt-no-sshpass-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::os::unix::fs::symlink("/bin/sh", dir.join("sh")).unwrap();
@@ -128,6 +132,7 @@ fn password_only_requires_sshpass_with_actionable_error() {
     client.ssh.password = "pw".into();
     let err = super::ssh_tool_cmd(&client, "ssh").unwrap_err();
     assert!(err.to_string().contains("install `sshpass` or set ssh.key"), "{err}");
+    std::env::remove_var("SHUNT_SSH_VERSION");
     match old_path {
         Some(path) => std::env::set_var("PATH", path),
         None => std::env::remove_var("PATH"),
@@ -187,6 +192,9 @@ fn ssh_exec_passes_custom_options_after_managed_keepalives() {
 fn password_only_exec_uses_sshpass_env_not_argv() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
+    // Pre-8.4 pin: the sshpass fallback must exist for old ssh, so
+    // exercise it deliberately rather than on the host's version.
+    std::env::set_var("SHUNT_SSH_VERSION", "OpenSSH_8.0p1");
     let home = std::env::temp_dir().join(format!("shunt-ssh-password-exec-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
     let dir = std::env::temp_dir().join(format!("shunt-sshpass-observe-{}", std::process::id()));
@@ -216,9 +224,86 @@ fn password_only_exec_uses_sshpass_env_not_argv() {
         Some(path) => std::env::set_var("PATH", path),
         None => std::env::remove_var("PATH"),
     }
+    std::env::remove_var("SHUNT_SSH_VERSION");
     std::env::remove_var("SHUNT_HOME");
     std::fs::remove_dir_all(home).ok();
     std::fs::remove_dir_all(dir).ok();
+}
+
+/// OpenSSH ≥ 8.4 password auth goes through `SSH_ASKPASS` +
+/// `SSH_ASKPASS_REQUIRE=force`, not sshpass: sshpass's pty
+/// teardown SIGHUPs the ssh ProxyCommand child, which kills the
+/// mux master's transport — the reason ControlPersist never
+/// persisted on password clients (design.md §4.1).
+#[test]
+fn password_only_exec_uses_askpass_env_not_sshpass() {
+    let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("SHUNT_SSH_VERSION", "OpenSSH_9.6p1");
+    let home = std::env::temp_dir().join(format!("shunt-ssh-askpass-home-{}", std::process::id()));
+    std::env::set_var("SHUNT_HOME", &home);
+    let dir = std::env::temp_dir().join(format!("shunt-ssh-askpass-observe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let argv = dir.join("argv");
+    let env = dir.join("env");
+    std::env::set_var("FAKE_ARGV", &argv);
+    std::env::set_var("FAKE_ENV", &env);
+    fake_ssh("printf '%s\\n' \"$@\" > \"$FAKE_ARGV\"; printf '%s\\n' \"$SSH_ASKPASS\" \"$SSH_ASKPASS_REQUIRE\" \"$DISPLAY\" > \"$FAKE_ENV\"; exit 0");
+
+    let mut client = ssh_client();
+    client.ssh.password = "secret value".into();
+    SshTransport.exec(&client, &["status".into()], None).unwrap();
+
+    let args = std::fs::read_to_string(&argv).unwrap();
+    assert!(!args.contains("secret value"), "the password must never appear in argv: {args}");
+    assert!(!args.contains("sshpass"), "the askpass path must not wrap the tool: {args}");
+    let env_lines: Vec<String> = std::fs::read_to_string(&env).unwrap().lines().map(String::from).collect();
+    let script = home.join("cm").join(format!("{}.askpass", client.name));
+    assert_eq!(env_lines[0], script.display().to_string(), "SSH_ASKPASS must point at the generated script");
+    assert_eq!(env_lines[1], "force");
+    assert_eq!(env_lines[2], ":0");
+    let body = std::fs::read_to_string(&script).unwrap();
+    assert_eq!(body, "#!/bin/sh\nprintf '%s\\n' 'secret value'\n");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(&script).unwrap().permissions().mode() & 0o777, 0o700);
+    // Idempotent: a second spawn walks the same code without a
+    // rewrite (the retry loop re-enters askpass_script).
+    let mtime = std::fs::metadata(&script).unwrap().modified().unwrap();
+    super::askpass_script(&client).unwrap();
+    assert_eq!(std::fs::metadata(&script).unwrap().modified().unwrap(), mtime);
+
+    std::env::remove_var("FAKE_ARGV");
+    std::env::remove_var("FAKE_ENV");
+    std::env::remove_var("SHUNT_SSH_VERSION");
+    std::env::remove_var("SHUNT_HOME");
+    restore_path();
+    std::fs::remove_dir_all(home).ok();
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// The ≥8.4 cutoff for `SSH_ASKPASS_REQUIRE`, driven through the
+/// `SHUNT_SSH_VERSION` seam — the OnceLock caches only the real
+/// `ssh -V` probe, so the env override must decide every call.
+#[test]
+fn askpass_require_gate_honors_env_seam() {
+    let _g = ENV_LOCK.lock().unwrap();
+    for (v, want) in [("OpenSSH_8.4p1", true), ("OpenSSH_9.6p1", true), ("OpenSSH_10.0p2 Debian-1", true), ("OpenSSH_8.3p1", false), ("OpenSSH_7.4", false), ("unparseable", false)] {
+        std::env::set_var("SHUNT_SSH_VERSION", v);
+        assert_eq!(super::askpass_require_supported(), want, "{v}");
+    }
+    std::env::remove_var("SHUNT_SSH_VERSION");
+}
+
+#[test]
+fn parses_openssh_version_banner() {
+    use super::parse_openssh_version as parse;
+    assert_eq!(parse("OpenSSH_9.6p1 Ubuntu-3ubuntu13, OpenSSL 3.0.13"), Some((9, 6)));
+    assert_eq!(parse("OpenSSH_8.4p1"), Some((8, 4)));
+    assert_eq!(parse("OpenSSH_10.0p2 Debian-1, OpenSSL 3.x"), Some((10, 0)));
+    assert_eq!(parse("OpenSSH_7.4"), Some((7, 4)));
+    assert_eq!(parse("OpenSSH_8"), None);
+    assert_eq!(parse("not a version"), None);
+    assert_eq!(parse(""), None);
 }
 
 #[test]
@@ -354,6 +439,7 @@ fn scp_passes_serveralive() {
 fn password_only_scp_uses_sshpass_wrapper() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("SHUNT_SSH_VERSION", "OpenSSH_8.0p1");
     let home = std::env::temp_dir().join(format!("shunt-scp-password-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
     let dir = std::env::temp_dir().join(format!("shunt-scp-password-observe-{}", std::process::id()));
@@ -384,6 +470,7 @@ fn password_only_scp_uses_sshpass_wrapper() {
         Some(path) => std::env::set_var("PATH", path),
         None => std::env::remove_var("PATH"),
     }
+    std::env::remove_var("SHUNT_SSH_VERSION");
     std::env::remove_var("SHUNT_HOME");
     std::fs::remove_dir_all(home).ok();
     std::fs::remove_dir_all(dir).ok();

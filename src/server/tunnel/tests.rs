@@ -285,12 +285,14 @@ fn tunnel_argv_disables_mux_before_conn_args() {
     assert_eq!(argv.last().map(String::as_str), Some("u@h"));
 }
 
-/// Password-only tunnel creation also goes through sshpass, with the
-/// secret kept in SSHPASS rather than the wrapper's argv.
+/// Password-only tunnel creation goes through sshpass on pre-8.4
+/// ssh (the SSH_ASKPASS fallback), with the secret kept in SSHPASS
+/// rather than the wrapper's argv.
 #[test]
 fn password_only_tunnel_spawn_uses_sshpass_env() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = crate::server::transport::ENV_LOCK.lock().unwrap();
+    std::env::set_var("SHUNT_SSH_VERSION", "OpenSSH_8.0p1");
     let home = tmp("password-up-home");
     let old_home = std::env::var_os("SHUNT_HOME");
     std::env::set_var("SHUNT_HOME", &home);
@@ -338,6 +340,7 @@ exec "$tool" "$@"
     let _ = crate::client::exec::signal_pgid(pid, "KILL");
     std::env::remove_var("FAKE_ARGV");
     std::env::remove_var("FAKE_PASSWORD");
+    std::env::remove_var("SHUNT_SSH_VERSION");
     match old_path {
         Some(path) => std::env::set_var("PATH", path),
         None => std::env::remove_var("PATH"),

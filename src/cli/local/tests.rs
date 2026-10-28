@@ -1,4 +1,4 @@
-use super::logs::{render_dlog_line, tail_bytes};
+use super::logs::{render_dlog_line, tail_bytes, tail_file};
 use super::tasks::find_task;
 use super::{agent_cancel, agent_cat, agent_clean, agent_enqueue, agent_hold, agent_kill, agent_prio, agent_release, logs_wire_tail, workers_wire_tail};
 use crate::cli::args::{CatArgs, CleanArgs, EnqueueArgs, HoldArgs, LogsArgs, PatternArgs, PrioArgs, WorkerAction, WorkersArgs};
@@ -24,6 +24,45 @@ fn tail_bytes_keeps_last_n_lines() {
     // L10 regression: -n 0 must print nothing, not the whole file.
     assert_eq!(tail_bytes(b"a\nb\nc\n", 0), b"");
     assert_eq!(tail_bytes(b"", 0), b"");
+}
+
+/// The backward chunked read must byte-match `tail_bytes` on the
+/// whole buffer, however the lines land across chunk boundaries —
+/// that equivalence IS the contract, so test it rather than the
+/// internals.
+#[test]
+fn tail_file_matches_tail_bytes_across_chunk_boundaries() {
+    let dir = tmp_root("tailfile");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A ~150 KiB single line spans several read chunks whatever
+    // CHUNK is; short lines around it exercise boundary alignment.
+    let mut body = String::new();
+    for i in 0..50 {
+        body.push_str(&format!("head {i}\n"));
+    }
+    body.push_str(&"x".repeat(150 * 1024));
+    body.push('\n');
+    for i in 0..10 {
+        body.push_str(&format!("tail {i}\n"));
+    }
+    let cases: Vec<(Vec<u8>, usize)> = vec![
+        (body.clone().into_bytes(), 1),                  // inside the last chunk
+        (body.clone().into_bytes(), 11),                 // reaches the chunk-spanning line
+        (body.clone().into_bytes(), 61),                 // n == line count → whole file
+        (body.clone().into_bytes(), 100),                // n beyond line count → whole file
+        (body.as_bytes()[..body.len() - 1].to_vec(), 1), // no trailing newline
+        (b"a\nb\nc\n".to_vec(), 2),                      // smaller than one chunk
+        (b"a\nb\nc".to_vec(), 1),                        // small + no trailing newline
+        (b"a\nb\nc\n".to_vec(), 0),                      // n = 0
+        (b"".to_vec(), 3),                               // empty file
+        (b"\n\n\n".to_vec(), 2),                         // only blank lines
+    ];
+    for (i, (bytes, n)) in cases.iter().enumerate() {
+        let p = dir.join(format!("case{i}"));
+        std::fs::write(&p, bytes).unwrap();
+        assert_eq!(&tail_file(&p, *n).unwrap()[..], tail_bytes(bytes, *n), "case {i} (n={n})");
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

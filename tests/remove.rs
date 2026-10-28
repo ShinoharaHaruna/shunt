@@ -36,10 +36,13 @@ fn remove_cleans_row_keys_state_spool_and_bindings() -> Result<()> {
     // The streak's sidecar flock must not orphan (issue #8).
     std::fs::write(state.join("gone.fail.lock"), "")?;
     // A dead mux master never unlinks its own socket; §4.1 counts
-    // cm/<name>.sock among the deregistered state.
+    // cm/<name>.sock among the deregistered state. The generated
+    // askpass script is the same name-keyed credential file.
     let sock = home.join("cm").join("gone.sock");
     std::fs::create_dir_all(sock.parent().unwrap())?;
     std::fs::write(&sock, "")?;
+    let askpass = home.join("cm").join("gone.askpass");
+    std::fs::write(&askpass, "#!/bin/sh\n")?;
 
     client_ops::remove("gone", false)?;
 
@@ -48,6 +51,7 @@ fn remove_cleans_row_keys_state_spool_and_bindings() -> Result<()> {
     assert!(!state.join("gone.fail").exists());
     assert!(!state.join("gone.fail.lock").exists());
     assert!(!sock.exists());
+    assert!(!askpass.exists());
     assert!(spool::list()?.is_empty());
     assert!(registry::load_project("p")?.bind.is_empty());
 

@@ -35,7 +35,7 @@ An unread `say` or `decide` is exactly what changes what you were about to do: V
 Before registering a box, ask the user — record their answers, don't choose them:
 
 1. **Shared?** `yes` → `--shared` (blocks idle poweroff and key auto-deploy); never suggest `shutdown on`.
-2. **SSH identity?** dedicated keypair + auto-deploy (needs `ssh.password`), reuse an authorized key (`--key`), manual `.pub` install, or password-only auth (`--key "" --password`; requires dev-machine `sshpass`, leaves `authorized_keys` untouched but skips the `.shunt-owner` claim).
+2. **SSH identity?** dedicated keypair + auto-deploy (needs `ssh.password`), reuse an authorized key (`--key`), manual `.pub` install, or password-only auth (`--key "" --password`; authenticates via `SSH_ASKPASS` on OpenSSH ≥ 8.4, `sshpass` fallback otherwise, leaves `authorized_keys` untouched but skips the `.shunt-owner` claim).
 3. **qroot?** REQUIRED — ask for the exact path; the whole footprint lives inside it. Templates seed `<deploy_root>/queue`, which can collide on shared boxes.
 4. **Residency?** daemon stays resident by default; `--exit-on-idle` exits on drain — polite on shared boxes.
 5. **Reachability?** SSH-layer proxy or bastion → `client update <name> --option 'ProxyCommand=...'` (repeatable; `--no-options` clears — a changed list kills the mux master and resets the failure streak so it takes effect); a VPN/overlay/port-forward that must be established first → record `pre_connect` (idempotent, non-interactive; resident parts are the user's supervisor problem).

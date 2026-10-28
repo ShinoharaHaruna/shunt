@@ -55,6 +55,40 @@ pub(crate) fn logs_wire_tail(a: &LogsArgs) -> Vec<String> {
     tail
 }
 
+/// Read just enough of `path`'s tail for `tail_bytes` to slice the
+/// last `n` lines: bounded chunks backward from EOF until the buffer
+/// holds `n` line breaks, then slice the collected suffix. A
+/// whole-file read paid O(log size) per request — logs only grow,
+/// so every `logs -n`/`dlog` reread the head to print a short tail.
+pub(crate) fn tail_file(path: &std::path::Path, n: usize) -> Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    const CHUNK: u64 = 64 * 1024;
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let mut tail: Vec<u8> = Vec::new();
+    let mut covered = len;
+    while covered > 0 {
+        let start = covered.saturating_sub(CHUNK);
+        f.seek(SeekFrom::Start(start))?;
+        let mut chunk = vec![0u8; (covered - start) as usize];
+        f.read_exact(&mut chunk)?;
+        chunk.extend_from_slice(&tail);
+        tail = chunk;
+        covered = start;
+        // tail_bytes scans bytes[..len - trailing_nl] for the n-th
+        // newline from the end; once that many are buffered, more
+        // head data cannot change the slice it returns.
+        let region = tail.len() - usize::from(tail.last() == Some(&b'\n'));
+        if tail[..region].iter().filter(|&&b| b == b'\n').count() >= n {
+            break;
+        }
+    }
+    Ok(tail_bytes(&tail, n).to_vec())
+}
+
 /// The last `n` newline-terminated lines of `bytes`. A trailing
 /// newline is a terminator, not an empty extra line; fewer than
 /// `n` lines returns the whole buffer.
@@ -125,8 +159,7 @@ pub(crate) fn agent_logs(a: &LogsArgs) -> Result<()> {
                     match a.tail {
                         Some(n) => {
                             use std::io::Write;
-                            let bytes = std::fs::read(&m[0])?;
-                            let _ = std::io::stdout().write_all(tail_bytes(&bytes, n));
+                            let _ = std::io::stdout().write_all(&tail_file(&m[0], n)?);
                         }
                         None => print_file(&m[0]),
                     }
@@ -195,11 +228,15 @@ fn dlog_impl(a: &RootArgs, tail: Option<usize>) -> Result<()> {
     let path = root.join("daemon.log");
     // Render JSONL human-readable: `[ts] event k=v`. `--json` skips
     // the render — daemon.log IS JSONL, so the wire form is the file
-    // verbatim (still tail-sliced).
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        let lines: Vec<&str> = text.lines().collect();
-        let skip = tail.map_or(0, |n| lines.len().saturating_sub(n));
-        for line in &lines[skip..] {
+    // verbatim (still tail-sliced). A bounded tail reads backward
+    // from EOF; the daemon log only grows, so rereading its head per
+    // request would scale O(log size) for a 200-line answer.
+    let text = match tail {
+        Some(n) => tail_file(&path, n).ok().and_then(|b| String::from_utf8(b).ok()),
+        None => std::fs::read_to_string(&path).ok(),
+    };
+    if let Some(text) = text {
+        for line in text.lines() {
             if a.json {
                 println!("{line}");
             } else {

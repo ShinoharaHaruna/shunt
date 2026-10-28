@@ -135,9 +135,9 @@ pub struct SshEndpoint {
     #[serde(default)]
     pub key: String,
     /// Password for one-time key deployment (`sshpass`), or for SSH
-    /// transport authentication when `key` is empty. Empty = no
-    /// password path; deployment must happen via console or a manual
-    /// `ssh-copy-id`.
+    /// transport authentication when `key` is empty (`SSH_ASKPASS`,
+    /// `sshpass` on pre-8.4 ssh). Empty = no password path;
+    /// deployment must happen via console or a manual `ssh-copy-id`.
     #[serde(default)]
     pub password: String,
     /// Per-client OpenSSH options for reachability customization

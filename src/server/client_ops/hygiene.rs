@@ -71,6 +71,17 @@ pub(crate) fn kill_mux(name: &str) {
             let _ = std::process::Command::new("ssh").args(["-S", &sock.display().to_string(), "-O", "exit", "x"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
         }
     }
+    drop_askpass(name);
+}
+
+/// Drop the generated `cm/<name>.askpass`. It pins the row's
+/// plaintext password, so any path that kills the master — or
+/// rotates the credential — must not leave the stale secret on
+/// disk; the next password-only spawn regenerates it on demand.
+pub(crate) fn drop_askpass(name: &str) {
+    if let Ok(f) = crate::server::transport::cm_dir().map(|d| d.join(format!("{name}.askpass"))) {
+        let _ = std::fs::remove_file(f);
+    }
 }
 
 /// `shunt client hostkey <name>`: drop the box's host-key entries

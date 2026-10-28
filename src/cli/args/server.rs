@@ -143,7 +143,7 @@ pub struct ClientAddArgs {
     /// SSH private key path (default: generated; --key "" suppresses generation)
     #[arg(long)]
     pub key: Option<String>,
-    /// SSH password for one-time key deploy; with --key "", enables password-only sshpass auth. --password alone still generates a key
+    /// SSH password for one-time key deploy; with --key "", enables password-only SSH_ASKPASS auth. --password alone still generates a key
     #[arg(long)]
     pub password: Option<String>,
     /// Queue dir on the box (template default: deploy_root/queue)
@@ -229,10 +229,10 @@ pub enum ClientAction {
         /// New SSH user
         #[arg(long)]
         user: Option<String>,
-        /// Set SSH private key path; empty clears it (empty + password enables sshpass auth)
+        /// Set SSH private key path; empty clears it (empty + password enables password-only auth)
         #[arg(long)]
         key: Option<String>,
-        /// New SSH password (empty clears); used for key deploy or sshpass auth when ssh.key is empty
+        /// New SSH password (empty clears); used for key deploy or password-only auth when ssh.key is empty
         #[arg(long)]
         password: Option<String>,
         /// Mark the vendor as one that reassigns IP/port on restart.

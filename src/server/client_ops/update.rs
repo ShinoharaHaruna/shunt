@@ -2,7 +2,7 @@
 //! row's ssh endpoint fields after the vendor moved the box and
 //! cleans the connection state pinned to the dead endpoint.
 
-use super::hygiene::{drop_hostkey, kill_mux};
+use super::hygiene::{drop_askpass, drop_hostkey, kill_mux};
 use crate::server::registry::{self, ClientEntry};
 use crate::server::transport;
 use anyhow::Result;
@@ -49,6 +49,7 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
     let mut changes: Vec<String> = Vec::new();
     let mut key_changed = false;
     let mut options_changed = false;
+    let mut password_touched = false;
     if let Some(h) = u.host {
         changes.push(format!("ssh.host: {old_host} -> {h}"));
         e.ssh.host = h;
@@ -71,6 +72,7 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
     if let Some(pw) = u.password {
         // Never echo the secret into terminal output or logs.
         changes.push(if pw.is_empty() { "ssh.password: cleared".into() } else { "ssh.password: set".into() });
+        password_touched = true;
         e.ssh.password = pw;
     }
     if let Some(pc) = u.pre_connect {
@@ -100,6 +102,13 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
     let path = registry::save_client(&e)?;
     if (key_changed || options_changed) && !endpoint_moved {
         kill_mux(&e.name);
+    }
+    // kill_mux drops the generated askpass too, but a password-only
+    // change takes no kill path: a rotated password would leave the
+    // script pinned to the old secret, a cleared one would leave it
+    // forever — it regenerates on the next password-only spawn.
+    if password_touched {
+        drop_askpass(&e.name);
     }
     if !endpoint_moved {
         registry::conn_fail_reset(&e.name);

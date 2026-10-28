@@ -293,9 +293,15 @@ export function LogPane({
   const [err, setErr] = useState<string | null>(null)
   const box = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
+  const inFlight = useRef(false)
 
   useEffect(() => {
+    // A snapAt tick landing mid-fetch must skip: each fetch is a
+    // remote ssh op, and overlapping polls would stack handshakes
+    // on a slow password-auth client instead of taking turns.
+    if (inFlight.current) return
     let cancelled = false
+    inFlight.current = true
     fetchLogs(client, queue, pattern, tail)
       .then((r) => {
         if (cancelled) return
@@ -308,6 +314,9 @@ export function LogPane({
       })
       .catch((e: unknown) => {
         if (!cancelled) setErr(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => {
+        inFlight.current = false
       })
     return () => {
       cancelled = true
