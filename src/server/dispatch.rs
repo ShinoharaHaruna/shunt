@@ -170,7 +170,18 @@ fn sweep_inner(forced: Option<&dyn Transport>, idx: u64) -> Result<usize> {
         // rows stay quiet; edits renew expired rows and clear old failure state.
         if checked.insert(name.clone()) {
             let failures = registry::conn_fail_streak(client);
-            if registry::inactive_reason(client, failures).is_some() || failures >= registry::CONN_FAIL_ESCALATE && !idx.is_multiple_of(PROBE_BACKOFF_EVERY) {
+            // Quarantine stays silent only for a row with no repair
+            // hook: with `pre_connect` declared the endpoint's
+            // reachability is conditional on a precondition the hook
+            // restores, so the row degrades to the escalate cadence —
+            // the probe fires the hook and can clear the streak
+            // (design.md §4.1).
+            let hard_inactive = match registry::inactive_reason(client, failures) {
+                Some(registry::InactiveReason::Quarantined { .. }) => client.pre_connect.trim().is_empty(),
+                Some(_) => true,
+                None => false,
+            };
+            if hard_inactive || failures >= registry::CONN_FAIL_ESCALATE && !idx.is_multiple_of(PROBE_BACKOFF_EVERY) {
                 down.insert(name.clone());
             }
         }

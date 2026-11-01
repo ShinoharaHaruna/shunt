@@ -177,11 +177,28 @@ fn pre_connect_timeout_s() -> u64 {
 /// out`), or None when no hook is configured. Callers fire it at
 /// most once per call: after the first rc-255, or before the first
 /// attempt when the conn-fail streak is already nonzero.
+/// One hook at a time, across threads and processes: sibling clients
+/// commonly share one reachability precondition (one VPN bring-up),
+/// and parallel probe/dispatch workers would otherwise fire N copies
+/// of the same script. A sidecar file, not the registry row — the
+/// lock must survive row edits. Best-effort like `conn_fail_lock`.
+fn pre_connect_gate() -> Option<std::fs::File> {
+    use fs2::FileExt;
+    let lp = registry::shunt_home().ok()?.join("state").join("pre_connect.lock");
+    if let Some(d) = lp.parent() {
+        crate::server::fsutil::private_dir(d).ok()?;
+    }
+    let f = std::fs::OpenOptions::new().create(true).append(true).open(lp).ok()?;
+    f.lock_exclusive().ok()?;
+    Some(f)
+}
+
 pub(crate) fn run_pre_connect(client: &ClientEntry) -> Option<String> {
     let snippet = client.pre_connect.trim();
     if snippet.is_empty() {
         return None;
     }
+    let _gate = pre_connect_gate();
     // process_group(0) so the deadline kill takes grandchildren too
     // — same discipline as every other spawned child here.
     let child = std::process::Command::new("sh").arg("-c").arg(snippet).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).process_group(0).spawn();
