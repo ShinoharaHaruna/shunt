@@ -161,7 +161,7 @@ fn pat_args(root: &std::path::Path, pattern: &str) -> PatternArgs {
 }
 
 fn tmp_root(tag: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("shunt-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()))
+    crate::testutil::tmp_base().join(format!("shunt-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()))
 }
 
 /// A pending miss must name the pattern's hits in the other tracks
@@ -225,7 +225,7 @@ fn kill_miss_names_pending_and_pidless_hits() {
 /// would list as two pending tasks (design.md §3.14).
 #[test]
 fn prio_refuses_cross_shape_target() {
-    let root = std::env::temp_dir().join(format!("shunt-prio-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-prio-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     let pending = root.join("pending");
     std::fs::create_dir_all(&pending).unwrap();
     // Flat source 0001_a.sh + dir target 0002_a/.

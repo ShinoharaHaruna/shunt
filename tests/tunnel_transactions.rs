@@ -1,5 +1,7 @@
 //! Cross-process tunnel transactions use only a networkless SSH stand-in.
 
+mod common;
+
 use anyhow::Result;
 use fs2::FileExt;
 use shunt::server::registry::{ClientEntry, SshEndpoint};
@@ -87,7 +89,7 @@ impl Fixture {
         // when a worker exits. Reap only this fixture's recorded mock PIDs.
         static SUBREAPER: std::sync::Once = std::sync::Once::new();
         SUBREAPER.call_once(|| assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) }, 0));
-        let home = std::env::temp_dir().join(format!("shunt-tunnel-tx-{tag}-{}", std::process::id()));
+        let home = common::tmp_base().join(format!("shunt-tunnel-tx-{tag}-{}", std::process::id()));
         fs::create_dir_all(home.join("bin"))?;
         fs::create_dir_all(home.join("tunnels"))?;
         let f = Self { home };

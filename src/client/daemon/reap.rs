@@ -354,7 +354,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmp_root(tag: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("shunt-reaptest-{tag}-{}", std::process::id()));
+        let root = crate::testutil::tmp_base().join(format!("shunt-reaptest-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         queue::init(&root).unwrap();
         root

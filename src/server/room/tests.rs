@@ -18,7 +18,7 @@ fn split_index_weights_bytes_not_count() {
 
 #[test]
 fn initialization_requires_exclusive_directory_ownership() {
-    let dir = std::env::temp_dir().join(format!("shunt-room-exclusive-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-room-exclusive-{}", std::process::id()));
     let _ = fs::remove_dir(&dir);
     fs::create_dir(&dir).unwrap();
     let mut initialized = false;
@@ -33,7 +33,7 @@ fn initialization_requires_exclusive_directory_ownership() {
 
 #[test]
 fn failed_initialization_cleans_only_its_own_directory() {
-    let dir = std::env::temp_dir().join(format!("shunt-room-failure-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-room-failure-{}", std::process::id()));
     let moved = dir.with_extension("original");
     let result = initialize_room(&dir, |dir| {
         fs::create_dir(dir.join("msgs"))?;

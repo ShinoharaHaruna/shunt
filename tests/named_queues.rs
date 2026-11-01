@@ -2,6 +2,8 @@
 //! `train` + `eval` qroots, daemons, sequence allocators, and ledgers.
 //! Everything runs inside one tmp $SHUNT_HOME; no ssh, no remote box.
 
+mod common;
+
 use anyhow::Result;
 use shunt::proto::task::TaskFlags;
 use shunt::server::transport::{queue_exec, LocalTransport};
@@ -21,7 +23,7 @@ struct Sandbox {
 impl Sandbox {
     fn new() -> Result<Self> {
         let home = HOME_LOCK.lock().unwrap();
-        let root = std::env::temp_dir().join(format!("shunt-mq-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
+        let root = common::tmp_base().join(format!("shunt-mq-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
         std::fs::create_dir_all(&root)?;
         std::env::set_var("SHUNT_HOME", &root);
         std::env::set_var("POLL", "0.2");

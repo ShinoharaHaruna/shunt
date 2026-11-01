@@ -12,7 +12,7 @@ struct RegistryHome {
 
 impl RegistryHome {
     fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("shunt-queues-{label}-{}", std::process::id()));
+        let path = crate::testutil::tmp_base().join(format!("shunt-queues-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         let previous = std::env::var_os("SHUNT_HOME");
         std::env::set_var("SHUNT_HOME", &path);

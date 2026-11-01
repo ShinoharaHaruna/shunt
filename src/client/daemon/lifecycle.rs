@@ -264,7 +264,7 @@ mod tests {
     /// draining; other pids and unrelated events cannot mask a crash.
     #[test]
     fn idle_exit_evidence_is_pid_scoped() {
-        let root = std::env::temp_dir().join(format!("shunt-start-idle-test-{}", std::process::id()));
+        let root = crate::testutil::tmp_base().join(format!("shunt-start-idle-test-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("daemon.log"), "{\"event\":\"daemon_start\",\"pid\":123}\n{\"event\":\"daemon_exit_idle\",\"pid\":123}\n").unwrap();
         assert!(logged_idle_exit(&root, 123));
@@ -280,7 +280,7 @@ mod tests {
     /// duplicate daemons get spawned.
     #[test]
     fn unreadable_cmdline_keeps_pidfile() {
-        let root = std::env::temp_dir().join(format!("shunt-alive-test-{}-u", std::process::id()));
+        let root = crate::testutil::tmp_base().join(format!("shunt-alive-test-{}-u", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let pidf = root.join("daemon.pid");
         // our own pid: /proc/<pid> exists
@@ -296,7 +296,7 @@ mod tests {
     /// recycled): the pidfile is stale and gets removed.
     #[test]
     fn mismatched_cmdline_removes_pidfile() {
-        let root = std::env::temp_dir().join(format!("shunt-alive-test-{}-m", std::process::id()));
+        let root = crate::testutil::tmp_base().join(format!("shunt-alive-test-{}-m", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let pidf = root.join("daemon.pid");
         std::fs::write(&pidf, format!("{}", std::process::id())).unwrap();
@@ -319,7 +319,7 @@ mod tests {
     /// healthy daemon pidfile-less.
     #[test]
     fn dead_probe_keeps_rewritten_pidfile() {
-        let root = std::env::temp_dir().join(format!("shunt-alive-test-{}-r", std::process::id()));
+        let root = crate::testutil::tmp_base().join(format!("shunt-alive-test-{}-r", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let pidf = root.join("daemon.pid");
         std::fs::write(&pidf, format!("{}", std::process::id())).unwrap();

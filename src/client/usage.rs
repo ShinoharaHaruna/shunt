@@ -228,7 +228,7 @@ mod tests {
     /// missing file reads as absent, never an error.
     #[test]
     fn usage_file_roundtrip_and_missing() {
-        let root = std::env::temp_dir().join(format!("shunt-usage-{}", std::process::id()));
+        let root = crate::testutil::tmp_base().join(format!("shunt-usage-{}", std::process::id()));
         let entry = root.join("running").join("0100_x");
         std::fs::create_dir_all(&entry).unwrap();
         assert!(read_usage(&root, "running", "0100_x").is_none());

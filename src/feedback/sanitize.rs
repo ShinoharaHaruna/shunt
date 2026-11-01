@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn secrets_plucks_ssh_option_array_entries() {
         let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
-        let home = std::env::temp_dir().join(format!("shunt-option-secrets-{}", std::process::id()));
+        let home = crate::testutil::tmp_base().join(format!("shunt-option-secrets-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(home.join("clients")).unwrap();
         let proxy = "ProxyCommand=nc -X 5 -x proxy-secret.example:1080 %h %p";
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn names_reads_each_registry_domain() {
         let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
-        let home = std::env::temp_dir().join(format!("shunt-names-{}", std::process::id()));
+        let home = crate::testutil::tmp_base().join(format!("shunt-names-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(home.join("clients")).unwrap();
         fs::create_dir_all(home.join("projects")).unwrap();

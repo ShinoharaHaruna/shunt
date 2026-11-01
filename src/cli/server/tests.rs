@@ -3,7 +3,7 @@ use super::{required_client, resolve_client};
 use crate::server::registry::tests::HOME_LOCK;
 
 fn tmp_home(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("shunt-cli-{tag}-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-cli-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

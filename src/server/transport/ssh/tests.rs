@@ -17,7 +17,7 @@ use super::super::ENV_LOCK;
 /// Install a fake `ssh` ahead on PATH; returns the tmp dir.
 /// `script` is the whole shell body; argv reaches it as $@.
 fn fake_ssh(script: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("shunt-fakessh-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-fakessh-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("ssh");
     std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
@@ -39,7 +39,7 @@ fn restore_path() {
 }
 
 fn fake_sshpass(script: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("shunt-fakesshpass-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-fakesshpass-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("sshpass");
     std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
@@ -62,7 +62,7 @@ fn ssh_client() -> ClientEntry {
 fn password_only_base_args_select_password_auth_and_keep_mux() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-ssh-password-args-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-ssh-password-args-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
     let mut client = ssh_client();
     client.ssh.password = "pw".into();
@@ -90,7 +90,7 @@ fn password_only_base_args_select_password_auth_and_keep_mux() {
 fn base_args_append_client_options_after_managed_flags_and_skip_blanks() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-ssh-options-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-ssh-options-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
     let mut client = ssh_client();
     client.ssh.key = "/managed-key".into();
@@ -123,7 +123,7 @@ fn password_only_requires_sshpass_with_actionable_error() {
     // probe would be unanswerable, and the OnceLock may already
     // hold another test's modern version.
     std::env::set_var("SHUNT_SSH_VERSION", "OpenSSH_8.0p1");
-    let dir = std::env::temp_dir().join(format!("shunt-no-sshpass-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-no-sshpass-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::os::unix::fs::symlink("/bin/sh", dir.join("sh")).unwrap();
     let old_path = std::env::var_os("PATH");
@@ -143,7 +143,7 @@ fn password_only_requires_sshpass_with_actionable_error() {
 #[test]
 fn ssh_exec_passes_serveralive() {
     let _g = ENV_LOCK.lock().unwrap();
-    let dir = std::env::temp_dir().join(format!("shunt-fakessh-out-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-fakessh-out-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let argfile = dir.join("argv");
     std::env::set_var("FAKE_ARGV", &argfile);
@@ -161,9 +161,9 @@ fn ssh_exec_passes_serveralive() {
 fn ssh_exec_passes_custom_options_after_managed_keepalives() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-ssh-custom-exec-home-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-ssh-custom-exec-home-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
-    let dir = std::env::temp_dir().join(format!("shunt-ssh-custom-exec-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-ssh-custom-exec-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let argfile = dir.join("argv");
     std::env::set_var("FAKE_ARGV", &argfile);
@@ -195,9 +195,9 @@ fn password_only_exec_uses_sshpass_env_not_argv() {
     // Pre-8.4 pin: the sshpass fallback must exist for old ssh, so
     // exercise it deliberately rather than on the host's version.
     std::env::set_var("SHUNT_SSH_VERSION", "OpenSSH_8.0p1");
-    let home = std::env::temp_dir().join(format!("shunt-ssh-password-exec-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-ssh-password-exec-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
-    let dir = std::env::temp_dir().join(format!("shunt-sshpass-observe-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-sshpass-observe-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let argv = dir.join("argv");
     let password = dir.join("password");
@@ -240,9 +240,9 @@ fn password_only_exec_uses_askpass_env_not_sshpass() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
     std::env::set_var("SHUNT_SSH_VERSION", "OpenSSH_9.6p1");
-    let home = std::env::temp_dir().join(format!("shunt-ssh-askpass-home-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-ssh-askpass-home-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
-    let dir = std::env::temp_dir().join(format!("shunt-ssh-askpass-observe-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-ssh-askpass-observe-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let argv = dir.join("argv");
     let env = dir.join("env");
@@ -337,9 +337,9 @@ fn ssh_exec_surfaces_remote_wire_error() {
 fn ssh_exec_255_with_wire_line_still_retries() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-ssh-home255-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-ssh-home255-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
-    let dir = std::env::temp_dir().join(format!("shunt-fakessh-255-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-fakessh-255-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let count = dir.join("count");
     fake_ssh(&format!("printf '%s\\n' '{{\"protocol\":1,\"ok\":false,\"error\":\"stale\"}}'; n=$(cat {0} 2>/dev/null || echo 0); echo $((n+1)) > {0}; exit 255", count.display()));
@@ -374,7 +374,7 @@ fn base_args_errs_when_home_unusable() {
 
 /// Install a fake `scp` ahead on PATH (same pattern as `fake_ssh`).
 fn fake_scp(script: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("shunt-fakescp-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-fakescp-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("scp");
     std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
@@ -392,9 +392,9 @@ fn fake_scp(script: &str) -> std::path::PathBuf {
 fn scp_retries_255_flaps_then_succeeds() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-scp-home-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-scp-home-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
-    let dir = std::env::temp_dir().join(format!("shunt-fakescp-out-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-fakescp-out-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let count = dir.join("count");
     fake_scp(&format!("n=$(cat {0} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {0}; [ $n -lt 3 ] && exit 255; exit 0", count.display()));
@@ -410,9 +410,9 @@ fn scp_retries_255_flaps_then_succeeds() {
 fn scp_passes_serveralive() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-scp-home4-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-scp-home4-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
-    let dir = std::env::temp_dir().join(format!("shunt-fakescp-out4-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-fakescp-out4-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let argfile = dir.join("argv");
     std::env::set_var("FAKE_ARGV", &argfile);
@@ -440,9 +440,9 @@ fn password_only_scp_uses_sshpass_wrapper() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
     std::env::set_var("SHUNT_SSH_VERSION", "OpenSSH_8.0p1");
-    let home = std::env::temp_dir().join(format!("shunt-scp-password-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-scp-password-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
-    let dir = std::env::temp_dir().join(format!("shunt-scp-password-observe-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-scp-password-observe-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let argv = dir.join("argv");
     let password = dir.join("password");
@@ -480,9 +480,9 @@ fn password_only_scp_uses_sshpass_wrapper() {
 fn scp_uses_legacy_protocol_with_shell_quoted_paths() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-scp-home3-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-scp-home3-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
-    let dir = std::env::temp_dir().join(format!("shunt-fakescp-out3-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-fakescp-out3-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let argfile = dir.join("argv");
     let marker = dir.join("injected");
@@ -521,9 +521,9 @@ fn scp_uses_legacy_protocol_with_shell_quoted_paths() {
 fn pre_connect_fires_once_on_first_255() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-ssh-pc1-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-ssh-pc1-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
-    let dir = std::env::temp_dir().join(format!("shunt-pc1-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-pc1-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let count = dir.join("count");
     let marker = dir.join("hook");
@@ -545,9 +545,9 @@ fn pre_connect_fires_once_on_first_255() {
 fn pre_connect_runs_eagerly_on_nonzero_streak() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-ssh-pc2-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-ssh-pc2-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
-    let dir = std::env::temp_dir().join(format!("shunt-pc2-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-pc2-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let order = dir.join("order");
     fake_ssh(&format!("echo ssh >> {}; exit 0", order.display()));
@@ -568,9 +568,9 @@ fn pre_connect_runs_eagerly_on_nonzero_streak() {
 fn pre_connect_failure_named_in_unreachable_error() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-ssh-pc3-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-ssh-pc3-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
-    let dir = std::env::temp_dir().join(format!("shunt-pc3-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-pc3-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let count = dir.join("count");
     fake_ssh(&format!("n=$(cat {0} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {0}; exit 255", count.display()));
@@ -589,7 +589,7 @@ fn pre_connect_failure_named_in_unreachable_error() {
 fn pre_connect_timeout_named_in_unreachable_error() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-ssh-pc4-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-ssh-pc4-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
     std::env::set_var("SHUNT_PRE_CONNECT_TIMEOUT_S", "1");
     fake_ssh("exit 255");
@@ -608,9 +608,9 @@ fn pre_connect_timeout_named_in_unreachable_error() {
 fn wire_error_does_not_trigger_pre_connect() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-ssh-pc5-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-ssh-pc5-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
-    let dir = std::env::temp_dir().join(format!("shunt-pc5-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-pc5-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let marker = dir.join("hook");
     fake_ssh("printf '%s\\n' '{\"protocol\":1,\"ok\":false,\"error\":\"sequence space exhausted\"}'; exit 1");
@@ -629,10 +629,10 @@ fn wire_error_does_not_trigger_pre_connect() {
 fn deadline_hang_does_not_trigger_pre_connect() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-ssh-pc6-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-ssh-pc6-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
     std::env::set_var("SHUNT_SSH_EXEC_TIMEOUT_S", "1");
-    let dir = std::env::temp_dir().join(format!("shunt-pc6-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-pc6-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let marker = dir.join("hook");
     fake_ssh("sleep 30");
@@ -650,10 +650,10 @@ fn deadline_hang_does_not_trigger_pre_connect() {
 fn scp_deadline_bails_without_retry() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-scp-home2-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-scp-home2-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
     std::env::set_var("SHUNT_SSH_EXEC_TIMEOUT_S", "1");
-    let dir = std::env::temp_dir().join(format!("shunt-fakescp-out2-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-fakescp-out2-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let count = dir.join("count");
     fake_scp(&format!("n=$(cat {0} 2>/dev/null || echo 0); echo $((n+1)) > {0}; sleep 30", count.display()));

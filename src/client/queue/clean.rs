@@ -196,7 +196,7 @@ mod tests {
     use super::*;
 
     fn tmp(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("shunt-cleantest-{tag}-{}", std::process::id()));
+        let dir = crate::testutil::tmp_base().join(format!("shunt-cleantest-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join("trash")).unwrap();

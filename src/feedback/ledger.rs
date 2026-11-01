@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn save_new_exclusively_installs_complete_private_json() {
         let _guard = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
-        let home = std::env::temp_dir().join(format!("shunt-ledger-exclusive-{}", std::process::id()));
+        let home = crate::testutil::tmp_base().join(format!("shunt-ledger-exclusive-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         std::env::set_var("SHUNT_HOME", &home);
         let d = dir().unwrap();

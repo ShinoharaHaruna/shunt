@@ -1,6 +1,8 @@
 //! Named task targets stay stable across defaults, retries, and observations.
 //! All delivery operations use a fake transport and an isolated registry.
 
+mod common;
+
 use anyhow::Result;
 use shunt::proto::task::{SpoolEntry, TaskFlags};
 use shunt::server::registry::{self, ClientEntry};
@@ -20,7 +22,7 @@ struct Fixture {
 
 impl Fixture {
     fn new(tag: &str, queues: &[&str], default: &str) -> Result<Self> {
-        let home = std::env::temp_dir().join(format!("shunt-task-routing-{tag}-{}", std::process::id()));
+        let home = common::tmp_base().join(format!("shunt-task-routing-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&home)?;
         let f = Self { home, old_home: std::env::var_os("SHUNT_HOME") };
         std::env::set_var("SHUNT_HOME", &f.home);

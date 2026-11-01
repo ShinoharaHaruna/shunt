@@ -2,6 +2,8 @@
 //! spool refs, and project [[bind]] rows all go together — design.md §4.1.
 //! Remote decommission is best-effort and skipped for local entries.
 
+mod common;
+
 use anyhow::Result;
 use shunt::proto::task::{SpoolEntry, TaskMeta};
 use shunt::server::registry::{self, Binding, ClientEntry, ProjectEntry, SshEndpoint};
@@ -16,7 +18,7 @@ static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 fn remove_cleans_row_keys_state_spool_and_bindings() -> Result<()> {
     let _g = HOME_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-remove-{}", std::process::id()));
+    let home = common::tmp_base().join(format!("shunt-remove-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
 
     // Local-loopback client keeps the test box-free; ssh.key still
@@ -71,7 +73,7 @@ fn remove_cleans_row_keys_state_spool_and_bindings() -> Result<()> {
 #[test]
 fn remove_purge_wipes_local_row_qroot() -> Result<()> {
     let _g = HOME_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-remove-local-{}", std::process::id()));
+    let home = common::tmp_base().join(format!("shunt-remove-local-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
 
     let qroot = home.join("deep/queue");
@@ -92,7 +94,7 @@ fn remove_purge_wipes_local_row_qroot() -> Result<()> {
 #[test]
 fn remove_survives_rekey_failure() -> Result<()> {
     let _g = HOME_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-remove-rekey-{}", std::process::id()));
+    let home = common::tmp_base().join(format!("shunt-remove-rekey-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
 
     // A non-local row whose known_hosts file exists but does NOT

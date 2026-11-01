@@ -374,7 +374,7 @@ mod tests {
         // ed25519 base64 blobs legitimately contain `/` — the old
         // `sed '/blob/d'` truncated its regex at the slash and
         // silently left the key (rc 0, garbage written instead).
-        let home = std::env::temp_dir().join(format!("shunt-revoke-{}-a", std::process::id()));
+        let home = crate::testutil::tmp_base().join(format!("shunt-revoke-{}-a", std::process::id()));
         let blob = "AAAAC3NzaC1lZDI1NTE5AAAAIAb/ab/cd+ef1234";
         let (rc, after) = run_revoke(&home, Some(&format!("ssh-ed25519 {blob} shunt-test\nssh-rsa otherkey user@host\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOther shunt-other\n")), blob);
         assert_eq!(rc, 0);
@@ -385,7 +385,7 @@ mod tests {
 
     #[test]
     fn revoke_last_line_and_missing_file() {
-        let home = std::env::temp_dir().join(format!("shunt-revoke-{}-b", std::process::id()));
+        let home = crate::testutil::tmp_base().join(format!("shunt-revoke-{}-b", std::process::id()));
         let blob = "AAAAC3NzaC1lZDI1NTE5AAAAIX";
         // Only our line present: grep -vF outputs nothing (rc 1) —
         // that still means revoked.

@@ -19,7 +19,7 @@ fn kill_special_pgids_are_never_signaled() {
             _ => panic!("signal_pgid({pgid}) did not refuse"),
         }
 
-        let root = std::env::temp_dir().join(format!("shunt-badpgid-{pgid}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let root = crate::testutil::tmp_base().join(format!("shunt-badpgid-{pgid}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         let entry = root.join("running").join("t");
         std::fs::create_dir_all(&entry).unwrap();
         std::fs::write(entry.join("task.sh"), "exit 0\n").unwrap();
@@ -49,7 +49,7 @@ fn kill_esrch_races_report_honestly() {
     use std::os::unix::process::CommandExt;
     let mut child = std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
     let pgid = child.id();
-    let root = std::env::temp_dir().join(format!("shunt-esrch-{}-{}", std::process::id(), pgid));
+    let root = crate::testutil::tmp_base().join(format!("shunt-esrch-{}-{}", std::process::id(), pgid));
     let entry = root.join("running").join("t");
     std::fs::create_dir_all(&entry).unwrap();
     std::fs::write(entry.join("task.sh"), "exit 0\n").unwrap();
@@ -101,7 +101,7 @@ fn guard_echo_uses_quoted_form() {
 /// message prints the guard literally.
 #[test]
 fn guard_hit_branch_cannot_expand() {
-    let root = std::env::temp_dir().join(format!("shunt-guardhit-{}", std::process::id()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-guardhit-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let pwned = root.join("PWNED");
     // Relative guard name (bash runs with cwd=root) so the
@@ -124,7 +124,7 @@ fn guard_hit_branch_cannot_expand() {
 /// quote characters as part of the value.
 #[test]
 fn env_values_are_literal_no_quote_semantics() {
-    let root = std::env::temp_dir().join(format!("shunt-envtest-{}", std::process::id()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-envtest-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("env"), "# comment\n\nFOO=a b c\nQUOTED=\"a b\"\nSQUOTED='x'\nSPACED =  padded  \nNOEQ\n").unwrap();
     let m = read_env_file(&root);
@@ -142,7 +142,7 @@ fn env_values_are_literal_no_quote_semantics() {
 /// mid-dispatch (same guard for `# shunt-env:=x` directives).
 #[test]
 fn empty_env_keys_are_dropped() {
-    let root = std::env::temp_dir().join(format!("shunt-emptykey-{}", std::process::id()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-emptykey-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("env"), "=orphan-value\nGOOD=1\n  =also-empty\n").unwrap();
     let m = read_env_file(&root);
@@ -150,7 +150,7 @@ fn empty_env_keys_are_dropped() {
     assert_eq!(m["GOOD"], "1");
     std::fs::remove_dir_all(&root).ok();
 
-    let task = std::env::temp_dir().join(format!("shunt-emptydir-{}", std::process::id()));
+    let task = crate::testutil::tmp_base().join(format!("shunt-emptydir-{}", std::process::id()));
     std::fs::write(&task, "#!/usr/bin/env bash\n# shunt-env:=bad\n# shunt-env:OK=yes\n# shunt-env:PAD= x \necho hi\n").unwrap();
     let td = super::task_directives(&task);
     let envs = td.envs;
@@ -166,7 +166,7 @@ fn empty_env_keys_are_dropped() {
 /// (panic in dispatch → orphan requeue → panic again).
 #[test]
 fn nul_entries_are_dropped_not_panics() {
-    let root = std::env::temp_dir().join(format!("shunt-nul-{}", std::process::id()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-nul-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("env"), "BAD\u{0}KEY=v\nK2=v\u{0}x\nGOOD=1\n").unwrap();
     let m = read_env_file(&root);
@@ -188,7 +188,7 @@ fn nul_entries_are_dropped_not_panics() {
 /// an indented `# shunt-env:` is honored outright.
 #[test]
 fn indented_comments_do_not_end_directive_head() {
-    let task = std::env::temp_dir().join(format!("shunt-indent-{}", std::process::id()));
+    let task = crate::testutil::tmp_base().join(format!("shunt-indent-{}", std::process::id()));
     std::fs::write(&task, "#!/usr/bin/env bash\n# shunt-env:EARLY=1\n  # an indented note\n\t# shunt-env:LATE=2\n   # shunt:timeout_s=60\necho hi\n# shunt-env:NEVER=seen\n").unwrap();
     let td = super::task_directives(&task);
     assert_eq!(td.envs, vec![("EARLY".to_string(), "1".to_string()), ("LATE".to_string(), "2".to_string())]);
@@ -203,7 +203,7 @@ fn indented_comments_do_not_end_directive_head() {
 #[test]
 fn task_threads_garbage_caps_loudly_and_padded_auto_works() {
     for (value, expect_warn) in [("x", true), ("auto ", false)] {
-        let root = std::env::temp_dir().join(format!("shunt-threads-{}-{}", std::process::id(), value.replace(' ', "_")));
+        let root = crate::testutil::tmp_base().join(format!("shunt-threads-{}-{}", std::process::id(), value.replace(' ', "_")));
         std::fs::create_dir_all(root.join("running")).unwrap();
         std::fs::write(root.join("running").join("t.sh"), "#!/usr/bin/env bash\necho \"OMP=$OMP_NUM_THREADS\"\n").unwrap();
         std::fs::write(root.join("env"), format!("TASK_THREADS={value}\n")).unwrap();
@@ -226,7 +226,7 @@ fn task_threads_garbage_caps_loudly_and_padded_auto_works() {
 /// must return a live child, never panic inside dispatch.
 #[test]
 fn nul_shell_file_falls_back_to_bash() {
-    let root = std::env::temp_dir().join(format!("shunt-nulshell-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-nulshell-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     std::fs::create_dir_all(root.join("running")).unwrap();
     std::fs::write(root.join("running").join("t.sh"), "#!/usr/bin/env bash\nexit 0\n").unwrap();
     std::fs::write(root.join("shell"), "bash\u{0}evil").unwrap();
@@ -242,7 +242,7 @@ fn nul_shell_file_falls_back_to_bash() {
 /// in done/.
 #[test]
 fn quarantine_missing_source_is_noop() {
-    let root = std::env::temp_dir().join(format!("shunt-qnoop-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-qnoop-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     std::fs::create_dir_all(root.join("running")).unwrap();
     std::fs::create_dir_all(root.join("done")).unwrap();
     // Real entry already finalized into done/.
@@ -257,7 +257,7 @@ fn quarantine_missing_source_is_noop() {
 /// so a subsequent re-push bootstraps to the quarantined entry name.
 #[test]
 fn quarantine_collision_rebuilds_dedup_name() {
-    let root = std::env::temp_dir().join(format!("shunt-qdedup-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-qdedup-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     crate::client::queue::init(&root).unwrap();
     let body = "#!/usr/bin/env bash\n# shunt:id=quarantine-1\nexec true\n";
     let crate::client::queue::EnqueueOutcome::Fresh(name) = crate::client::queue::enqueue(&root, "task", body).unwrap() else {
@@ -280,7 +280,7 @@ fn quarantine_collision_rebuilds_dedup_name() {
 /// success the sidecars simply travel with the dir to done/.
 #[test]
 fn finalize_writes_exit_inside_dir_entry() {
-    let root = std::env::temp_dir().join(format!("shunt-fin-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-fin-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     let entry = root.join("running").join("0001_t");
     std::fs::create_dir_all(&entry).unwrap();
     std::fs::write(entry.join("task.sh"), "exit 0\n").unwrap();
@@ -300,7 +300,7 @@ fn finalize_writes_exit_inside_dir_entry() {
 /// `recent_exits` filters into `unknown`.
 #[test]
 fn finalize_exit_write_failure_leaves_entry_in_running() {
-    let root = std::env::temp_dir().join(format!("shunt-finfail-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-finfail-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     let entry = root.join("running").join("0001_t");
     std::fs::create_dir_all(&entry).unwrap();
     std::fs::write(entry.join("task.sh"), "exit 0\n").unwrap();
@@ -324,7 +324,7 @@ fn finalize_exit_write_failure_leaves_entry_in_running() {
 #[test]
 fn finalize_flat_tasksh_rename_failure_removes_dest() {
     use std::os::unix::fs::PermissionsExt;
-    let root = std::env::temp_dir().join(format!("shunt-finflat-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-finflat-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     let running = root.join("running");
     std::fs::create_dir_all(&running).unwrap();
     std::fs::write(running.join("0001_t.sh"), "exit 0\n").unwrap();
@@ -359,7 +359,7 @@ fn running_entry(root: &std::path::Path, base: &str, head: &str, log: &str) {
 /// out (spawn truncates `log` on the rerun).
 #[test]
 fn reschedule_rc75_requeues_same_name() {
-    let root = std::env::temp_dir().join(format!("shunt-rs75-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-rs75-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     std::fs::create_dir_all(root.join("pending")).unwrap();
     std::fs::create_dir_all(root.join("failed")).unwrap();
     let head = "#!/usr/bin/env bash\n# shunt:retry=2\n# shunt:retry_delay_s=7\nexec false\n";
@@ -392,7 +392,7 @@ fn reschedule_rc75_requeues_same_name() {
 /// retry of an arbitrary failure.
 #[test]
 fn reschedule_oom_heuristic_only_for_retry_tasks() {
-    let root = std::env::temp_dir().join(format!("shunt-rsom-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-rsom-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     std::fs::create_dir_all(root.join("pending")).unwrap();
     let oom_log = "=== task 0100_t\ntorch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.50 GiB\n";
     running_entry(&root, "0100_t", "#!/usr/bin/env bash\n# shunt:retry=1\nexec false\n", oom_log);
@@ -419,7 +419,7 @@ fn reschedule_errors_release_lock_and_allow_finalize() {
     use fs2::FileExt;
 
     for fault in ["lock", "sidecar"] {
-        let root = std::env::temp_dir().join(format!("shunt-rsfail-{fault}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let root = crate::testutil::tmp_base().join(format!("shunt-rsfail-{fault}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         crate::client::queue::init(&root).unwrap();
         let head = "#!/usr/bin/env bash\n# shunt:id=reschedule-error\n# shunt:retry=1\nexec false\n";
         running_entry(&root, "0100_t", head, "busy\n");
@@ -459,7 +459,7 @@ fn reschedule_errors_release_lock_and_allow_finalize() {
 /// requeueing — retry=N means N extra runs, not N failures.
 #[test]
 fn reschedule_budget_exhaustion_finalizes() {
-    let root = std::env::temp_dir().join(format!("shunt-rsex-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-rsex-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     std::fs::create_dir_all(root.join("pending")).unwrap();
     running_entry(&root, "0100_t", "#!/usr/bin/env bash\n# shunt:retry=1\nexec false\n", "=== task\n");
     std::fs::write(root.join("running/0100_t/attempts"), "1\n").unwrap();

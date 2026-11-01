@@ -28,7 +28,7 @@ impl Release {
 
     fn with_tag(binary_version: &str, tag: &str) -> Self {
         let n = common::SEQ.fetch_add(1, Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!("shunt-release-checksum-{}-{n}", std::process::id()));
+        let root = common::tmp_base().join(format!("shunt-release-checksum-{}-{n}", std::process::id()));
         let fixture = Self { root, tag: tag.into() };
         for dir in ["bin", "assets", "tmp", "home", "queue", "state"] {
             std::fs::create_dir_all(fixture.root.join(dir)).unwrap();

@@ -3,6 +3,8 @@
 //! queue -> real daemon -> task executes -> done/. All inside one
 //! tmp $SHUNT_HOME; no ssh, no remote box.
 
+mod common;
+
 use anyhow::Result;
 use shunt::server::transport::{queue_exec, LocalTransport};
 use shunt::server::{dispatch, registry, spool};
@@ -28,7 +30,7 @@ impl Drop for DaemonGuard {
 #[test]
 fn localhost_submit_dispatch_execute_done() -> Result<()> {
     // Own tmp registry; localhost qroot synthesizes to $SHUNT_HOME/queue.
-    let home = std::env::temp_dir().join(format!("shunt-e2e-{}", std::process::id()));
+    let home = common::tmp_base().join(format!("shunt-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&home)?;
     let _guard = DaemonGuard(home.join("queue"));
     std::env::set_var("SHUNT_HOME", &home);

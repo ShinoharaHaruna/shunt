@@ -8,7 +8,7 @@ use std::process::{Command, Output, Stdio};
 use super::bin;
 
 pub fn tmpdir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("shunt-room-{tag}-{}", std::process::id()));
+    let d = super::tmp_base().join(format!("shunt-room-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d

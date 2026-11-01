@@ -1,5 +1,7 @@
 //! Dotted key names must not alias a prefix-neighbor's public key.
 
+mod common;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,7 +15,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("shunt-key-lifecycle-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+        let root = common::tmp_base().join(format!("shunt-key-lifecycle-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
         for dir in ["registry/clients", "registry/keys", "mock-bin", ".ssh", "external"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }

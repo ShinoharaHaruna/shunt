@@ -2,6 +2,8 @@
 //! key generation on registration, localhost materialization, and the
 //! disabled flag's effect on listings.
 
+mod common;
+
 use anyhow::Result;
 use shunt::server::client_ops::{self, ensure_key};
 use shunt::server::registry::{self, ClientEntry, SshEndpoint};
@@ -19,7 +21,7 @@ fn ssh_entry(name: &str) -> ClientEntry {
 #[test]
 fn ensure_key_generates_reuses_and_errors() -> Result<()> {
     let _g = HOME_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-keytest-{}", std::process::id()));
+    let home = common::tmp_base().join(format!("shunt-keytest-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
 
     let mut e = ssh_entry("box-k");
@@ -42,7 +44,7 @@ fn ensure_key_generates_reuses_and_errors() -> Result<()> {
 #[test]
 fn client_update_rewrites_endpoint_and_clears_state() -> Result<()> {
     let _g = HOME_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-uptest-{}", std::process::id()));
+    let home = common::tmp_base().join(format!("shunt-uptest-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
 
     let mut e = ssh_entry("box-u");

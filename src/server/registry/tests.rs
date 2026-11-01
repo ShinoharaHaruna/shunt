@@ -13,7 +13,7 @@ pub(crate) static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 fn client_roundtrip() {
     let _g = HOME_LOCK.lock().unwrap();
-    let tmp = std::env::temp_dir().join(format!("shunt-test-{}", std::process::id()));
+    let tmp = crate::testutil::tmp_base().join(format!("shunt-test-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
     let entry = ClientEntry { name: "box-1".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: "/path/to/key".into(), password: String::new(), options: vec!["ProxyJump=jump.example".into()] }, qroot: "/root/autodl-tmp/queue".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/root/autodl-tmp".into(), facts: BTreeMap::new(), billing: Some(Billing { hourly: 2.6, currency: "cny".into() }) };
     save_client(&entry).unwrap();
@@ -66,7 +66,7 @@ fn ssh_options_default_when_absent_and_omit_when_empty() {
 #[test]
 fn conn_fail_sidecar_keeps_count_and_epoch() {
     let _g = HOME_LOCK.lock().unwrap();
-    let tmp = std::env::temp_dir().join(format!("shunt-test-fail-{}", std::process::id()));
+    let tmp = crate::testutil::tmp_base().join(format!("shunt-test-fail-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
     assert_eq!(conn_fail_read("box"), 0);
     assert_eq!(conn_fail_at("box"), None);
@@ -94,7 +94,7 @@ fn conn_fail_sidecar_keeps_count_and_epoch() {
 #[test]
 fn edited_row_clears_the_fail_streak() {
     let _g = HOME_LOCK.lock().unwrap();
-    let tmp = std::env::temp_dir().join(format!("shunt-test-renew-{}", std::process::id()));
+    let tmp = crate::testutil::tmp_base().join(format!("shunt-test-renew-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
     let mut row = ClientEntry { name: "renew-me".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: "2020-01-01T00:00:00Z".into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: "/q".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/root".into(), facts: BTreeMap::new(), billing: None };
     save_client(&row).unwrap();
@@ -120,7 +120,7 @@ fn edited_row_clears_the_fail_streak() {
 #[test]
 fn registry_files_are_private() {
     let _g = HOME_LOCK.lock().unwrap();
-    let tmp = std::env::temp_dir().join(format!("shunt-test-mode-{}", std::process::id()));
+    let tmp = crate::testutil::tmp_base().join(format!("shunt-test-mode-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
     let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
 
@@ -149,7 +149,7 @@ fn registry_files_are_private() {
 #[test]
 fn retarget_default_client_tracks_identity() {
     let _g = HOME_LOCK.lock().unwrap();
-    let tmp = std::env::temp_dir().join(format!("shunt-test-defcli-{}", std::process::id()));
+    let tmp = crate::testutil::tmp_base().join(format!("shunt-test-defcli-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let path = tmp.join("server.toml");
@@ -194,7 +194,7 @@ fn registry_name_charset() {
     }
     // The io layer enforces it too: load/save/remove reject bad names.
     let _g = HOME_LOCK.lock().unwrap();
-    let tmp = std::env::temp_dir().join(format!("shunt-test-name-{}", std::process::id()));
+    let tmp = crate::testutil::tmp_base().join(format!("shunt-test-name-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
     assert!(load_client("../x").is_err());
     assert!(remove("clients", "../../victim").is_err());
@@ -209,7 +209,7 @@ fn registry_name_charset() {
 #[test]
 fn row_name_must_match_filename() {
     let _g = HOME_LOCK.lock().unwrap();
-    let tmp = std::env::temp_dir().join(format!("shunt-test-inner-{}", std::process::id()));
+    let tmp = crate::testutil::tmp_base().join(format!("shunt-test-inner-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
     let clients = tmp.join("clients");
     std::fs::create_dir_all(&clients).unwrap();
@@ -250,7 +250,7 @@ fn row_name_must_match_filename() {
 #[test]
 fn empty_qroot_row_is_unusable() {
     let _g = HOME_LOCK.lock().unwrap();
-    let tmp = std::env::temp_dir().join(format!("shunt-test-qroot-{}", std::process::id()));
+    let tmp = crate::testutil::tmp_base().join(format!("shunt-test-qroot-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
     let entry = ClientEntry { name: "noq".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: String::new(), queues: BTreeMap::new(), default_queue: None, deploy_root: String::new(), facts: BTreeMap::new(), billing: None };
     save_client(&entry).unwrap();

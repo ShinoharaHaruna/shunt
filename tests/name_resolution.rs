@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn tmpdir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("shunt-names-{tag}-{}", std::process::id()));
+    let d = common::tmp_base().join(format!("shunt-names-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d

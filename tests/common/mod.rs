@@ -21,6 +21,13 @@ pub fn bin() -> &'static str {
 
 pub static SEQ: AtomicUsize = AtomicUsize::new(0);
 
+/// Scratch parent for integration-test roots: `<manifest>/target/tmp` —
+/// the same base the unit tests use (src/testutil.rs). Test residue
+/// stays out of `/tmp` and `cargo clean` wipes it wholesale.
+pub fn tmp_base() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("tmp")
+}
+
 pub struct Q {
     pub root: PathBuf,
 }
@@ -28,7 +35,7 @@ pub struct Q {
 impl Q {
     pub fn new(tag: &str) -> Self {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!("shunt-test-{tag}-{}-{n}", std::process::id()));
+        let root = tmp_base().join(format!("shunt-test-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let q = Q { root };
         q.run_ok(&["init"]);

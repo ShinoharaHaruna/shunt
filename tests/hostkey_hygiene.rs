@@ -1,5 +1,7 @@
 //! Host-key edits must not alias any other client's store or backup name.
 
+mod common;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -15,7 +17,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("shunt-hostkey-hygiene-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+        let root = common::tmp_base().join(format!("shunt-hostkey-hygiene-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
         for dir in ["registry/clients", "registry/known_hosts", "mock-bin", ".ssh"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }

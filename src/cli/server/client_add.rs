@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn explicit_empty_key_suppresses_generation_but_password_alone_does_not() {
         let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
-        let home = std::env::temp_dir().join(format!("shunt-add-key-{}", std::process::id()));
+        let home = crate::testutil::tmp_base().join(format!("shunt-add-key-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &home);
 
         client_add("password-only", None, opts(Some(""))).unwrap();

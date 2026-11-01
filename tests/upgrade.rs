@@ -28,7 +28,7 @@ fn check(home: &std::path::Path, tag: &str) -> serde_json::Value {
 /// never deployed.
 #[test]
 fn upgrade_client_on_local_row_is_explicit_noop() {
-    let home = std::env::temp_dir().join(format!("shunt-upgradelocal-{}", std::process::id()));
+    let home = common::tmp_base().join(format!("shunt-upgradelocal-{}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
     let stub = stub_gh(&home);
     let cmd = || {
@@ -54,7 +54,7 @@ fn upgrade_client_on_local_row_is_explicit_noop() {
 
 #[test]
 fn upgrade_check_reports_newer_and_current() {
-    let home = std::env::temp_dir().join(format!("shunt-upgradecheck-{}", std::process::id()));
+    let home = common::tmp_base().join(format!("shunt-upgradecheck-{}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
 
     let j = check(&home, "v99.0.0");

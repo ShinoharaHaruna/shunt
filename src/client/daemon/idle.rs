@@ -135,7 +135,7 @@ mod tests {
     /// instead of sleeping the full grace to reach the same verdict.
     #[test]
     fn nonempty_running_skips_countdown() {
-        let root = std::env::temp_dir().join(format!("shunt-idle-test-{}", std::process::id()));
+        let root = crate::testutil::tmp_base().join(format!("shunt-idle-test-{}", std::process::id()));
         std::fs::create_dir_all(root.join("pending")).unwrap();
         std::fs::write(root.join("shutdown_on_idle"), b"").unwrap();
         let t0 = std::time::Instant::now();

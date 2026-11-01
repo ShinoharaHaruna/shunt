@@ -1,5 +1,7 @@
 //! Removal must validate both identities before executing commands or changing state.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -14,7 +16,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("shunt-remove-identity-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+        let root = common::tmp_base().join(format!("shunt-remove-identity-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
         std::fs::create_dir_all(root.join("registry/clients")).unwrap();
         std::fs::create_dir_all(root.join("queue/pending")).unwrap();
         std::fs::write(root.join("queue/marker"), "queue data").unwrap();

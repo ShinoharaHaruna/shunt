@@ -100,7 +100,7 @@ mod tests {
 
     /// Install a fake `sshpass` ahead on PATH (fake-ssh pattern).
     fn fake_sshpass(script: &str) {
-        let dir = std::env::temp_dir().join(format!("shunt-fakesshpass-{}", std::process::id()));
+        let dir = crate::testutil::tmp_base().join(format!("shunt-fakesshpass-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("sshpass"), format!("#!/bin/sh\n{script}\n")).unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -116,10 +116,10 @@ mod tests {
     fn deploy_key_deadline_kills_hung_ssh() {
         let _h = HOME_LOCK.lock().unwrap();
         let _g = ENV_LOCK.lock().unwrap();
-        let home = std::env::temp_dir().join(format!("shunt-deploy-home-{}", std::process::id()));
+        let home = crate::testutil::tmp_base().join(format!("shunt-deploy-home-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &home);
         std::env::set_var("SHUNT_SSH_EXEC_TIMEOUT_S", "1");
-        let dir = std::env::temp_dir().join(format!("shunt-deploy-key-{}", std::process::id()));
+        let dir = crate::testutil::tmp_base().join(format!("shunt-deploy-key-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let key = dir.join("id");
         std::fs::write(dir.join("id.pub"), "ssh-ed25519 AAAA t\n").unwrap();
@@ -137,9 +137,9 @@ mod tests {
     fn deploy_key_appends_client_options_after_managed_ssh_flags() {
         let _h = HOME_LOCK.lock().unwrap();
         let _g = ENV_LOCK.lock().unwrap();
-        let home = std::env::temp_dir().join(format!("shunt-deploy-options-home-{}", std::process::id()));
+        let home = crate::testutil::tmp_base().join(format!("shunt-deploy-options-home-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &home);
-        let dir = std::env::temp_dir().join(format!("shunt-deploy-options-{}", std::process::id()));
+        let dir = crate::testutil::tmp_base().join(format!("shunt-deploy-options-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let key = dir.join("id");
         std::fs::write(dir.join("id.pub"), "ssh-ed25519 AAAA t").unwrap();

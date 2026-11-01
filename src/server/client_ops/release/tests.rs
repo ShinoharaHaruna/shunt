@@ -18,7 +18,7 @@ fn script(path: &Path, body: &str) {
 
 impl Fixture {
     fn new(tag: &str, sha: &str, corrupt: bool) -> Self {
-        let root = std::env::temp_dir().join(format!("shunt-rescue-tags-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst)));
+        let root = crate::testutil::tmp_base().join(format!("shunt-rescue-tags-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst)));
         for dir in ["bin", "assets", "tmp", "home", "queue", "state"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }

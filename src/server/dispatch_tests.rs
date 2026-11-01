@@ -42,7 +42,7 @@ impl Transport for NoTouch {
 #[test]
 fn expired_client_is_never_dispatched() {
     let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
-    let tmp = std::env::temp_dir().join(format!("shunt-test-expired-sweep-{}", std::process::id()));
+    let tmp = crate::testutil::tmp_base().join(format!("shunt-test-expired-sweep-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
     std::fs::create_dir_all(tmp.join("clients")).unwrap();
     std::fs::write(tmp.join("clients/box.toml"), "name = \"box\"\nqroot = \"/queue\"\ndeploy_root = \"/root\"\nexpire = \"2020-01-01T00:00:00Z\"\n[ssh]\nhost = \"127.0.0.1\"\nport = 1\nuser = \"u\"\n").unwrap();

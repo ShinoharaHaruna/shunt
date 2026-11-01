@@ -2,6 +2,8 @@
 //! managed keypair, mux socket, conn-fail streak, tunnel state,
 //! spool entry refs, and project [[bind]] refs — design.md §4.1.
 
+mod common;
+
 use anyhow::Result;
 use shunt::proto::task::{SpoolEntry, TaskMeta};
 use shunt::server::registry::{self, Binding, ClientEntry, ProjectEntry, SshEndpoint};
@@ -14,7 +16,7 @@ fn entry(name: &str) -> ClientEntry {
 
 #[test]
 fn rename_moves_row_keys_state_and_refs() -> Result<()> {
-    let home = std::env::temp_dir().join(format!("shunt-rename-{}", std::process::id()));
+    let home = common::tmp_base().join(format!("shunt-rename-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
 
     // Row + managed keypair.

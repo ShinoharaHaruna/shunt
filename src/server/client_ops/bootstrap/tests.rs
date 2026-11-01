@@ -27,7 +27,7 @@ fn bootstrap_rejects_empty_qroot_on_local_row() {
     // shunt_bin as `/bin/shunt` and stage the binary toward
     // SYSTEM /bin — reject at the guard, before any wire op.
     let _g = HOME_LOCK.lock().unwrap();
-    let tmp = std::env::temp_dir().join(format!("shunt-test-boot-qroot-{}", std::process::id()));
+    let tmp = crate::testutil::tmp_base().join(format!("shunt-test-boot-qroot-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
     let mut entry = super::super::test_entry();
     entry.name = "loctest".into();
@@ -123,7 +123,7 @@ fn calls_exact(t: &Stub, arg: &str) -> usize {
 /// Row fixture with a REAL keypair — the .shunt-owner claim reads
 /// `{key}.pub` off disk.
 fn fixture(name: &str) -> (std::path::PathBuf, ClientEntry) {
-    let tmp = std::env::temp_dir().join(format!("shunt-test-boot-{name}-{}", std::process::id()));
+    let tmp = crate::testutil::tmp_base().join(format!("shunt-test-boot-{name}-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
     let mut e = base_entry();
     e.name = name.into();
@@ -137,7 +137,7 @@ fn fixture(name: &str) -> (std::path::PathBuf, ClientEntry) {
 #[test]
 fn bootstrap_password_only_skips_key_generation_and_owner_claim() {
     let _g = HOME_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-test-boot-password-only-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-test-boot-password-only-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
     let mut entry = base_entry();
     entry.name = "password-only".into();
@@ -174,7 +174,7 @@ fn bootstrap_refuses_foreign_owned_qroot() {
 /// verdicts are the whole contract.
 #[test]
 fn claim_script_claims_then_refuses_foreign() {
-    let dir = std::env::temp_dir().join(format!("shunt-claim-{}", std::process::id()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-claim-{}", std::process::id()));
     let owner = dir.join("deep/q/.shunt-owner");
     let run = |pubkey: &str| -> String {
         let out = std::process::Command::new("sh").args(["-c", CLAIM_SCRIPT, owner.to_str().unwrap(), pubkey]).output().unwrap();

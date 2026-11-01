@@ -135,7 +135,7 @@ fn idle_shutdown_blocked_by_busy_sibling_qroot() {
     // design.md §3.11: two qroots sharing one box coordinate via the
     // box-level registry — a drained daemon must not power off while
     // a sibling daemon still has work in flight.
-    let state = std::env::temp_dir().join(format!("shunt-test-boxstate-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst)));
+    let state = common::tmp_base().join(format!("shunt-test-boxstate-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst)));
     let qa = Q::new("peerA");
     let qb = Q::new("peerB");
     // Sibling daemon with a task held on a release marker.
@@ -270,7 +270,7 @@ fn term_countdown_cancelled_by_pending_exits_loudly() {
 /// idle poweroff on a shared box would kill other people's work.
 #[test]
 fn shutdown_on_refuses_shared_row() {
-    let home = std::env::temp_dir().join(format!("shunt-shared-{}", std::process::id()));
+    let home = common::tmp_base().join(format!("shunt-shared-{}", std::process::id()));
     std::fs::create_dir_all(home.join("clients")).unwrap();
     std::fs::write(home.join("clients/sharedbox.toml"), "name = \"sharedbox\"\nlocal = true\nshared = true\nqroot = \"/tmp/q-sharedbox\"\ndeploy_root = \"/tmp\"\n").unwrap();
     let out = Command::new(common::bin()).args(["shutdown", "on", "-c", "sharedbox"]).env("SHUNT_HOME", &home).output().unwrap();

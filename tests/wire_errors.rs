@@ -28,7 +28,7 @@ fn assert_wire_error(o: &Output, args: &[&str]) {
 /// propagate `?` bare past `jfail`.
 #[test]
 fn json_ops_emit_wire_error_object() {
-    let file = std::env::temp_dir().join(format!("shunt-wire-{}", std::process::id()));
+    let file = common::tmp_base().join(format!("shunt-wire-{}", std::process::id()));
     std::fs::write(&file, "not a queue root\n").unwrap();
     let root = file.display().to_string();
     let cases: Vec<Vec<&str>> = vec![vec!["status", "--json", "--root", &root], vec!["workers", "--json", "--root", &root, "set", "5"], vec!["shutdown", "--json", "--root", &root, "on"], vec!["stop", "--json", "--root", &root], vec!["init", "--json", "--root", &root], vec!["enqueue", "--json", "--root", &root, "-", "x"], vec!["new", "--json", "--root", &root, "--slug", "x", "--", "true"], vec!["cancel", "--json", "--root", &root, "pat"], vec!["prio", "--json", "--root", &root, "pat", "5"], vec!["kill", "--json", "--root", &root, "pat"]];
@@ -42,7 +42,7 @@ fn json_ops_emit_wire_error_object() {
 /// exit, `shunt: <err>` on stderr, no wire object on stdout.
 #[test]
 fn non_json_failure_stays_human_facing() {
-    let file = std::env::temp_dir().join(format!("shunt-wire-h-{}", std::process::id()));
+    let file = common::tmp_base().join(format!("shunt-wire-h-{}", std::process::id()));
     std::fs::write(&file, "not a queue root\n").unwrap();
     let root = file.display().to_string();
     let args = ["status", "--root", &root];

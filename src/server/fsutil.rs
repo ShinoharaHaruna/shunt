@@ -103,7 +103,7 @@ mod tests {
     #[test]
     fn private_dir_scope() {
         let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
-        let home = std::env::temp_dir().join(format!("shunt-futil-home-{}", std::process::id()));
+        let home = crate::testutil::tmp_base().join(format!("shunt-futil-home-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &home);
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
 
@@ -113,7 +113,7 @@ mod tests {
         assert_eq!(mode(&home.join("cm")), 0o700);
 
         // Out-of-scope: created, never chmodded.
-        let outside = std::env::temp_dir().join(format!("shunt-futil-outside-{}", std::process::id()));
+        let outside = crate::testutil::tmp_base().join(format!("shunt-futil-outside-{}", std::process::id()));
         private_dir(&outside).unwrap();
         assert_ne!(mode(&outside), 0o700, "outside dir must keep its own permissions");
         fs::set_permissions(&outside, fs::Permissions::from_mode(0o755)).unwrap();
@@ -130,7 +130,7 @@ mod tests {
     /// same-dir sibling (same-fs rename).
     #[test]
     fn atomic_write_installs_privately() {
-        let dir = std::env::temp_dir().join(format!("shunt-aw-{}", std::process::id()));
+        let dir = crate::testutil::tmp_base().join(format!("shunt-aw-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("row.toml");
         atomic_write(&path, "a = 1\n").unwrap();

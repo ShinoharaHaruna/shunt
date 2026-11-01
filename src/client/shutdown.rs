@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn peer_registry_scan_fails_closed() {
-        let base = std::env::temp_dir().join(format!("shunt-registry-errors-{}", std::process::id()));
+        let base = crate::testutil::tmp_base().join(format!("shunt-registry-errors-{}", std::process::id()));
         let reg = base.join("qroots");
         let root = base.join("self");
         let _ = std::fs::remove_dir_all(&base);
@@ -280,7 +280,7 @@ mod tests {
     /// never arm the poweroff countdown or clear a busy peer.
     #[test]
     fn queue_nonempty_fails_closed_on_read_error() {
-        let root = std::env::temp_dir().join(format!("shunt-failclosed-test-{}", std::process::id()));
+        let root = crate::testutil::tmp_base().join(format!("shunt-failclosed-test-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("pending"), b"not a dir").unwrap();
         std::fs::write(root.join("running"), b"not a dir").unwrap();
@@ -299,7 +299,7 @@ mod tests {
     /// not survive a re-arm.
     #[test]
     fn arm_without_grace_uses_default() {
-        let root = std::env::temp_dir().join(format!("shunt-grace-test-{}", std::process::id()));
+        let root = crate::testutil::tmp_base().join(format!("shunt-grace-test-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         arm(&root, Some(30)).unwrap();
         assert_eq!(grace(&root), 30);
@@ -318,7 +318,7 @@ mod tests {
     /// itself is NEVER removed — the peer daemon owns it.
     #[test]
     fn busy_peers_never_removes_peer_pidfile() {
-        let base = std::env::temp_dir().join(format!("shunt-peers-test-{}", std::process::id()));
+        let base = crate::testutil::tmp_base().join(format!("shunt-peers-test-{}", std::process::id()));
         let reg = base.join("qroots");
         let self_root = base.join("self-q");
         let peer = base.join("peer-q");

@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn endpoint_peers_finds_duplicate_endpoint() {
         let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
-        let tmp = std::env::temp_dir().join(format!("shunt-peers-{}", std::process::id()));
+        let tmp = crate::testutil::tmp_base().join(format!("shunt-peers-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &tmp);
         let mut a = ClientEntry { name: "a".into(), ..entry() };
         a.ssh.host = "10.0.0.1".into();
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn update_key_empty_clears_to_password_only_auth() {
         let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
-        let home = std::env::temp_dir().join(format!("shunt-update-key-{}", std::process::id()));
+        let home = crate::testutil::tmp_base().join(format!("shunt-update-key-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &home);
         let mut client = entry();
         client.name = "key-clear".into();
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn update_options_replaces_then_clears() {
         let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
-        let home = std::env::temp_dir().join(format!("shunt-update-opts-{}", std::process::id()));
+        let home = crate::testutil::tmp_base().join(format!("shunt-update-opts-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &home);
         let mut client = entry();
         client.name = "opts".into();
@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn same_queue_peers_checks_every_queue_and_account() {
         let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
-        let home = std::env::temp_dir().join(format!("shunt-queue-peers-{}", std::process::id()));
+        let home = crate::testutil::tmp_base().join(format!("shunt-queue-peers-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &home);
         let mut a = entry();
         a.name = "a".into();

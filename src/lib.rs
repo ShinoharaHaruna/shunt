@@ -12,6 +12,9 @@ pub mod handoff;
 pub mod proto;
 pub mod server;
 
+#[cfg(test)]
+mod testutil;
+
 /// The canonical upstream GitHub repo (`owner/name`) — the default
 /// target for `feedback` issues and `bootstrap` release-asset fetches.
 /// Forks override via `server.toml` fields / `SHUNT_*_REPO` env.

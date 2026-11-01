@@ -8,7 +8,7 @@ use fs2::FileExt;
 /// phantom drained queue.
 #[test]
 fn dispatch_skips_cycle_on_unreadable_pending() {
-    let root = std::env::temp_dir().join(format!("shunt-dispatch-test-{}", std::process::id()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-dispatch-test-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("pending"), b"not a dir").unwrap();
     let mut d = super::core::Daemon { root: root.clone(), runpids: Default::default(), last_workers: None, got_signal: Default::default(), reexec: Default::default(), argv_rest: Default::default() };
@@ -24,7 +24,7 @@ fn dispatch_skips_cycle_on_unreadable_pending() {
 /// expired or corrupt one claims it and clears the file.
 #[test]
 fn dispatch_skips_not_due_rescheduled_entry() {
-    let root = std::env::temp_dir().join(format!("shunt-retrydue-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-retrydue-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     crate::client::queue::init(&root).unwrap();
     let entry = root.join("pending/0100_t");
     std::fs::create_dir_all(&entry).unwrap();
@@ -55,7 +55,7 @@ fn dispatch_skips_not_due_rescheduled_entry() {
 /// gate under the same lock and never carries the marker into running/.
 #[test]
 fn dispatch_skips_held_entry_until_release_then_claims_it() {
-    let root = std::env::temp_dir().join(format!("shunt-held-dispatch-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-held-dispatch-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     crate::client::queue::init(&root).unwrap();
     let entry = root.join("pending/0100_t");
     std::fs::create_dir_all(&entry).unwrap();
@@ -91,7 +91,7 @@ fn dispatch_skips_held_entry_until_release_then_claims_it() {
 /// failed/ as a fake budget death.
 #[test]
 fn unenforceable_timeout_stays_unmarked() {
-    let root = std::env::temp_dir().join(format!("shunt-timeout-test-{}", std::process::id()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-timeout-test-{}", std::process::id()));
     std::fs::create_dir_all(root.join("running")).unwrap();
     let mut child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
     let pid = child.id();
@@ -120,7 +120,7 @@ fn unenforceable_timeout_stays_unmarked() {
 #[test]
 fn exited_timeout_still_escalates_kill_to_remnant_group() {
     use std::os::unix::process::CommandExt;
-    let root = std::env::temp_dir().join(format!("shunt-remnant-kill-test-{}", std::process::id()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-remnant-kill-test-{}", std::process::id()));
     let entry = root.join("running/t-remnant");
     std::fs::create_dir_all(&entry).unwrap();
     // Leader spawns a TERM-immune sleeper in its own process group
@@ -160,7 +160,7 @@ fn exited_timeout_still_escalates_kill_to_remnant_group() {
 /// disarmed flag or an empty pending/ is not an orphan.
 #[test]
 fn warn_orphaned_flag_only_when_armed_with_pending() {
-    let root = std::env::temp_dir().join(format!("shunt-orphan-test-{}", std::process::id()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-orphan-test-{}", std::process::id()));
     std::fs::create_dir_all(root.join("pending")).unwrap();
     // No flag: nothing armed, nothing to warn about.
     super::exit::warn_orphaned_shutdown_flag(&root);
@@ -184,7 +184,7 @@ fn warn_orphaned_flag_only_when_armed_with_pending() {
 /// on process death, so the failed start leaves nothing behind.
 #[test]
 fn held_daemon_lock_bails_already_running() {
-    let root = std::env::temp_dir().join(format!("shunt-dlock-test-{}", std::process::id()));
+    let root = crate::testutil::tmp_base().join(format!("shunt-dlock-test-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let lock = std::fs::OpenOptions::new().create(true).append(true).open(root.join("daemon.lock")).unwrap();
     lock.try_lock_exclusive().unwrap();

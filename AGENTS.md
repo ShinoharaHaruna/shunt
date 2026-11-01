@@ -52,3 +52,4 @@ Raw cargo equivalents work too (`cargo build/test/clippy`).
 - Client queue is a filesystem state machine: `pending/ running/ done/ failed/` under `$QROOT`; resolution order `--root` > `$SHUNT_ROOT` > configured qroot. Server-side queue selection is `--queue` > `default_queue` > sole queue (design.md §4.1a); staged tasks pin `(queue, qroot)` — never retarget after the fact.
 - Registry lives at `~/.config/shunt/` (`$SHUNT_HOME` overrides for tests), human-editable TOML, one file per client/project.
 - Never put real hostnames, ports, or key paths in tracked files — use placeholders (see `etc/vendors/autodl.toml` FILL markers).
+- Test scratch dirs go under `target/tmp/` via `crate::testutil::tmp_base()` (unit tests) / `common::tmp_base()` (integration tests), never `std::env::temp_dir()` — residue stays out of `/tmp` and `cargo clean` wipes it.

@@ -1,5 +1,7 @@
 //! Disarming must be retry-safe without hiding flag deletion failures.
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,7 +14,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("shunt-shutdown-off-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+        let root = common::tmp_base().join(format!("shunt-shutdown-off-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("shutdown_cmd"), "true\n").unwrap();
         Self { root }

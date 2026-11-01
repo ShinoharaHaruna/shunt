@@ -16,7 +16,7 @@ fn entry(root: &Path) -> ClientEntry {
 }
 
 fn tmp(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("shunt-tun-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let dir = crate::testutil::tmp_base().join(format!("shunt-tun-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     crate::server::fsutil::private_dir(&dir).unwrap();
     dir
 }
@@ -264,7 +264,7 @@ fn heal_dead_tunnel_strips_proxy_on_failure() {
 fn tunnel_argv_disables_mux_before_conn_args() {
     let _h = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
     let _g = crate::server::transport::ENV_LOCK.lock().unwrap();
-    let home = std::env::temp_dir().join(format!("shunt-tun-home-{}", std::process::id()));
+    let home = crate::testutil::tmp_base().join(format!("shunt-tun-home-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &home);
     let mut c = entry(Path::new("/q"));
     c.local = false;

@@ -1,6 +1,8 @@
 //! Recorded tunnels remain a dispatch responsibility after the spool drains.
 //! All remote operations are fake; tunnel setup uses a PATH-scoped mock ssh.
 
+mod common;
+
 use anyhow::Result;
 use shunt::proto::task::{SpoolEntry, TaskMeta};
 use shunt::server::registry::{self, ClientEntry, SshEndpoint};
@@ -23,7 +25,7 @@ struct Fixture {
 
 impl Fixture {
     fn new(tag: &str) -> Result<Self> {
-        let home = std::env::temp_dir().join(format!("shunt-dispatch-tunnels-{tag}-{}", std::process::id()));
+        let home = common::tmp_base().join(format!("shunt-dispatch-tunnels-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(home.join("mock-bin"))?;
         let f = Self { home, old_home: std::env::var_os("SHUNT_HOME"), old_path: std::env::var_os("PATH") };
         std::env::set_var("SHUNT_HOME", &f.home);

@@ -1,6 +1,8 @@
 //! Dispatcher viability gates: inactive clients are reported without
 //! transport work, quarantines stop dispatch, and client updates recover them.
 
+mod common;
+
 use anyhow::Result;
 use shunt::proto::task::{SpoolEntry, TaskMeta};
 use shunt::server::dispatch;
@@ -16,7 +18,7 @@ use std::sync::Mutex;
 static HOME_LOCK: Mutex<()> = Mutex::new(());
 
 fn home(tag: &str) -> Result<PathBuf> {
-    let path = std::env::temp_dir().join(format!("shunt-viability-{tag}-{}", std::process::id()));
+    let path = common::tmp_base().join(format!("shunt-viability-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&path)?;
     std::env::set_var("SHUNT_HOME", &path);
     Ok(path)

@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn env_all_and_selected_respect_queue_workers() {
         let _g = HOME_LOCK.lock().unwrap();
-        let home = std::env::temp_dir().join(format!("shunt-queue-env-{}", std::process::id()));
+        let home = crate::testutil::tmp_base().join(format!("shunt-queue-env-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &home);
         let mut entry = super::super::test_entry();
         entry.qroot.clear();

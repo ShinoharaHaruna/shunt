@@ -103,7 +103,7 @@ mod tests {
     use std::sync::Mutex;
 
     fn shunt_home() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("shunt-remote-test-{}", std::process::id()));
+        let dir = crate::testutil::tmp_base().join(format!("shunt-remote-test-{}", std::process::id()));
         std::env::set_var("SHUNT_HOME", &dir);
         dir
     }

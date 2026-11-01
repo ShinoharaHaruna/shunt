@@ -477,7 +477,7 @@ mod tests {
     /// shortid, and both must fit the valid_task_id charset.
     #[test]
     fn same_second_ids_differ_in_shortid_tail() {
-        let dir = std::env::temp_dir().join(format!("shunt-spool-test-{}", std::process::id()));
+        let dir = crate::testutil::tmp_base().join(format!("shunt-spool-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let (a, b) = (new_task_id(&dir), new_task_id(&dir));
         assert_ne!(a, b);
