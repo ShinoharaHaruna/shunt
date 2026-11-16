@@ -37,6 +37,6 @@ docs/readme/
 - Keep the language switcher in the requested order. From a locale directory, the English README is `../../../README.md`, other languages are `../<LANG>/README.<LANG>.md`, the design spec is `../../design.md`, and shared artwork is `../../assets/readme/`. Localized diagrams are sibling files.
 - Update page-fragment links when translating headings. Check all relative links from the locale directory.
 - Keep SVG text editable. Translate visible labels and the accessible `title`/`desc`, retain literal directory names and technical identifiers, set `lang`/`xml:lang`, and use a font stack covering the target script. Render both SVGs to check glyphs, clipping, and arrows.
-- When an edition is complete, remove its scaffold notice and TODO comments, update its status in this table, and adjust the root README's status note. Review the matching README and both SVGs whenever the English source changes.
+- When an edition is complete, remove its scaffold notice and TODO comments, and update its status in this table. Review the matching README and both SVGs whenever the English source changes.
 
 Run `just fmt` and `just fmt-check` for Markdown formatting. Verify links and image rendering separately; formatting alone does not validate translation quality or diagram layout.
