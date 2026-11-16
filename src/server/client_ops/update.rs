@@ -1,17 +1,20 @@
-//! `client update`: endpoint drift (design.md §4.1). Rewrites the
-//! row's ssh endpoint fields after the vendor moved the box and
-//! cleans the connection state pinned to the dead endpoint.
+//! `client update` keeps registry edits and the connection state they
+//! invalidate together (design.md §4.1). Notes never invalidate a connection.
 
 use super::hygiene::{drop_askpass, drop_hostkey, kill_mux};
 use crate::server::registry::{self, ClientEntry};
 use crate::server::transport;
 use anyhow::Result;
+use std::collections::BTreeMap;
 
-/// Field-level changes for `client update` (endpoint drift, design.md
-/// §4.1). Any unset Option leaves the row field untouched; empty
-/// `--key ""` and `--password ""` clear their fields. `endpoint_rotates` is tri-state:
+/// Field-level changes for `client update` (design.md §4.1). Any unset
+/// Option leaves the row field untouched; empty `--key ""` and
+/// `--password ""` clear their fields. `endpoint_rotates` is tri-state:
 /// Some(true) marks, Some(false) clears a mislabeled row, None leaves
 /// the flag alone — a one-way bool had no path back to false.
+/// The notes fields are dev-local registry data: they never join the
+/// endpoint/connection hygiene below (mux kill, hostkey drop, tunnel
+/// teardown, conn-fail reset).
 pub struct EndpointUpdate {
     pub host: Option<String>,
     pub port: Option<u16>,
@@ -24,22 +27,31 @@ pub struct EndpointUpdate {
     /// `None` leaves the list alone. Managed so a changed list kills
     /// the mux master — a hand-edit would ride the stale one.
     pub options: Option<Vec<String>>,
+    /// `Some` merges note pairs into the row (set/overwrite per key).
+    pub notes: Option<BTreeMap<String, String>>,
+    /// `Some` removes these note keys; absent keys are a no-op.
+    /// Applied after `notes` so a same-call set+remove ends removed.
+    pub notes_rm: Option<Vec<String>>,
+    /// The CLI excludes merges and removals when clearing the whole map.
+    pub notes_clear: bool,
 }
 
-/// `shunt client update <name> [flags]`: rewrite the row's ssh
-/// endpoint fields after the vendor moved the box. Editing the TOML
-/// by hand leaves live state pinned to the dead endpoint, so when
-/// host/port/user move this also drops the stale known_hosts entries
-/// — BOTH the old and the new spec, because a rotating vendor
-/// reassigns host:port tuples between tenants and the new endpoint
-/// can carry a foreign key that hard-fails TOFU — kills the mux
-/// master, tears down a recorded tunnel (best-effort ALL_PROXY
-/// cleanup over the new endpoint), and resets the conn-fail streak.
-/// Server-local: no reachability check; verify with `status -c`.
+/// Hand-editing an endpoint leaves live connection state pinned to its
+/// old identity. Host, port, and user updates clear both endpoint host-key
+/// entries because vendors can reassign a tuple carrying a foreign key.
+/// They also kill the mux, tear down recorded tunnels with best-effort
+/// ALL_PROXY cleanup, and reset the fail streak. Key and option changes
+/// kill the mux. Password updates drop the cached askpass script. Connection
+/// settings reset the fail streak, while notes leave connection state alone.
+/// This server-local operation makes no reachability check. Verify endpoint
+/// changes with `shunt status -c <name>`.
 pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
     let endpoint_moved = u.host.is_some() || u.port.is_some() || u.user.is_some();
-    if !endpoint_moved && u.key.is_none() && u.password.is_none() && u.pre_connect.is_none() && u.endpoint_rotates.is_none() && u.options.is_none() {
-        anyhow::bail!("nothing to update — pass --host/--port/--user/--key/--password/--pre-connect/--option/--no-options/--endpoint-rotates (other row fields — qroot, deploy_root, expire, env_setup — are hand-edited in clients/<name>.toml)");
+    // Notes do not invalidate connection state. The separate row-mtime
+    // retry policy in conn_fail_streak still applies to any saved row.
+    let conn_mutated = u.key.is_some() || u.password.is_some() || u.pre_connect.is_some() || u.endpoint_rotates.is_some() || u.options.is_some();
+    if !endpoint_moved && !conn_mutated && u.notes.is_none() && u.notes_rm.is_none() && !u.notes_clear {
+        anyhow::bail!("nothing to update: pass --host, --port, --user, --key, --password, --pre-connect, --option, --no-options, --endpoint-rotates, --no-endpoint-rotates, --note, --note-rm, or --no-notes. Manage queue fields with `shunt queue set`. Hand-edit deploy_root and expire in clients/<name>.toml");
     }
     if u.port == Some(0) {
         anyhow::bail!("--port 0 is not a usable endpoint");
@@ -99,6 +111,27 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
             options_changed = true;
         }
     }
+    // Removals take precedence over sets of the same key in one call.
+    // Keep values out of the update summary, as with connection settings.
+    if u.notes_clear && !e.notes.is_empty() {
+        changes.push(format!("notes: cleared ({} keys)", e.notes.len()));
+        e.notes.clear();
+    }
+    if let Some(notes) = u.notes {
+        for (k, v) in notes {
+            if e.notes.get(&k) != Some(&v) {
+                e.notes.insert(k.clone(), v);
+                changes.push(format!("note {k}: set"));
+            }
+        }
+    }
+    if let Some(keys) = u.notes_rm {
+        for k in keys {
+            if e.notes.remove(&k).is_some() {
+                changes.push(format!("note {k}: removed"));
+            }
+        }
+    }
     let path = registry::save_client(&e)?;
     if (key_changed || options_changed) && !endpoint_moved {
         kill_mux(&e.name);
@@ -110,7 +143,7 @@ pub fn update(name: &str, u: EndpointUpdate) -> Result<()> {
     if password_touched {
         drop_askpass(&e.name);
     }
-    if !endpoint_moved {
+    if !endpoint_moved && conn_mutated {
         registry::conn_fail_reset(&e.name);
     }
     if !e.local && e.ssh.key.is_empty() && e.ssh.password.is_empty() {
@@ -265,7 +298,7 @@ mod tests {
         client.ssh.password = "pw".into();
         crate::server::registry::save_client(&client).unwrap();
 
-        super::update("key-clear", EndpointUpdate { host: None, port: None, user: None, key: Some(String::new()), password: None, pre_connect: None, endpoint_rotates: None, options: None }).unwrap();
+        super::update("key-clear", EndpointUpdate { host: None, port: None, user: None, key: Some(String::new()), password: None, pre_connect: None, endpoint_rotates: None, options: None, notes: None, notes_rm: None, notes_clear: false }).unwrap();
 
         let saved = crate::server::registry::load_client("key-clear").unwrap();
         assert!(saved.ssh.key.is_empty());
@@ -285,7 +318,7 @@ mod tests {
         crate::server::registry::save_client(&client).unwrap();
         crate::server::registry::conn_fail_bump("opts");
 
-        let bare = || EndpointUpdate { host: None, port: None, user: None, key: None, password: None, pre_connect: None, endpoint_rotates: None, options: None };
+        let bare = || EndpointUpdate { host: None, port: None, user: None, key: None, password: None, pre_connect: None, endpoint_rotates: None, options: None, notes: None, notes_rm: None, notes_clear: false };
         super::update("opts", EndpointUpdate { options: Some(vec!["ProxyJump=bastion".into(), "ForwardAgent=yes".into()]), ..bare() }).unwrap();
         assert_eq!(crate::server::registry::load_client("opts").unwrap().ssh.options, ["ProxyJump=bastion", "ForwardAgent=yes"]);
         assert_eq!(crate::server::registry::conn_fail_read("opts"), 0);
@@ -293,6 +326,95 @@ mod tests {
         super::update("opts", EndpointUpdate { options: Some(Vec::new()), ..bare() }).unwrap();
         assert!(crate::server::registry::load_client("opts").unwrap().ssh.options.is_empty());
         assert_eq!(crate::server::registry::conn_fail_read("opts"), 0);
+        std::env::remove_var("SHUNT_HOME");
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    fn bare_update() -> EndpointUpdate {
+        EndpointUpdate { host: None, port: None, user: None, key: None, password: None, pre_connect: None, endpoint_rotates: None, options: None, notes: None, notes_rm: None, notes_clear: false }
+    }
+
+    #[test]
+    fn update_notes_merge_remove_and_clear() {
+        let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let home = crate::testutil::tmp_base().join(format!("shunt-update-notes-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let mut client = entry();
+        client.name = "notes".into();
+        client.notes.insert("keep".into(), "old".into());
+        client.notes.insert("stale".into(), "x".into());
+        crate::server::registry::save_client(&client).unwrap();
+
+        let mut u = bare_update();
+        u.notes = Some(std::collections::BTreeMap::from([("keep".to_string(), "new".to_string()), ("gone".to_string(), "v".to_string()), ("fresh".to_string(), String::new())]));
+        u.notes_rm = Some(vec!["gone".into(), "absent".into()]);
+        super::update("notes", u).unwrap();
+        let saved = crate::server::registry::load_client("notes").unwrap();
+        assert_eq!(saved.notes.get("keep").map(String::as_str), Some("new"), "overwrite");
+        assert_eq!(saved.notes.get("stale").map(String::as_str), Some("x"), "untouched key survives");
+        assert_eq!(saved.notes.get("fresh").map(String::as_str), Some(""), "empty value is legal");
+        assert!(!saved.notes.contains_key("gone"), "removals run after sets");
+
+        let mut u = bare_update();
+        u.notes_clear = true;
+        super::update("notes", u).unwrap();
+        assert!(crate::server::registry::load_client("notes").unwrap().notes.is_empty());
+        std::env::remove_var("SHUNT_HOME");
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    /// Notes must leave endpoint state intact even when the client is down.
+    #[test]
+    fn notes_only_update_preserves_conn_fail_sidecar() {
+        let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let home = crate::testutil::tmp_base().join(format!("shunt-notes-fail-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let mut client = entry();
+        client.name = "failkeep".into();
+        crate::server::registry::save_client(&client).unwrap();
+        crate::server::registry::conn_fail_bump("failkeep");
+        crate::server::registry::conn_fail_bump("failkeep");
+        let sidecar = home.join("state").join("failkeep.fail");
+        let before = std::fs::read_to_string(&sidecar).unwrap();
+        let askpass = crate::server::transport::cm_dir().unwrap().join("failkeep.askpass");
+        let known_hosts = crate::server::registry::known_hosts_path("failkeep").unwrap();
+        let tunnel_port = home.join("tunnels").join("failkeep.port");
+        for path in [&askpass, &known_hosts, &tunnel_port] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "preserve connection state\n").unwrap();
+        }
+
+        let updates = [EndpointUpdate { notes: Some(std::collections::BTreeMap::from([("datasets".to_string(), "/data/shared".to_string())])), ..bare_update() }, EndpointUpdate { notes_rm: Some(vec!["datasets".into(), "absent".into()]), ..bare_update() }, EndpointUpdate { notes_clear: true, ..bare_update() }];
+        for u in updates {
+            super::update("failkeep", u).unwrap();
+            assert_eq!(crate::server::registry::conn_fail_read("failkeep"), 2);
+            assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), before, "sidecar bytes untouched");
+            for path in [&askpass, &known_hosts, &tunnel_port] {
+                assert_eq!(std::fs::read_to_string(path).unwrap(), "preserve connection state\n", "{} changed", path.display());
+            }
+        }
+
+        // Notes in a mixed update must not suppress connection-state cleanup.
+        let mut u = bare_update();
+        u.notes = Some(std::collections::BTreeMap::from([("k".to_string(), "v".to_string())]));
+        u.pre_connect = Some("true".into());
+        super::update("failkeep", u).unwrap();
+        assert_eq!(crate::server::registry::conn_fail_read("failkeep"), 0);
+        assert!(!sidecar.exists());
+        std::env::remove_var("SHUNT_HOME");
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn update_without_any_flag_still_bails() {
+        let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let home = crate::testutil::tmp_base().join(format!("shunt-update-bail-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let mut client = entry();
+        client.name = "bare".into();
+        crate::server::registry::save_client(&client).unwrap();
+        let err = super::update("bare", bare_update()).unwrap_err().to_string();
+        assert!(err.contains("--note"), "{err}");
         std::env::remove_var("SHUNT_HOME");
         std::fs::remove_dir_all(home).ok();
     }

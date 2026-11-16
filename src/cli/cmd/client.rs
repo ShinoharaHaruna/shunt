@@ -10,12 +10,12 @@ use anyhow::Result;
 
 pub fn client(c: &ClientCmd) -> Result<()> {
     match &c.action {
-        ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { queue: a.queue.clone(), host: a.host.clone(), port: a.port, user: a.user.clone(), key: a.key.clone(), password: a.password.clone(), qroot: a.qroot.clone(), deploy_root: a.deploy_root.clone(), local: a.local, expire: a.expire.clone(), env_setup: a.env_setup.clone(), shell: a.shell.clone(), endpoint_rotates: a.endpoint_rotates, bin_path: a.bin_path.clone(), pre_connect: a.pre_connect.clone(), shared: a.shared, exit_on_idle: a.exit_on_idle }),
+        ClientAction::Add(a) => client_add(&a.name, a.template.as_deref(), ClientAddOpts { queue: a.queue.clone(), host: a.host.clone(), port: a.port, user: a.user.clone(), key: a.key.clone(), password: a.password.clone(), qroot: a.qroot.clone(), deploy_root: a.deploy_root.clone(), local: a.local, expire: a.expire.clone(), env_setup: a.env_setup.clone(), shell: a.shell.clone(), endpoint_rotates: a.endpoint_rotates, bin_path: a.bin_path.clone(), pre_connect: a.pre_connect.clone(), shared: a.shared, exit_on_idle: a.exit_on_idle, note: a.note.clone() }),
         ClientAction::Rename { old, new } => crate::server::client_ops::rename(old, new),
         // Fold the --endpoint-rotates / --no-endpoint-rotates pair
         // into tri-state: Some(true) sets, Some(false) clears,
         // None leaves the row field untouched.
-        ClientAction::Update { name, host, port, user, key, password, endpoint_rotates, no_endpoint_rotates, pre_connect, option, no_options } => crate::server::client_ops::update(
+        ClientAction::Update { name, host, port, user, key, password, endpoint_rotates, no_endpoint_rotates, pre_connect, option, no_options, note, note_rm, no_notes } => crate::server::client_ops::update(
             name,
             crate::server::client_ops::EndpointUpdate {
                 host: host.clone(),
@@ -38,6 +38,9 @@ pub fn client(c: &ClientCmd) -> Result<()> {
                 } else {
                     Some(option.clone())
                 },
+                notes: if note.is_empty() { None } else { Some(note.iter().cloned().collect()) },
+                notes_rm: if note_rm.is_empty() { None } else { Some(note_rm.clone()) },
+                notes_clear: *no_notes,
             },
         ),
         ClientAction::Exec { name, cmd } => {

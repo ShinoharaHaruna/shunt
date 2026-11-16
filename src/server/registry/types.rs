@@ -103,6 +103,11 @@ pub struct ClientEntry {
     /// Cost metadata surfaced to the agent (design.md §9).
     #[serde(default)]
     pub billing: Option<Billing>,
+    /// Probes cannot discover operator-written knowledge such as asset paths
+    /// and box conventions. These notes stay dev-local and must not carry
+    /// secrets because `client show` and status JSON expose them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub notes: BTreeMap<String, String>,
 }
 
 fn is_false(value: &bool) -> bool {

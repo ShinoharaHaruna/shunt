@@ -214,30 +214,31 @@ Las salas viven en una máquina de desarrollo y pueden abarcar sus clients regis
 
 Ejecuta estos comandos en la máquina de desarrollo. Los ejemplos por client usan el client registrado `lab`; añade `--queue eval` para apuntar a la cola con nombre.
 
-| Intención                                         | Comando                                               |
-| ------------------------------------------------- | ----------------------------------------------------- |
-| Ver todas las máquinas, colas y salas             | `shunt status --all --json`                           |
-| Ver envíos pendientes de entrega                  | `shunt spool ls`                                      |
-| Inspeccionar una tarea enviada por su ID          | `shunt task show <id> --json`                         |
-| Leer el flujo de eventos de tareas del server     | `shunt task events`                                   |
-| Redimensionar el pool de workers                  | `shunt workers 4 -c lab`                              |
-| Mover una tarea pending al frente                 | `shunt prio exp1 0 -c lab`                            |
-| Cancelar una tarea pending                        | `shunt cancel exp1 -c lab`                            |
-| Aparcar una tarea pending hasta liberarla         | `shunt hold exp1 -c lab "waiting on lease"`           |
-| Liberar una tarea pending aparcada                | `shunt release exp1 -c lab`                           |
-| Detener el grupo de proceso de una tarea en curso | `shunt kill exp1 -c lab`                              |
-| Vaciar y detener el demonio de una cola           | `shunt queue stop eval -c lab`                        |
-| Refrescar los datos de la máquina                 | `shunt client probe lab`                              |
-| Listar las colas de una máquina                   | `shunt queue ls -c lab`                               |
-| Ejecutar un comando ad-hoc por SSH gestionado     | `shunt client exec lab -- nvidia-smi`                 |
-| Actualizar un endpoint SSH que se ha movido       | `shunt client update lab --host <host> --port <port>` |
-| Limpiar una host key y conexión obsoletas         | `shunt client hostkey lab`                            |
-| Abrir el proxy SOCKS5 inverso opcional            | `shunt tunnel up -c lab`                              |
-| Generar autocompletados de shell                  | `shunt completions zsh`                               |
-| Inspeccionar la versión y la build local          | `shunt version --json`                                |
-| Comprobar si hay un nuevo release                 | `shunt upgrade --check --json`                        |
-| Actualizar el binario local                       | `shunt upgrade`                                       |
-| Actualizar el binario de una cola remota          | `shunt upgrade -c lab --queue eval`                   |
+| Intención                                         | Comando                                                |
+| ------------------------------------------------- | ------------------------------------------------------ |
+| Ver todas las máquinas, colas y salas             | `shunt status --all --json`                            |
+| Ver envíos pendientes de entrega                  | `shunt spool ls`                                       |
+| Inspeccionar una tarea enviada por su ID          | `shunt task show <id> --json`                          |
+| Leer el flujo de eventos de tareas del server     | `shunt task events`                                    |
+| Redimensionar el pool de workers                  | `shunt workers 4 -c lab`                               |
+| Mover una tarea pending al frente                 | `shunt prio exp1 0 -c lab`                             |
+| Cancelar una tarea pending                        | `shunt cancel exp1 -c lab`                             |
+| Aparcar una tarea pending hasta liberarla         | `shunt hold exp1 -c lab "waiting on lease"`            |
+| Liberar una tarea pending aparcada                | `shunt release exp1 -c lab`                            |
+| Detener el grupo de proceso de una tarea en curso | `shunt kill exp1 -c lab`                               |
+| Vaciar y detener el demonio de una cola           | `shunt queue stop eval -c lab`                         |
+| Refrescar los datos de la máquina                 | `shunt client probe lab`                               |
+| Listar las colas de una máquina                   | `shunt queue ls -c lab`                                |
+| Ejecutar un comando ad-hoc por SSH gestionado     | `shunt client exec lab -- nvidia-smi`                  |
+| Actualizar un endpoint SSH que se ha movido       | `shunt client update lab --host <host> --port <port>`  |
+| Registrar notas de referencia por máquina         | `shunt client update lab --note datasets=/data/shared` |
+| Limpiar una host key y conexión obsoletas         | `shunt client hostkey lab`                             |
+| Abrir el proxy SOCKS5 inverso opcional            | `shunt tunnel up -c lab`                               |
+| Generar autocompletados de shell                  | `shunt completions zsh`                                |
+| Inspeccionar la versión y la build local          | `shunt version --json`                                 |
+| Comprobar si hay un nuevo release                 | `shunt upgrade --check --json`                         |
+| Actualizar el binario local                       | `shunt upgrade`                                        |
+| Actualizar el binario de una cola remota          | `shunt upgrade -c lab --queue eval`                    |
 
 Los patrones de control de tareas como `exp1` deben identificar una sola tarea; usa el nombre completo de la entrada de la tarea cuando un patrón sea ambiguo. El libro mayor de tareas mapea un ID de envío a ese nombre de entrada. `task show` consulta la máquina de forma perezosa para resolver un resultado; una entrada fuera de la ventana de estado reciente puede aparecer como `unknown`. El trabajo también puede aparcarse antes de ser reclamable: `--hold` retiene un envío en el spool del lado dev hasta `spool release`, y `--hold-on-box` lo entrega dejando la entrada del lado de la box sin poder reclamarse hasta `shunt release`.
 

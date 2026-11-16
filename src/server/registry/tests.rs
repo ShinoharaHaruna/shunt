@@ -15,7 +15,7 @@ fn client_roundtrip() {
     let _g = HOME_LOCK.lock().unwrap();
     let tmp = crate::testutil::tmp_base().join(format!("shunt-test-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
-    let entry = ClientEntry { name: "box-1".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: "/path/to/key".into(), password: String::new(), options: vec!["ProxyJump=jump.example".into()] }, qroot: "/root/autodl-tmp/queue".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/root/autodl-tmp".into(), facts: BTreeMap::new(), billing: Some(Billing { hourly: 2.6, currency: "cny".into() }) };
+    let entry = ClientEntry { name: "box-1".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "example.invalid".into(), port: 22, user: "root".into(), key: "/path/to/key".into(), password: String::new(), options: vec!["ProxyJump=jump.example".into()] }, qroot: "/root/autodl-tmp/queue".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/root/autodl-tmp".into(), facts: BTreeMap::new(), billing: Some(Billing { hourly: 2.6, currency: "cny".into() }), notes: BTreeMap::new() };
     save_client(&entry).unwrap();
     let back = load_client("box-1").unwrap();
     assert_eq!(back.ssh.port, 22);
@@ -59,6 +59,23 @@ fn ssh_options_default_when_absent_and_omit_when_empty() {
     assert!(!serialized.contains("options"), "{serialized}");
 }
 
+/// `notes` is a serde field like `expire`: pre-notes rows read as
+/// empty, an empty map stays out of the TOML, and values roundtrip.
+#[test]
+fn notes_default_when_absent_omit_when_empty_roundtrip() {
+    let old: ClientEntry = toml::from_str("name = 'box'\ndeploy_root = '/d'\n").unwrap();
+    assert!(old.notes.is_empty());
+    let mut e = old;
+    e.notes.insert("datasets".into(), "/data/shared".into());
+    let text = toml::to_string(&e).unwrap();
+    assert!(text.contains("[notes]"), "{text}");
+    let back: ClientEntry = toml::from_str(&text).unwrap();
+    assert_eq!(back.notes.get("datasets").map(String::as_str), Some("/data/shared"));
+    e.notes.clear();
+    let empty = toml::to_string(&e).unwrap();
+    assert!(!empty.contains("[notes]"), "{empty}");
+}
+
 /// The `.fail` sidecar records the streak and the epoch of the newest
 /// failure (design.md §4.1 probe penalty). A file in the pre-timestamp
 /// single-line format still yields its count with no clock — a
@@ -96,7 +113,7 @@ fn edited_row_clears_the_fail_streak() {
     let _g = HOME_LOCK.lock().unwrap();
     let tmp = crate::testutil::tmp_base().join(format!("shunt-test-renew-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
-    let mut row = ClientEntry { name: "renew-me".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: "2020-01-01T00:00:00Z".into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: "/q".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/root".into(), facts: BTreeMap::new(), billing: None };
+    let mut row = ClientEntry { name: "renew-me".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: "2020-01-01T00:00:00Z".into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: "/q".into(), queues: BTreeMap::new(), default_queue: None, deploy_root: "/root".into(), facts: BTreeMap::new(), billing: None, notes: BTreeMap::new() };
     save_client(&row).unwrap();
     for _ in 0..3 {
         conn_fail_bump(&row.name);
@@ -252,7 +269,7 @@ fn empty_qroot_row_is_unusable() {
     let _g = HOME_LOCK.lock().unwrap();
     let tmp = crate::testutil::tmp_base().join(format!("shunt-test-qroot-{}", std::process::id()));
     std::env::set_var("SHUNT_HOME", &tmp);
-    let entry = ClientEntry { name: "noq".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: String::new(), queues: BTreeMap::new(), default_queue: None, deploy_root: String::new(), facts: BTreeMap::new(), billing: None };
+    let entry = ClientEntry { name: "noq".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint::default(), qroot: String::new(), queues: BTreeMap::new(), default_queue: None, deploy_root: String::new(), facts: BTreeMap::new(), billing: None, notes: BTreeMap::new() };
     save_client(&entry).unwrap();
 
     let err = load_client("noq").unwrap_err().to_string();

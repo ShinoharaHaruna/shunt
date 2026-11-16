@@ -214,30 +214,31 @@ Les rooms vivent sur une machine de dev et peuvent couvrir ses clients enregistr
 
 Exécutez ces commandes sur la machine de dev. Les exemples spécifiques à un client utilisent le client enregistré `lab` ; ajoutez `--queue eval` pour cibler la queue nommée.
 
-| Intention                                           | Commande                                              |
-| --------------------------------------------------- | ----------------------------------------------------- |
-| Voir toutes les machines, queues et rooms           | `shunt status --all --json`                           |
-| Voir les soumissions en attente de livraison        | `shunt spool ls`                                      |
-| Inspecter une tâche soumise par son ID              | `shunt task show <id> --json`                         |
-| Lire le flux d'événements de tâches du serveur      | `shunt task events`                                   |
-| Redimensionner le pool de workers                   | `shunt workers 4 -c lab`                              |
-| Avancer une tâche pending en tête de file           | `shunt prio exp1 0 -c lab`                            |
-| Annuler une tâche pending                           | `shunt cancel exp1 -c lab`                            |
-| Parquer une tâche pending jusqu'à sa libération     | `shunt hold exp1 -c lab "waiting on lease"`           |
-| Libérer une tâche pending parquée                   | `shunt release exp1 -c lab`                           |
-| Arrêter le groupe de processus d'une tâche en cours | `shunt kill exp1 -c lab`                              |
-| Vider et arrêter le daemon d'une queue              | `shunt queue stop eval -c lab`                        |
-| Rafraîchir les informations de la machine           | `shunt client probe lab`                              |
-| Lister les queues d'une machine                     | `shunt queue ls -c lab`                               |
-| Exécuter une commande ad hoc via SSH managé         | `shunt client exec lab -- nvidia-smi`                 |
-| Mettre à jour un endpoint SSH déplacé               | `shunt client update lab --host <host> --port <port>` |
-| Effacer une clé d'hôte et une connexion périmées    | `shunt client hostkey lab`                            |
-| Ouvrir le proxy SOCKS5 inverse optionnel            | `shunt tunnel up -c lab`                              |
-| Générer les complétions du shell                    | `shunt completions zsh`                               |
-| Inspecter la version et le build locaux             | `shunt version --json`                                |
-| Vérifier l'existence d'une nouvelle release         | `shunt upgrade --check --json`                        |
-| Mettre à niveau le binaire local                    | `shunt upgrade`                                       |
-| Mettre à niveau le binaire d'une queue distante     | `shunt upgrade -c lab --queue eval`                   |
+| Intention                                           | Commande                                               |
+| --------------------------------------------------- | ------------------------------------------------------ |
+| Voir toutes les machines, queues et rooms           | `shunt status --all --json`                            |
+| Voir les soumissions en attente de livraison        | `shunt spool ls`                                       |
+| Inspecter une tâche soumise par son ID              | `shunt task show <id> --json`                          |
+| Lire le flux d'événements de tâches du serveur      | `shunt task events`                                    |
+| Redimensionner le pool de workers                   | `shunt workers 4 -c lab`                               |
+| Avancer une tâche pending en tête de file           | `shunt prio exp1 0 -c lab`                             |
+| Annuler une tâche pending                           | `shunt cancel exp1 -c lab`                             |
+| Parquer une tâche pending jusqu'à sa libération     | `shunt hold exp1 -c lab "waiting on lease"`            |
+| Libérer une tâche pending parquée                   | `shunt release exp1 -c lab`                            |
+| Arrêter le groupe de processus d'une tâche en cours | `shunt kill exp1 -c lab`                               |
+| Vider et arrêter le daemon d'une queue              | `shunt queue stop eval -c lab`                         |
+| Rafraîchir les informations de la machine           | `shunt client probe lab`                               |
+| Lister les queues d'une machine                     | `shunt queue ls -c lab`                                |
+| Exécuter une commande ad hoc via SSH managé         | `shunt client exec lab -- nvidia-smi`                  |
+| Mettre à jour un endpoint SSH déplacé               | `shunt client update lab --host <host> --port <port>`  |
+| Noter des informations de référence par machine     | `shunt client update lab --note datasets=/data/shared` |
+| Effacer une clé d'hôte et une connexion périmées    | `shunt client hostkey lab`                             |
+| Ouvrir le proxy SOCKS5 inverse optionnel            | `shunt tunnel up -c lab`                               |
+| Générer les complétions du shell                    | `shunt completions zsh`                                |
+| Inspecter la version et le build locaux             | `shunt version --json`                                 |
+| Vérifier l'existence d'une nouvelle release         | `shunt upgrade --check --json`                         |
+| Mettre à niveau le binaire local                    | `shunt upgrade`                                        |
+| Mettre à niveau le binaire d'une queue distante     | `shunt upgrade -c lab --queue eval`                    |
 
 Les motifs de contrôle de tâches comme `exp1` doivent identifier une seule tâche ; utilisez le nom complet de l'entrée de tâche quand un motif est ambigu. Le ledger des tâches fait correspondre un ID de soumission à ce nom d'entrée. `task show` interroge la machine à la demande pour résoudre un résultat ; une entrée hors de la fenêtre de status récent peut apparaître comme `unknown`. Le travail peut aussi être parqué avant d'être réclamable : `--hold` retient une soumission dans le spool côté dev jusqu'à `spool release`, et `--hold-on-box` la livre en laissant l'entrée côté box non réclamable jusqu'à `shunt release`.
 

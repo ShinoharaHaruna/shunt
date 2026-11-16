@@ -55,6 +55,10 @@ pub struct ClientStatus {
     pub endpoint_rotates: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub facts: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    /// Registry knowledge remains available even when the box cannot answer.
+    /// These notes stay dev-local and never travel to the box (design.md §4.1).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub notes: BTreeMap<String, String>,
     /// Present only when an automatic (background) sweep chose not to
     /// touch this client: the row is reported from the registry alone
     /// and `queues` is empty because nobody asked, not because the box
@@ -132,7 +136,7 @@ fn probe_skip(client: &ClientEntry, streak: u32, last_fail: Option<i64>, now: i6
 /// itself knows, plus why. `queues` is empty because nobody asked.
 fn skipped_status(client: &ClientEntry, skip: ProbeSkip) -> ClientStatus {
     let fails = registry::conn_fail_streak(client);
-    ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: None, billing: client.billing.clone(), expire: (!client.expire.is_empty()).then(|| client.expire.clone()), expires_in_s: expires_left_s(client), connect_failures: (fails > 0).then_some(fails), endpoint_rotates: client.endpoint_rotates, facts: (!client.facts.is_empty()).then(|| client.facts.clone()), skip: Some(skip), inactive: registry::inactive_reason(client, fails) }
+    ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: None, billing: client.billing.clone(), expire: (!client.expire.is_empty()).then(|| client.expire.clone()), expires_in_s: expires_left_s(client), connect_failures: (fails > 0).then_some(fails), endpoint_rotates: client.endpoint_rotates, facts: (!client.facts.is_empty()).then(|| client.facts.clone()), notes: client.notes.clone(), skip: Some(skip), inactive: registry::inactive_reason(client, fails) }
 }
 
 /// Query one client; used by `status -c` and the aggregate loop. Explicit
@@ -174,7 +178,7 @@ pub fn query(t: &dyn Transport, client: &ClientEntry) -> ClientStatus {
     let fails = registry::conn_fail_streak(client);
     let connect_failures = (fails > 0).then_some(fails);
     let inactive = registry::inactive_reason(client, fails);
-    ClientStatus { reachable: queues.values().any(|q| q.reachable), queues, report, error: (!errors.is_empty()).then(|| errors.join("; ")), billing: client.billing.clone(), expire, expires_in_s, connect_failures, endpoint_rotates, facts: (!client.facts.is_empty()).then(|| client.facts.clone()), skip: None, inactive }
+    ClientStatus { reachable: queues.values().any(|q| q.reachable), queues, report, error: (!errors.is_empty()).then(|| errors.join("; ")), billing: client.billing.clone(), expire, expires_in_s, connect_failures, endpoint_rotates, facts: (!client.facts.is_empty()).then(|| client.facts.clone()), notes: client.notes.clone(), skip: None, inactive }
 }
 
 /// §15 three-state verdict for a binary that answered: the wire
@@ -218,11 +222,20 @@ pub fn run_client(name: &str, json: bool) -> Result<()> {
             if let Some(inactive) = &status.inactive {
                 report["inactive"] = serde_json::to_value(inactive)?;
             }
+            // The wire report cannot know row-local notes; inject them
+            // at top level the way ClientStatus mirrors them.
+            if !client.notes.is_empty() {
+                report["notes"] = serde_json::to_value(&client.notes)?;
+            }
             println!("{}", serde_json::to_string_pretty(&report)?);
             return Ok(());
         }
-        let reason = status.inactive.as_ref().map(|inactive| format!("; inactive: {inactive}")).unwrap_or_default();
-        anyhow::bail!("{}{reason}: {}; re-run `shunt client bootstrap {name}` if the queue binary is missing or stale", name, queue.error.as_deref().unwrap_or("queue status unavailable"));
+        // JSON callers need registry notes even when the queue cannot answer.
+        // Preserve the existing text error for callers without --json.
+        if !json {
+            let reason = status.inactive.as_ref().map(|inactive| format!("; inactive: {inactive}")).unwrap_or_default();
+            anyhow::bail!("{}{reason}: {}; re-run `shunt client bootstrap {name}` if the queue binary is missing or stale", name, queue.error.as_deref().unwrap_or("queue status unavailable"));
+        }
     }
     if json {
         let mut value = serde_json::to_value(&status)?;
@@ -285,8 +298,8 @@ pub fn probe_all(force: bool) -> Result<Vec<ProbedClient>> {
                 // A panicked probe degrades to an error row like
                 // every other failure mode here — one bad thread
                 // must never abort the whole aggregate.
-                (None, Some(h)) => h.join().unwrap_or_else(|_| ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: Some("probe panicked".into()), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None, skip: None, inactive: None }),
-                (None, None) => ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: Some(format!("cannot load row: {:#}", c.as_ref().unwrap_err())), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None, skip: None, inactive: None },
+                (None, Some(h)) => h.join().unwrap_or_else(|_| ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: Some("probe panicked".into()), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None, notes: c.as_ref().map(|c| c.notes.clone()).unwrap_or_default(), skip: None, inactive: None }),
+                (None, None) => ClientStatus { reachable: false, queues: BTreeMap::new(), report: None, error: Some(format!("cannot load row: {:#}", c.as_ref().unwrap_err())), billing: None, expire: None, expires_in_s: None, connect_failures: None, endpoint_rotates: false, facts: None, notes: c.as_ref().map(|c| c.notes.clone()).unwrap_or_default(), skip: None, inactive: None },
             })
             .collect()
     });
@@ -482,7 +495,7 @@ mod tests {
     use super::*;
 
     fn row(expire: &str) -> ClientEntry {
-        ClientEntry { name: "box".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: expire.into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: registry::SshEndpoint::default(), qroot: "/q".into(), deploy_root: "/root".into(), facts: Default::default(), billing: None, queues: Default::default(), default_queue: None }
+        ClientEntry { name: "box".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: expire.into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: registry::SshEndpoint::default(), qroot: "/q".into(), deploy_root: "/root".into(), facts: Default::default(), billing: None, queues: Default::default(), default_queue: None, notes: Default::default() }
     }
 
     /// The penalty doubles from 30 s per failure past the escalation
@@ -543,3 +556,7 @@ mod tests {
         assert!(backoff.contains("2m"), "{backoff}");
     }
 }
+
+#[cfg(test)]
+#[path = "status_tests.rs"]
+mod status_tests;

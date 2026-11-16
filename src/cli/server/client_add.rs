@@ -24,6 +24,8 @@ pub(crate) struct ClientAddOpts {
     pub(crate) pre_connect: Option<String>,
     pub(crate) shared: bool,
     pub(crate) exit_on_idle: bool,
+    /// `--note KEY=VALUE` pairs, already split at the clap boundary.
+    pub(crate) note: Vec<(String, String)>,
 }
 
 pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts) -> Result<()> {
@@ -39,7 +41,7 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
     let suppress_key_generation = opts.key.as_deref() == Some("");
     let mut entry = match template {
         Some(t) => load_vendor_template(t)?,
-        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new(), options: Vec::new() }, qroot: String::new(), queues: Default::default(), default_queue: None, deploy_root: String::new(), facts: Default::default(), billing: None },
+        None => ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: String::new(), port: 22, user: "root".into(), key: String::new(), password: String::new(), options: Vec::new() }, qroot: String::new(), queues: Default::default(), default_queue: None, deploy_root: String::new(), facts: Default::default(), billing: None, notes: Default::default() },
     };
     entry.name = name.into();
     // Adding a row for the built-in name materializes the loopback
@@ -101,6 +103,9 @@ pub(crate) fn client_add(name: &str, template: Option<&str>, opts: ClientAddOpts
     if opts.endpoint_rotates {
         entry.endpoint_rotates = true;
     }
+    // Notes are dev-local row content (never pushed to the box);
+    // a repeated key in one command line keeps the last value.
+    entry.notes.extend(opts.note);
     // qroot defaults to <deploy_root>/queue — an empty qroot would
     // make remote ops land in the box's CWD (silent wrongness).
     if entry.qroot.is_empty() && !entry.deploy_root.is_empty() {
@@ -189,7 +194,7 @@ mod tests {
     use super::{client_add, ClientAddOpts};
 
     fn opts(key: Option<&str>) -> ClientAddOpts {
-        ClientAddOpts { queue: None, host: Some("example.invalid".into()), port: Some(22), user: Some("user".into()), key: key.map(str::to_string), qroot: Some("/data/queue".into()), deploy_root: Some("/data".into()), local: false, expire: None, env_setup: None, shell: None, endpoint_rotates: false, password: Some("pw".into()), bin_path: None, pre_connect: None, shared: false, exit_on_idle: false }
+        ClientAddOpts { queue: None, host: Some("example.invalid".into()), port: Some(22), user: Some("user".into()), key: key.map(str::to_string), qroot: Some("/data/queue".into()), deploy_root: Some("/data".into()), local: false, expire: None, env_setup: None, shell: None, endpoint_rotates: false, password: Some("pw".into()), bin_path: None, pre_connect: None, shared: false, exit_on_idle: false, note: Vec::new() }
     }
 
     #[test]
@@ -209,6 +214,23 @@ mod tests {
         assert!(std::path::Path::new(&generated.ssh.key).exists());
         assert!(std::path::Path::new(&format!("{}.pub", generated.ssh.key)).exists());
 
+        std::env::remove_var("SHUNT_HOME");
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    /// `--note KEY=VALUE` lands on the written row (dev-local
+    /// registry content, never pushed).
+    #[test]
+    fn note_pairs_seed_the_row() {
+        let _g = crate::server::registry::tests::HOME_LOCK.lock().unwrap();
+        let home = crate::testutil::tmp_base().join(format!("shunt-add-note-{}", std::process::id()));
+        std::env::set_var("SHUNT_HOME", &home);
+        let mut o = opts(Some(""));
+        o.note = vec![("datasets".into(), "/data/shared".into()), ("quirks".into(), "gpu0 reserved".into())];
+        client_add("noted", None, o).unwrap();
+        let row = crate::server::registry::load_client("noted").unwrap();
+        assert_eq!(row.notes.get("datasets").map(String::as_str), Some("/data/shared"));
+        assert_eq!(row.notes.get("quirks").map(String::as_str), Some("gpu0 reserved"));
         std::env::remove_var("SHUNT_HOME");
         std::fs::remove_dir_all(home).ok();
     }

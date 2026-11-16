@@ -214,30 +214,31 @@ shunt status --all --json --as experiments
 
 Эти команды выполняются на dev-машине. В примерах для конкретного клиента используется зарегистрированный клиент `lab`; добавьте `--queue eval`, чтобы адресовать именованную очередь.
 
-| Намерение                                            | Команда                                               |
-| ---------------------------------------------------- | ----------------------------------------------------- |
-| Показать все машины, очереди и комнаты               | `shunt status --all --json`                           |
-| Показать отправки, ожидающие доставки                | `shunt spool ls`                                      |
-| Проверить отправленную задачу по её ID               | `shunt task show <id> --json`                         |
-| Читать поток событий задач на server                 | `shunt task events`                                   |
-| Изменить размер пула воркеров                        | `shunt workers 4 -c lab`                              |
-| Переместить задачу pending в начало                  | `shunt prio exp1 0 -c lab`                            |
-| Отменить задачу pending                              | `shunt cancel exp1 -c lab`                            |
-| Придержать задачу pending до освобождения            | `shunt hold exp1 -c lab "waiting on lease"`           |
-| Освободить придержанную задачу pending               | `shunt release exp1 -c lab`                           |
-| Остановить группу процессов выполняемой задачи       | `shunt kill exp1 -c lab`                              |
-| Опустошить и остановить один демон очереди           | `shunt queue stop eval -c lab`                        |
-| Обновить сведения о машине                           | `shunt client probe lab`                              |
-| Перечислить очереди на машине                        | `shunt queue ls -c lab`                               |
-| Выполнить произвольную команду через управляемый SSH | `shunt client exec lab -- nvidia-smi`                 |
-| Обновить перемещённую конечную точку SSH             | `shunt client update lab --host <host> --port <port>` |
-| Очистить устаревший ключ хоста и соединение          | `shunt client hostkey lab`                            |
-| Открыть опциональный обратный SOCKS5-прокси          | `shunt tunnel up -c lab`                              |
-| Сгенерировать автодополнения shell                   | `shunt completions zsh`                               |
-| Показать локальную версию и сборку                   | `shunt version --json`                                |
-| Проверить наличие нового релиза                      | `shunt upgrade --check --json`                        |
-| Обновить локальный бинарный файл                     | `shunt upgrade`                                       |
-| Обновить бинарный файл одной удалённой очереди       | `shunt upgrade -c lab --queue eval`                   |
+| Намерение                                            | Команда                                                |
+| ---------------------------------------------------- | ------------------------------------------------------ |
+| Показать все машины, очереди и комнаты               | `shunt status --all --json`                            |
+| Показать отправки, ожидающие доставки                | `shunt spool ls`                                       |
+| Проверить отправленную задачу по её ID               | `shunt task show <id> --json`                          |
+| Читать поток событий задач на server                 | `shunt task events`                                    |
+| Изменить размер пула воркеров                        | `shunt workers 4 -c lab`                               |
+| Переместить задачу pending в начало                  | `shunt prio exp1 0 -c lab`                             |
+| Отменить задачу pending                              | `shunt cancel exp1 -c lab`                             |
+| Придержать задачу pending до освобождения            | `shunt hold exp1 -c lab "waiting on lease"`            |
+| Освободить придержанную задачу pending               | `shunt release exp1 -c lab`                            |
+| Остановить группу процессов выполняемой задачи       | `shunt kill exp1 -c lab`                               |
+| Опустошить и остановить один демон очереди           | `shunt queue stop eval -c lab`                         |
+| Обновить сведения о машине                           | `shunt client probe lab`                               |
+| Перечислить очереди на машине                        | `shunt queue ls -c lab`                                |
+| Выполнить произвольную команду через управляемый SSH | `shunt client exec lab -- nvidia-smi`                  |
+| Обновить перемещённую конечную точку SSH             | `shunt client update lab --host <host> --port <port>`  |
+| Записать справочные заметки о машине                 | `shunt client update lab --note datasets=/data/shared` |
+| Очистить устаревший ключ хоста и соединение          | `shunt client hostkey lab`                             |
+| Открыть опциональный обратный SOCKS5-прокси          | `shunt tunnel up -c lab`                               |
+| Сгенерировать автодополнения shell                   | `shunt completions zsh`                                |
+| Показать локальную версию и сборку                   | `shunt version --json`                                 |
+| Проверить наличие нового релиза                      | `shunt upgrade --check --json`                         |
+| Обновить локальный бинарный файл                     | `shunt upgrade`                                        |
+| Обновить бинарный файл одной удалённой очереди       | `shunt upgrade -c lab --queue eval`                    |
 
 Шаблоны управления задачами вроде `exp1` должны идентифицировать одну задачу; при неоднозначности используйте полное имя записи задачи. Журнал задач сопоставляет ID отправки с этим именем записи. `task show` лениво опрашивает машину для определения исхода; запись за пределами окна недавнего статуса может отображаться как `unknown`. Работу можно придержать и до того, как её можно забрать: `--hold` держит отправку в spool на стороне dev до `spool release`, а `--hold-on-box` доставляет её, оставляя запись на стороне box недоступной для захвата до `shunt release`.
 

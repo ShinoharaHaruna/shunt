@@ -198,6 +198,34 @@ fn room_compact_and_read_mode_forms() {
     }
 }
 
+/// Per-client notes (issue #25): `--note KEY=VALUE` repeats on
+/// `add` and `update` — values may hold `=` and be empty —
+/// `--note-rm` repeats keys, and `--no-notes` conflicts with both.
+#[test]
+fn client_note_forms() {
+    let cli = parse(&["shunt", "client", "update", "box", "--note", "k=v", "--note", "a=b=c", "--note", "empty=", "--note-rm", "old", "--note-rm", "gone"]);
+    let Command::Client(c) = cli.command else { panic!() };
+    let ClientAction::Update { note, note_rm, .. } = c.action else { panic!() };
+    assert_eq!(note, [("k", "v"), ("a", "b=c"), ("empty", "")].map(|(k, v)| (k.to_string(), v.to_string())));
+    assert_eq!(note_rm, ["old", "gone"]);
+
+    let cli = parse(&["shunt", "client", "update", "box", "--no-notes"]);
+    let Command::Client(c) = cli.command else { panic!() };
+    assert!(matches!(c.action, ClientAction::Update { no_notes: true, .. }));
+
+    let cli = parse(&["shunt", "client", "add", "box", "--note", "gpu=reserved"]);
+    let Command::Client(c) = cli.command else { panic!() };
+    let ClientAction::Add(a) = c.action else { panic!() };
+    assert_eq!(a.note, [("gpu", "reserved")].map(|(k, v)| (k.to_string(), v.to_string())));
+}
+
+#[test]
+fn client_note_conflicts_and_malformed() {
+    for argv in [vec!["shunt", "client", "update", "box", "--no-notes", "--note", "k=v"], vec!["shunt", "client", "update", "box", "--no-notes", "--note-rm", "k"], vec!["shunt", "client", "update", "box", "--note", "no-equals"], vec!["shunt", "client", "update", "box", "--note", "=v"], vec!["shunt", "client", "add", "box", "--note", "no-equals"]] {
+        assert!(Cli::try_parse_from(&argv).is_err(), "accepted {argv:?}");
+    }
+}
+
 /// `status --as` carries the rooms block (§17.5) and only makes
 /// sense on the server aggregate — a -c wire op or a local
 /// --root has no rooms to report.

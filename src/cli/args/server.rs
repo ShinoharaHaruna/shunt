@@ -195,6 +195,21 @@ pub struct ClientAddArgs {
     /// Initial queue name (default: default)
     #[arg(long)]
     pub queue: Option<String>,
+    /// Dev-local reference knowledge printed by `client show` and status JSON.
+    /// Repeat to set multiple keys. Never pushed to the box. Must not carry secrets
+    #[arg(long, value_name = "KEY=VALUE", value_parser = note_pair)]
+    pub note: Vec<(String, String)>,
+}
+
+/// Splitting once preserves `=` inside note values.
+fn note_pair(raw: &str) -> Result<(String, String), String> {
+    let Some((key, value)) = raw.split_once('=') else {
+        return Err(format!("expected KEY=VALUE, got '{raw}' (missing '='); example: --note datasets=/data/shared"));
+    };
+    if key.is_empty() {
+        return Err(format!("empty note key in '{raw}': supply KEY=VALUE with a nonempty key"));
+    }
+    Ok((key.into(), value.into()))
 }
 
 // Add is parsed once per invocation — a fat variant is fine and
@@ -208,16 +223,11 @@ pub enum ClientAction {
     Ls,
     /// Show one client row
     Show { name: String },
-    /// Update a row's ssh endpoint after the vendor moved the box
-    /// (rotating IP/port, rebuilt container). Also drops stale
-    /// known_hosts entries, kills the mux master, clears the
-    /// conn-fail streak, and tears down a recorded tunnel — things
-    /// hand-editing the row would leave pinned to the dead endpoint.
-    /// Warns when another row already sits at the same host:port
-    /// (legal behind NAT, suspicious otherwise). Other row fields
-    /// (qroot, deploy_root, expire, env_setup) are not updatable
-    /// here — edit clients/<name>.toml directly; a moved qroot
-    /// means relocating the remote queue, not just a string.
+    /// Update SSH connection settings or dev-local notes.
+    /// Endpoint changes clear connection state that would otherwise remain
+    /// pinned to the old endpoint. Notes changes leave connection state alone.
+    /// Manage queue fields with `shunt queue set`. Hand-edit deploy_root and
+    /// expire in clients/<name>.toml.
     Update {
         name: String,
         /// New SSH host
@@ -258,6 +268,17 @@ pub enum ClientAction {
         /// Clear the row's ssh.options list
         #[arg(long, overrides_with = "option")]
         no_options: bool,
+        /// Set or overwrite a dev-local note (repeatable, last duplicate wins).
+        /// Printed by `client show` and status JSON. Never pushed to the box.
+        /// Must not carry secrets
+        #[arg(long, value_name = "KEY=VALUE", value_parser = note_pair)]
+        note: Vec<(String, String)>,
+        /// Remove a note key (repeatable, absent keys are a no-op)
+        #[arg(long, value_name = "KEY")]
+        note_rm: Vec<String>,
+        /// Clear the client's whole notes map
+        #[arg(long, conflicts_with_all = ["note", "note_rm"])]
+        no_notes: bool,
     },
     /// Deregister a box: remote stop + key revocation (best-effort),
     /// then row/keys/mux/state/spool/binding removal locally. On the

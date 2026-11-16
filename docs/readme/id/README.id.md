@@ -214,30 +214,31 @@ Ruang berada di satu mesin dev dan dapat mencakup client terdaftarnya. Agen yang
 
 Jalankan perintah berikut di mesin dev. Contoh khusus client memakai client terdaftar `lab`; tambahkan `--queue eval` untuk menargetkan queue bernama.
 
-| Maksud                                       | Perintah                                              |
-| -------------------------------------------- | ----------------------------------------------------- |
-| Lihat semua mesin, queue, dan ruang          | `shunt status --all --json`                           |
-| Lihat pengiriman yang menunggu dikirim       | `shunt spool ls`                                      |
-| Periksa tugas terkirim berdasarkan ID-nya    | `shunt task show <id> --json`                         |
-| Baca event stream tugas sisi server          | `shunt task events`                                   |
-| Ubah ukuran pool worker                      | `shunt workers 4 -c lab`                              |
-| Pindahkan tugas pending ke antrean depan     | `shunt prio exp1 0 -c lab`                            |
-| Batalkan tugas pending                       | `shunt cancel exp1 -c lab`                            |
-| Parkir tugas pending sampai dirilis          | `shunt hold exp1 -c lab "waiting on lease"`           |
-| Rilis tugas pending yang diparkir            | `shunt release exp1 -c lab`                           |
-| Hentikan process group tugas yang berjalan   | `shunt kill exp1 -c lab`                              |
-| Drain dan hentikan satu daemon queue         | `shunt queue stop eval -c lab`                        |
-| Segarkan fakta mesin                         | `shunt client probe lab`                              |
-| Daftar queue di satu mesin                   | `shunt queue ls -c lab`                               |
-| Jalankan perintah ad-hoc lewat SSH terkelola | `shunt client exec lab -- nvidia-smi`                 |
-| Perbarui endpoint SSH yang berpindah         | `shunt client update lab --host <host> --port <port>` |
-| Bersihkan host key dan koneksi yang usang    | `shunt client hostkey lab`                            |
-| Buka proxy SOCKS5 reverse opsional           | `shunt tunnel up -c lab`                              |
-| Buat completion shell                        | `shunt completions zsh`                               |
-| Periksa versi dan build lokal                | `shunt version --json`                                |
-| Periksa rilis baru                           | `shunt upgrade --check --json`                        |
-| Upgrade biner lokal                          | `shunt upgrade`                                       |
-| Upgrade biner satu queue remote              | `shunt upgrade -c lab --queue eval`                   |
+| Maksud                                       | Perintah                                               |
+| -------------------------------------------- | ------------------------------------------------------ |
+| Lihat semua mesin, queue, dan ruang          | `shunt status --all --json`                            |
+| Lihat pengiriman yang menunggu dikirim       | `shunt spool ls`                                       |
+| Periksa tugas terkirim berdasarkan ID-nya    | `shunt task show <id> --json`                          |
+| Baca event stream tugas sisi server          | `shunt task events`                                    |
+| Ubah ukuran pool worker                      | `shunt workers 4 -c lab`                               |
+| Pindahkan tugas pending ke antrean depan     | `shunt prio exp1 0 -c lab`                             |
+| Batalkan tugas pending                       | `shunt cancel exp1 -c lab`                             |
+| Parkir tugas pending sampai dirilis          | `shunt hold exp1 -c lab "waiting on lease"`            |
+| Rilis tugas pending yang diparkir            | `shunt release exp1 -c lab`                            |
+| Hentikan process group tugas yang berjalan   | `shunt kill exp1 -c lab`                               |
+| Drain dan hentikan satu daemon queue         | `shunt queue stop eval -c lab`                         |
+| Segarkan fakta mesin                         | `shunt client probe lab`                               |
+| Daftar queue di satu mesin                   | `shunt queue ls -c lab`                                |
+| Jalankan perintah ad-hoc lewat SSH terkelola | `shunt client exec lab -- nvidia-smi`                  |
+| Perbarui endpoint SSH yang berpindah         | `shunt client update lab --host <host> --port <port>`  |
+| Catat catatan referensi per mesin            | `shunt client update lab --note datasets=/data/shared` |
+| Bersihkan host key dan koneksi yang usang    | `shunt client hostkey lab`                             |
+| Buka proxy SOCKS5 reverse opsional           | `shunt tunnel up -c lab`                               |
+| Buat completion shell                        | `shunt completions zsh`                                |
+| Periksa versi dan build lokal                | `shunt version --json`                                 |
+| Periksa rilis baru                           | `shunt upgrade --check --json`                         |
+| Upgrade biner lokal                          | `shunt upgrade`                                        |
+| Upgrade biner satu queue remote              | `shunt upgrade -c lab --queue eval`                    |
 
 Pola kontrol tugas seperti `exp1` harus mengidentifikasi satu tugas; gunakan nama entri tugas lengkap bila polanya ambigu. Ledger tugas memetakan ID pengiriman ke nama entri itu. `task show` meminta ke mesin secara lazy untuk menyelesaikan hasil; entri di luar jendela status terkini bisa tampil sebagai `unknown`. Pekerjaan juga bisa diparkir sebelum bisa diklaim: `--hold` menahan pengiriman di spool sisi dev sampai `spool release`, dan `--hold-on-box` mengirimkannya tetapi membuat entri di sisi box tidak bisa diklaim sampai `shunt release`.
 

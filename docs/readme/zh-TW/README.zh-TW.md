@@ -214,30 +214,31 @@ shunt status --all --json --as experiments
 
 以下指令在開發機上執行。針對具體 client 的範例使用已註冊的 `lab`；加上 `--queue eval` 即可指定具名佇列。
 
-| 意圖                         | 指令                                                  |
-| ---------------------------- | ----------------------------------------------------- |
-| 檢視所有機器、佇列與房間     | `shunt status --all --json`                           |
-| 檢視等待投遞的提交           | `shunt spool ls`                                      |
-| 按 ID 檢視已提交的任務       | `shunt task show <id> --json`                         |
-| 讀取 server 端的任務事件串流 | `shunt task events`                                   |
-| 調整 worker 池大小           | `shunt workers 4 -c lab`                              |
-| 將 pending 任務移到佇列前端  | `shunt prio exp1 0 -c lab`                            |
-| 取消 pending 任務            | `shunt cancel exp1 -c lab`                            |
-| 暫停 pending 任務直到放行    | `shunt hold exp1 -c lab "waiting on lease"`           |
-| 放行已暫停的 pending 任務    | `shunt release exp1 -c lab`                           |
-| 停止執行中任務的程序群組     | `shunt kill exp1 -c lab`                              |
-| 排空並停止一條佇列的守護程式 | `shunt queue stop eval -c lab`                        |
-| 更新機器資訊                 | `shunt client probe lab`                              |
-| 列出機器上的佇列             | `shunt queue ls -c lab`                               |
-| 透過受管 SSH 執行臨時指令    | `shunt client exec lab -- nvidia-smi`                 |
-| 更新發生變動的 SSH 端點      | `shunt client update lab --host <host> --port <port>` |
-| 清除過期的主機金鑰與連線     | `shunt client hostkey lab`                            |
-| 開啟可選的反向 SOCKS5 代理   | `shunt tunnel up -c lab`                              |
-| 產生 shell 自動補全          | `shunt completions zsh`                               |
-| 檢視本機版本與建置資訊       | `shunt version --json`                                |
-| 檢查新版本                   | `shunt upgrade --check --json`                        |
-| 升級本機執行檔               | `shunt upgrade`                                       |
-| 升級一條遠端佇列的執行檔     | `shunt upgrade -c lab --queue eval`                   |
+| 意圖                         | 指令                                                   |
+| ---------------------------- | ------------------------------------------------------ |
+| 檢視所有機器、佇列與房間     | `shunt status --all --json`                            |
+| 檢視等待投遞的提交           | `shunt spool ls`                                       |
+| 按 ID 檢視已提交的任務       | `shunt task show <id> --json`                          |
+| 讀取 server 端的任務事件串流 | `shunt task events`                                    |
+| 調整 worker 池大小           | `shunt workers 4 -c lab`                               |
+| 將 pending 任務移到佇列前端  | `shunt prio exp1 0 -c lab`                             |
+| 取消 pending 任務            | `shunt cancel exp1 -c lab`                             |
+| 暫停 pending 任務直到放行    | `shunt hold exp1 -c lab "waiting on lease"`            |
+| 放行已暫停的 pending 任務    | `shunt release exp1 -c lab`                            |
+| 停止執行中任務的程序群組     | `shunt kill exp1 -c lab`                               |
+| 排空並停止一條佇列的守護程式 | `shunt queue stop eval -c lab`                         |
+| 更新機器資訊                 | `shunt client probe lab`                               |
+| 列出機器上的佇列             | `shunt queue ls -c lab`                                |
+| 透過受管 SSH 執行臨時指令    | `shunt client exec lab -- nvidia-smi`                  |
+| 更新發生變動的 SSH 端點      | `shunt client update lab --host <host> --port <port>`  |
+| 記錄每台機器的參考備註       | `shunt client update lab --note datasets=/data/shared` |
+| 清除過期的主機金鑰與連線     | `shunt client hostkey lab`                             |
+| 開啟可選的反向 SOCKS5 代理   | `shunt tunnel up -c lab`                               |
+| 產生 shell 自動補全          | `shunt completions zsh`                                |
+| 檢視本機版本與建置資訊       | `shunt version --json`                                 |
+| 檢查新版本                   | `shunt upgrade --check --json`                         |
+| 升級本機執行檔               | `shunt upgrade`                                        |
+| 升級一條遠端佇列的執行檔     | `shunt upgrade -c lab --queue eval`                    |
 
 像 `exp1` 這樣的任務控制 pattern 必須能唯一對應一個任務；存在歧義時，使用完整的任務條目名。任務台帳將提交 ID 對應到該條目名。`task show` 按需查詢機器以確定結果；超出近期狀態窗口的條目可能顯示為 `unknown`。任務也可以在可領取之前先掛起：`--hold` 把提交留在 dev 側 spool，直到 `spool release`；`--hold-on-box` 照常投遞，但讓 box 側的條目在 `shunt release` 之前不可領取。
 

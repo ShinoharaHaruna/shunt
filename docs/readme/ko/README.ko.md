@@ -214,30 +214,31 @@ Room은 한 개발 머신에 있으며 그곳에 등록된 client들에 걸칠 �
 
 다음 명령은 개발 머신에서 실행한다. Client별 예시는 등록된 `lab` client를 사용하며, `--queue eval`을 추가하면 named queue를 대상으로 한다.
 
-| 의도                                  | 명령                                                  |
-| ------------------------------------- | ----------------------------------------------------- |
-| 모든 머신, queue, room 보기           | `shunt status --all --json`                           |
-| 전달 대기 중인 제출 보기              | `shunt spool ls`                                      |
-| ID로 제출된 task 조회                 | `shunt task show <id> --json`                         |
-| Server의 task 이벤트 스트림 읽기      | `shunt task events`                                   |
-| Worker 풀 크기 조정                   | `shunt workers 4 -c lab`                              |
-| Pending task를 맨 앞으로 이동         | `shunt prio exp1 0 -c lab`                            |
-| Pending task 취소                     | `shunt cancel exp1 -c lab`                            |
-| Pending task를 릴리스할 때까지 보류   | `shunt hold exp1 -c lab "waiting on lease"`           |
-| 보류된 pending task 릴리스            | `shunt release exp1 -c lab`                           |
-| 실행 중인 task의 프로세스 그룹 중지   | `shunt kill exp1 -c lab`                              |
-| 한 queue의 daemon 드레인 및 중지      | `shunt queue stop eval -c lab`                        |
-| 머신 정보 갱신                        | `shunt client probe lab`                              |
-| 머신의 queue 목록                     | `shunt queue ls -c lab`                               |
-| 관리형 SSH로 임시 명령 실행           | `shunt client exec lab -- nvidia-smi`                 |
-| 변경된 SSH 엔드포인트 갱신            | `shunt client update lab --host <host> --port <port>` |
-| 오래된 호스트 키와 연결 정리          | `shunt client hostkey lab`                            |
-| 선택적 역방향 SOCKS5 프록시 열기      | `shunt tunnel up -c lab`                              |
-| Shell 자동완성 생성                   | `shunt completions zsh`                               |
-| 로컬 버전과 빌드 정보 확인            | `shunt version --json`                                |
-| 새 릴리스 확인                        | `shunt upgrade --check --json`                        |
-| 로컬 바이너리 업그레이드              | `shunt upgrade`                                       |
-| 원격 queue 하나의 바이너리 업그레이드 | `shunt upgrade -c lab --queue eval`                   |
+| 의도                                  | 명령                                                   |
+| ------------------------------------- | ------------------------------------------------------ |
+| 모든 머신, queue, room 보기           | `shunt status --all --json`                            |
+| 전달 대기 중인 제출 보기              | `shunt spool ls`                                       |
+| ID로 제출된 task 조회                 | `shunt task show <id> --json`                          |
+| Server의 task 이벤트 스트림 읽기      | `shunt task events`                                    |
+| Worker 풀 크기 조정                   | `shunt workers 4 -c lab`                               |
+| Pending task를 맨 앞으로 이동         | `shunt prio exp1 0 -c lab`                             |
+| Pending task 취소                     | `shunt cancel exp1 -c lab`                             |
+| Pending task를 릴리스할 때까지 보류   | `shunt hold exp1 -c lab "waiting on lease"`            |
+| 보류된 pending task 릴리스            | `shunt release exp1 -c lab`                            |
+| 실행 중인 task의 프로세스 그룹 중지   | `shunt kill exp1 -c lab`                               |
+| 한 queue의 daemon 드레인 및 중지      | `shunt queue stop eval -c lab`                         |
+| 머신 정보 갱신                        | `shunt client probe lab`                               |
+| 머신의 queue 목록                     | `shunt queue ls -c lab`                                |
+| 관리형 SSH로 임시 명령 실행           | `shunt client exec lab -- nvidia-smi`                  |
+| 변경된 SSH 엔드포인트 갱신            | `shunt client update lab --host <host> --port <port>`  |
+| 머신별 참고 정보 기록                 | `shunt client update lab --note datasets=/data/shared` |
+| 오래된 호스트 키와 연결 정리          | `shunt client hostkey lab`                             |
+| 선택적 역방향 SOCKS5 프록시 열기      | `shunt tunnel up -c lab`                               |
+| Shell 자동완성 생성                   | `shunt completions zsh`                                |
+| 로컬 버전과 빌드 정보 확인            | `shunt version --json`                                 |
+| 새 릴리스 확인                        | `shunt upgrade --check --json`                         |
+| 로컬 바이너리 업그레이드              | `shunt upgrade`                                        |
+| 원격 queue 하나의 바이너리 업그레이드 | `shunt upgrade -c lab --queue eval`                    |
 
 `exp1` 같은 task 제어 패턴은 하나의 task를 가리켜야 한다. 패턴이 모호하면 전체 task 항목 이름을 사용한다. Task ledger는 제출 ID를 그 항목 이름에 매핑한다. `task show`는 머신을 지연 조회해 결과를 확인하며, 최근 상태 창 밖의 항목은 `unknown`으로 표시될 수 있다. 작업은 클레임 가능해지기 전에 보류할 수도 있다. `--hold`는 `spool release`까지 dev 측 spool에 제출을 붙잡아 두고, `--hold-on-box`는 배달하되 box 측 항목을 `shunt release`까지 클레임 불가로 남긴다.
 

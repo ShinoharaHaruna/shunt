@@ -214,30 +214,31 @@ shunt status --all --json --as experiments
 
 これらのコマンドは開発マシンで実行する。クライアント固有の例は登録済みクライアント `lab` を使う。`--queue eval` を付けると名前付きキューを対象にできる。
 
-| 意図                                            | コマンド                                              |
-| ----------------------------------------------- | ----------------------------------------------------- |
-| すべてのマシン、キュー、ルームを見る            | `shunt status --all --json`                           |
-| 配送待ちの投入を見る                            | `shunt spool ls`                                      |
-| ID で投入済みタスクを調べる                     | `shunt task show <id> --json`                         |
-| サーバーのタスクイベントストリームを読む        | `shunt task events`                                   |
-| ワーカープールをリサイズする                    | `shunt workers 4 -c lab`                              |
-| pending タスクを先頭に移す                      | `shunt prio exp1 0 -c lab`                            |
-| pending タスクをキャンセルする                  | `shunt cancel exp1 -c lab`                            |
-| pending タスクをリリースまで保留する            | `shunt hold exp1 -c lab "waiting on lease"`           |
-| 保留中の pending タスクをリリースする           | `shunt release exp1 -c lab`                           |
-| 実行中タスクのプロセスグループを停止する        | `shunt kill exp1 -c lab`                              |
-| 1つのキューデーモンをドレインして停止する       | `shunt queue stop eval -c lab`                        |
-| マシン情報を更新する                            | `shunt client probe lab`                              |
-| マシン上のキューを一覧する                      | `shunt queue ls -c lab`                               |
-| 管理された SSH でアドホックコマンドを実行する   | `shunt client exec lab -- nvidia-smi`                 |
-| 移動した SSH エンドポイントを更新する           | `shunt client update lab --host <host> --port <port>` |
-| 古いホストキーと接続をクリアする                | `shunt client hostkey lab`                            |
-| オプションのリバース SOCKS5 プロキシを開く      | `shunt tunnel up -c lab`                              |
-| シェル補完を生成する                            | `shunt completions zsh`                               |
-| ローカルのバージョンとビルドを調べる            | `shunt version --json`                                |
-| 新しいリリースを確認する                        | `shunt upgrade --check --json`                        |
-| ローカルバイナリをアップグレードする            | `shunt upgrade`                                       |
-| リモートキュー1つのバイナリをアップグレードする | `shunt upgrade -c lab --queue eval`                   |
+| 意図                                            | コマンド                                               |
+| ----------------------------------------------- | ------------------------------------------------------ |
+| すべてのマシン、キュー、ルームを見る            | `shunt status --all --json`                            |
+| 配送待ちの投入を見る                            | `shunt spool ls`                                       |
+| ID で投入済みタスクを調べる                     | `shunt task show <id> --json`                          |
+| サーバーのタスクイベントストリームを読む        | `shunt task events`                                    |
+| ワーカープールをリサイズする                    | `shunt workers 4 -c lab`                               |
+| pending タスクを先頭に移す                      | `shunt prio exp1 0 -c lab`                             |
+| pending タスクをキャンセルする                  | `shunt cancel exp1 -c lab`                             |
+| pending タスクをリリースまで保留する            | `shunt hold exp1 -c lab "waiting on lease"`            |
+| 保留中の pending タスクをリリースする           | `shunt release exp1 -c lab`                            |
+| 実行中タスクのプロセスグループを停止する        | `shunt kill exp1 -c lab`                               |
+| 1つのキューデーモンをドレインして停止する       | `shunt queue stop eval -c lab`                         |
+| マシン情報を更新する                            | `shunt client probe lab`                               |
+| マシン上のキューを一覧する                      | `shunt queue ls -c lab`                                |
+| 管理された SSH でアドホックコマンドを実行する   | `shunt client exec lab -- nvidia-smi`                  |
+| 移動した SSH エンドポイントを更新する           | `shunt client update lab --host <host> --port <port>`  |
+| マシンごとの参考情報を記録する                  | `shunt client update lab --note datasets=/data/shared` |
+| 古いホストキーと接続をクリアする                | `shunt client hostkey lab`                             |
+| オプションのリバース SOCKS5 プロキシを開く      | `shunt tunnel up -c lab`                               |
+| シェル補完を生成する                            | `shunt completions zsh`                                |
+| ローカルのバージョンとビルドを調べる            | `shunt version --json`                                 |
+| 新しいリリースを確認する                        | `shunt upgrade --check --json`                         |
+| ローカルバイナリをアップグレードする            | `shunt upgrade`                                        |
+| リモートキュー1つのバイナリをアップグレードする | `shunt upgrade -c lab --queue eval`                    |
 
 `exp1` のようなタスク制御パターンは1つのタスクを特定しなければならない。パターンが曖昧なら完全なタスクエントリ名を使う。タスク台帳は投入 ID をそのエントリ名にマップする。`task show` は結果を解決するためマシンに遅延問い合わせをする。最近のステータス窓の外にあるエントリは `unknown` と表示されうる。作業はクレーム可能になる前にも保留できる。`--hold` は `spool release` まで dev 側スプールに投入を留め、`--hold-on-box` は配送したうえで box 側のエントリを `shunt release` までクレーム不可にする。
 

@@ -86,7 +86,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn row(expire: &str) -> ClientEntry {
-        ClientEntry { name: "box".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: expire.into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: Default::default(), qroot: "/q".into(), deploy_root: "/root".into(), facts: BTreeMap::new(), billing: None, queues: BTreeMap::new(), default_queue: None }
+        ClientEntry { name: "box".into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: expire.into(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: Default::default(), qroot: "/q".into(), deploy_root: "/root".into(), facts: BTreeMap::new(), billing: None, queues: BTreeMap::new(), default_queue: None, notes: BTreeMap::new() }
     }
 
     #[test]

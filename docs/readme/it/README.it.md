@@ -214,30 +214,31 @@ Le stanze vivono su una macchina dev e possono coprire i suoi client registrati.
 
 Esegui questi comandi sulla macchina dev. Gli esempi specifici per client usano il client registrato `lab`; aggiungi `--queue eval` per puntare alla coda con nome.
 
-| Intento                                         | Comando                                               |
-| ----------------------------------------------- | ----------------------------------------------------- |
-| Vedi tutte le macchine, le code e le stanze     | `shunt status --all --json`                           |
-| Vedi le sottomissioni in attesa di consegna     | `shunt spool ls`                                      |
-| Ispeziona un task sottomesso tramite il suo ID  | `shunt task show <id> --json`                         |
-| Leggi lo stream di eventi dei task del server   | `shunt task events`                                   |
-| Ridimensiona il pool di worker                  | `shunt workers 4 -c lab`                              |
-| Sposta un task pending in testa                 | `shunt prio exp1 0 -c lab`                            |
-| Cancella un task pending                        | `shunt cancel exp1 -c lab`                            |
-| Parcheggia un task pending fino al rilascio     | `shunt hold exp1 -c lab "waiting on lease"`           |
-| Rilascia un task pending parcheggiato           | `shunt release exp1 -c lab`                           |
-| Ferma il process group di un task in esecuzione | `shunt kill exp1 -c lab`                              |
-| Drena e ferma il daemon di una coda             | `shunt queue stop eval -c lab`                        |
-| Aggiorna i dati della macchina                  | `shunt client probe lab`                              |
-| Elenca le code su una macchina                  | `shunt queue ls -c lab`                               |
-| Esegui un comando ad hoc via SSH gestita        | `shunt client exec lab -- nvidia-smi`                 |
-| Aggiorna un endpoint SSH spostato               | `shunt client update lab --host <host> --port <port>` |
-| Ripulisci una host key e una connessione stale  | `shunt client hostkey lab`                            |
-| Apri il proxy SOCKS5 inverso opzionale          | `shunt tunnel up -c lab`                              |
-| Genera i completamenti della shell              | `shunt completions zsh`                               |
-| Ispeziona versione e build locali               | `shunt version --json`                                |
-| Controlla se c'è una nuova release              | `shunt upgrade --check --json`                        |
-| Aggiorna il binario locale                      | `shunt upgrade`                                       |
-| Aggiorna il binario di una coda remota          | `shunt upgrade -c lab --queue eval`                   |
+| Intento                                           | Comando                                                |
+| ------------------------------------------------- | ------------------------------------------------------ |
+| Vedi tutte le macchine, le code e le stanze       | `shunt status --all --json`                            |
+| Vedi le sottomissioni in attesa di consegna       | `shunt spool ls`                                       |
+| Ispeziona un task sottomesso tramite il suo ID    | `shunt task show <id> --json`                          |
+| Leggi lo stream di eventi dei task del server     | `shunt task events`                                    |
+| Ridimensiona il pool di worker                    | `shunt workers 4 -c lab`                               |
+| Sposta un task pending in testa                   | `shunt prio exp1 0 -c lab`                             |
+| Cancella un task pending                          | `shunt cancel exp1 -c lab`                             |
+| Parcheggia un task pending fino al rilascio       | `shunt hold exp1 -c lab "waiting on lease"`            |
+| Rilascia un task pending parcheggiato             | `shunt release exp1 -c lab`                            |
+| Ferma il process group di un task in esecuzione   | `shunt kill exp1 -c lab`                               |
+| Drena e ferma il daemon di una coda               | `shunt queue stop eval -c lab`                         |
+| Aggiorna i dati della macchina                    | `shunt client probe lab`                               |
+| Elenca le code su una macchina                    | `shunt queue ls -c lab`                                |
+| Esegui un comando ad hoc via SSH gestita          | `shunt client exec lab -- nvidia-smi`                  |
+| Aggiorna un endpoint SSH spostato                 | `shunt client update lab --host <host> --port <port>`  |
+| Annotare informazioni di riferimento per macchina | `shunt client update lab --note datasets=/data/shared` |
+| Ripulisci una host key e una connessione stale    | `shunt client hostkey lab`                             |
+| Apri il proxy SOCKS5 inverso opzionale            | `shunt tunnel up -c lab`                               |
+| Genera i completamenti della shell                | `shunt completions zsh`                                |
+| Ispeziona versione e build locali                 | `shunt version --json`                                 |
+| Controlla se c'è una nuova release                | `shunt upgrade --check --json`                         |
+| Aggiorna il binario locale                        | `shunt upgrade`                                        |
+| Aggiorna il binario di una coda remota            | `shunt upgrade -c lab --queue eval`                    |
 
 I pattern di controllo dei task come `exp1` devono identificare un solo task; usa il nome completo della entry del task quando un pattern è ambiguo. Il registro dei task mappa un ID di sottomissione a quel nome di entry. `task show` interroga la macchina in modo lazy per risolvere un esito; una entry fuori dalla finestra dello stato recente può apparire come `unknown`. Il lavoro si può anche parcheggiare prima che sia reclamabile: `--hold` trattiene una sottomissione nello spool lato dev fino a `spool release`, e `--hold-on-box` la consegna lasciando la entry lato box non reclamabile fino a `shunt release`.
 

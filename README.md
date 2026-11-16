@@ -216,30 +216,31 @@ Rooms live on one dev machine and can span its registered clients. Agents sharin
 
 Run these commands on the dev machine. Client-specific examples use the registered client `lab`; add `--queue eval` to target the named queue.
 
-| Intent                                 | Command                                               |
-| -------------------------------------- | ----------------------------------------------------- |
-| See all machines, queues, and rooms    | `shunt status --all --json`                           |
-| See submissions awaiting delivery      | `shunt spool ls`                                      |
-| Inspect a submitted task by its ID     | `shunt task show <id> --json`                         |
-| Read the server's task event stream    | `shunt task events`                                   |
-| Resize the worker pool                 | `shunt workers 4 -c lab`                              |
-| Move a pending task to the front       | `shunt prio exp1 0 -c lab`                            |
-| Cancel a pending task                  | `shunt cancel exp1 -c lab`                            |
-| Park a pending task until released     | `shunt hold exp1 -c lab "waiting on lease"`           |
-| Release a parked pending task          | `shunt release exp1 -c lab`                           |
-| Stop a running task's process group    | `shunt kill exp1 -c lab`                              |
-| Drain and stop one queue daemon        | `shunt queue stop eval -c lab`                        |
-| Refresh machine facts                  | `shunt client probe lab`                              |
-| List queues on a machine               | `shunt queue ls -c lab`                               |
-| Run an ad-hoc command over managed SSH | `shunt client exec lab -- nvidia-smi`                 |
-| Update a moved SSH endpoint            | `shunt client update lab --host <host> --port <port>` |
-| Clear a stale host key and connection  | `shunt client hostkey lab`                            |
-| Open the optional reverse SOCKS5 proxy | `shunt tunnel up -c lab`                              |
-| Generate shell completions             | `shunt completions zsh`                               |
-| Inspect local version and build        | `shunt version --json`                                |
-| Check for a new release                | `shunt upgrade --check --json`                        |
-| Upgrade the local binary               | `shunt upgrade`                                       |
-| Upgrade one remote queue's binary      | `shunt upgrade -c lab --queue eval`                   |
+| Intent                                 | Command                                                |
+| -------------------------------------- | ------------------------------------------------------ |
+| See all machines, queues, and rooms    | `shunt status --all --json`                            |
+| See submissions awaiting delivery      | `shunt spool ls`                                       |
+| Inspect a submitted task by its ID     | `shunt task show <id> --json`                          |
+| Read the server's task event stream    | `shunt task events`                                    |
+| Resize the worker pool                 | `shunt workers 4 -c lab`                               |
+| Move a pending task to the front       | `shunt prio exp1 0 -c lab`                             |
+| Cancel a pending task                  | `shunt cancel exp1 -c lab`                             |
+| Park a pending task until released     | `shunt hold exp1 -c lab "waiting on lease"`            |
+| Release a parked pending task          | `shunt release exp1 -c lab`                            |
+| Stop a running task's process group    | `shunt kill exp1 -c lab`                               |
+| Drain and stop one queue daemon        | `shunt queue stop eval -c lab`                         |
+| Refresh machine facts                  | `shunt client probe lab`                               |
+| List queues on a machine               | `shunt queue ls -c lab`                                |
+| Run an ad-hoc command over managed SSH | `shunt client exec lab -- nvidia-smi`                  |
+| Update a moved SSH endpoint            | `shunt client update lab --host <host> --port <port>`  |
+| Record per-box reference notes         | `shunt client update lab --note datasets=/data/shared` |
+| Clear a stale host key and connection  | `shunt client hostkey lab`                             |
+| Open the optional reverse SOCKS5 proxy | `shunt tunnel up -c lab`                               |
+| Generate shell completions             | `shunt completions zsh`                                |
+| Inspect local version and build        | `shunt version --json`                                 |
+| Check for a new release                | `shunt upgrade --check --json`                         |
+| Upgrade the local binary               | `shunt upgrade`                                        |
+| Upgrade one remote queue's binary      | `shunt upgrade -c lab --queue eval`                    |
 
 Task-control patterns such as `exp1` must identify one task; use the full task entry name when a pattern is ambiguous. The task ledger maps a submission ID to that entry name. `task show` queries the machine lazily to resolve an outcome; an entry outside the recent-status window can appear as `unknown`. Work can also be parked before it is claimable: `--hold` keeps a submission in the dev-side spool until `spool release`, and `--hold-on-box` delivers it while leaving the box-side entry unclaimable until `shunt release`.
 

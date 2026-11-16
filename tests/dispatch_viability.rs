@@ -25,7 +25,7 @@ fn home(tag: &str) -> Result<PathBuf> {
 }
 
 fn client(name: &str) -> ClientEntry {
-    ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 22, user: "root".into(), key: String::new(), password: String::new(), options: Vec::new() }, qroot: "/root/queue".into(), deploy_root: "/root".into(), facts: BTreeMap::new(), billing: None, queues: BTreeMap::<String, QueueEntry>::new(), default_queue: None }
+    ClientEntry { name: name.into(), local: false, disabled: false, local_bin: None, bin_path: None, timeout_s: None, ssh_timeout_s: None, pre_connect: String::new(), shutdown_cmd: None, expire: String::new(), env_setup: String::new(), shell: String::new(), endpoint_rotates: false, shared: false, exit_on_idle: false, ssh: SshEndpoint { host: "127.0.0.1".into(), port: 22, user: "root".into(), key: String::new(), password: String::new(), options: Vec::new() }, qroot: "/root/queue".into(), deploy_root: "/root".into(), facts: BTreeMap::new(), billing: None, queues: BTreeMap::<String, QueueEntry>::new(), default_queue: None, notes: Default::default() }
 }
 
 fn entry(id: &str, client: &str) -> SpoolEntry {
@@ -141,7 +141,7 @@ fn quarantine_is_reported_skipped_and_cleared_by_client_update() -> Result<()> {
     assert_eq!(status["skip"]["reason"], "quarantined");
     assert!(show("box-a", &home)?.contains("# inactive: quarantined (9 consecutive failures)"));
 
-    shunt::server::client_ops::update("box-a", shunt::server::client_ops::EndpointUpdate { host: None, port: None, user: None, key: None, password: None, pre_connect: None, endpoint_rotates: None, options: Some(vec!["ConnectTimeout=10".into()]) })?;
+    shunt::server::client_ops::update("box-a", shunt::server::client_ops::EndpointUpdate { host: None, port: None, user: None, key: None, password: None, pre_connect: None, endpoint_rotates: None, options: Some(vec!["ConnectTimeout=10".into()]), notes: None, notes_rm: None, notes_clear: false })?;
     let updated = registry::load_client("box-a")?;
     assert_eq!(registry::conn_fail_streak(&updated), 0);
     assert!(!show("box-a", &home)?.contains("# inactive:"));
