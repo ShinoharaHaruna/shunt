@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { ClientStatus, QueueStatus, StatusReport } from '../types'
 import { postProbe } from '../api'
 import { Card, CopyText, Dot, Empty, Muted, Pill, SectionHeading } from './ui'
-import { EntryList, LogPane, RecentList, ResourceBlock, ScriptPane } from './queueDetail'
+import { EntryList, LogPane, RecentList, ResourceBlock } from './queueDetail'
 import { useI18n } from '../i18n'
 
 interface Sel {
@@ -179,46 +179,13 @@ function QueueDetail({
   snapAt: number
   facts?: Record<string, unknown>
 }) {
-  // Which section's pane is open, and for which entry. Clicking the
-  // same entry again toggles it closed; the pane renders inline
-  // right under its owning section, not at the foot of the card.
-  // 'script' is the pending track's pane — a queued entry has no
-  // log yet, its task.sh is the only artifact to show.
-  const [log, setLog] = useState<{
-    kind: 'running' | 'done' | 'failed' | 'daemon' | 'script'
-    pattern: string | null
-  } | null>(null)
+  // Task entries route to the task detail page on click; only the
+  // daemon log still opens inline — it has no entry to drill into.
+  const [daemonLog, setDaemonLog] = useState(false)
   const rep = q.report
-  const toggle = (
-    kind: 'running' | 'done' | 'failed' | 'daemon' | 'script',
-    pattern: string | null,
-  ) =>
-    setLog((prev) =>
-      prev && prev.kind === kind && prev.pattern === pattern ? null : { kind, pattern },
-    )
-  const pane = (kind: 'running' | 'done' | 'failed' | 'daemon' | 'script') =>
-    log?.kind === kind ? (
-      <div key={`${kind}:${log.pattern ?? ''}`} className="rise">
-        {kind === 'script' ? (
-          <ScriptPane
-            client={client}
-            queue={queue}
-            name={log.pattern}
-            onClose={() => setLog(null)}
-          />
-        ) : (
-          <LogPane
-            client={client}
-            queue={queue}
-            pattern={log.pattern}
-            snapAt={snapAt}
-            onClose={() => setLog(null)}
-          />
-        )}
-      </div>
-    ) : null
-  const openName = (kind: 'running' | 'done' | 'failed' | 'script') =>
-    log?.kind === kind ? log.pattern : null
+  const openTask = (n: string) => {
+    location.hash = `#/queues/${encodeURIComponent(client)}/${encodeURIComponent(queue)}/${encodeURIComponent(n)}`
+  }
   const { t } = useI18n()
   return (
     <div>
@@ -238,36 +205,20 @@ function QueueDetail({
             }
           />
           <div className="mt-4 space-y-3">
-            <EntryList
-              label={t('queue.running')}
-              entries={rep.running_detail}
-              onLogs={(n) => toggle('running', n)}
-              openName={openName('running')}
-            />
-            {pane('running')}
-            <EntryList
-              label={t('queue.pending')}
-              entries={rep.pending_detail}
-              onPeek={(n) => toggle('script', n)}
-              openName={openName('script')}
-            />
-            {pane('script')}
+            <EntryList label={t('queue.running')} entries={rep.running_detail} onOpen={openTask} />
+            <EntryList label={t('queue.pending')} entries={rep.pending_detail} onOpen={openTask} />
             <RecentList
               label={t('queue.done')}
               tone="emerald"
               items={rep.done_recent}
-              onLogs={(n) => toggle('done', n)}
-              openName={openName('done')}
+              onOpen={openTask}
             />
-            {pane('done')}
             <RecentList
               label={t('queue.failed')}
               tone="rose"
               items={rep.failed_recent}
-              onLogs={(n) => toggle('failed', n)}
-              openName={openName('failed')}
+              onOpen={openTask}
             />
-            {pane('failed')}
           </div>
         </>
       ) : (
@@ -276,16 +227,26 @@ function QueueDetail({
         </Empty>
       )}
       <div className="mt-3">
-        {log?.kind === 'daemon'
-          ? pane('daemon')
-          : rep && (
-              <button
-                onClick={() => toggle('daemon', null)}
-                className="font-num rounded px-1.5 text-[10px] text-ink-4 transition-colors hover:bg-hover-2 hover:text-ink-2"
-              >
-                {t('common.daemonLog')}
-              </button>
-            )}
+        {daemonLog ? (
+          <div className="rise">
+            <LogPane
+              client={client}
+              queue={queue}
+              pattern={null}
+              snapAt={snapAt}
+              onClose={() => setDaemonLog(false)}
+            />
+          </div>
+        ) : (
+          rep && (
+            <button
+              onClick={() => setDaemonLog(true)}
+              className="font-num rounded px-1.5 text-[10px] text-ink-4 transition-colors hover:bg-hover-2 hover:text-ink-2"
+            >
+              {t('common.daemonLog')}
+            </button>
+          )
+        )}
       </div>
       <ProbeSection client={client} />
     </div>

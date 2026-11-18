@@ -68,6 +68,15 @@ export const ru: Dict = {
   'queue.done': 'завершено',
   'queue.failed': 'сбой',
 
+  'task.open': 'детали',
+  'task.declared': 'заявлено',
+  'task.usage': 'измерено',
+  'task.samples': 'замеры {n}',
+  'task.noLog': 'лога нет — задача не началась',
+  'task.notInSnap': 'нет в текущем снапшоте — скрипт и лог всё равно запрашиваются',
+  'task.showAll': 'показать все {n} строк',
+  'task.collapse': 'свернуть',
+
   'res.gpuUtil': 'Загрузка GPU',
   'res.vram': 'VRAM',
   'res.ram': 'RAM',

@@ -5,6 +5,8 @@ export interface Route {
   /** '#/queues/<client>/<queue>' selection. */
   client?: string
   queue?: string
+  /** '#/queues/<client>/<queue>/<task>' drill-down. */
+  task?: string
   /** '#/rooms/<name>' selection. */
   room?: string
 }
@@ -13,7 +15,7 @@ export function parseHash(hash: string): Route {
   const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent)
   switch (parts[0]) {
     case 'queues':
-      return { page: 'queues', client: parts[1], queue: parts[2] }
+      return { page: 'queues', client: parts[1], queue: parts[2], task: parts[3] }
     case 'tasks':
       return { page: 'tasks' }
     case 'rooms':

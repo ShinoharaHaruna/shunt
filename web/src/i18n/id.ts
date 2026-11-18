@@ -68,6 +68,15 @@ export const id: Dict = {
   'queue.done': 'selesai',
   'queue.failed': 'gagal',
 
+  'task.open': 'detail',
+  'task.declared': 'dideklarasikan',
+  'task.usage': 'terukur',
+  'task.samples': 'sampel {n}',
+  'task.noLog': 'belum ada log — tugas belum mulai',
+  'task.notInSnap': 'tidak ada di snapshot — script dan log tetap dicoba',
+  'task.showAll': 'tampilkan {n} baris',
+  'task.collapse': 'ciutkan',
+
   'res.gpuUtil': 'Utilisasi GPU',
   'res.vram': 'vRAM',
   'res.ram': 'RAM',

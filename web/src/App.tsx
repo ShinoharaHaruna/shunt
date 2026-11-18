@@ -7,6 +7,7 @@ import { hhmm } from './fmt'
 import { Card, Dot, Empty, SectionHeading } from './components/ui'
 import { ClientCard } from './components/ClientCard'
 import { QueuesPage } from './components/QueuesPage'
+import { TaskPage } from './components/TaskPage'
 import { SpoolPanel } from './components/SpoolPanel'
 import { TasksPanel } from './components/TasksPanel'
 import { RoomsPanel } from './components/RoomsPanel'
@@ -414,7 +415,16 @@ export default function App() {
   const page = (() => {
     switch (route.page) {
       case 'queues':
-        return (
+        return route.client && route.queue && route.task ? (
+          <TaskPage
+            key={`${route.client}/${route.queue}/${route.task}`}
+            clients={snap?.clients ?? null}
+            snapAt={snapAt}
+            client={route.client}
+            queue={route.queue}
+            task={route.task}
+          />
+        ) : (
           <QueuesPage
             clients={snap?.clients ?? null}
             snapAt={snapAt}

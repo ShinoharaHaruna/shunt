@@ -68,6 +68,15 @@ export const it: Dict = {
   'queue.done': 'completati',
   'queue.failed': 'falliti',
 
+  'task.open': 'dettaglio',
+  'task.declared': 'dichiarato',
+  'task.usage': 'misurato',
+  'task.samples': 'campioni {n}',
+  'task.noLog': 'nessun log — task non avviato',
+  'task.notInSnap': 'assente dallo snapshot — script e log vengono comunque tentati',
+  'task.showAll': 'mostra tutte le {n} righe',
+  'task.collapse': 'comprimi',
+
   'res.gpuUtil': 'Utilizzo GPU',
   'res.vram': 'VRAM',
   'res.ram': 'RAM',

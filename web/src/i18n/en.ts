@@ -68,6 +68,15 @@ export const en = {
   'queue.done': 'done',
   'queue.failed': 'failed',
 
+  'task.open': 'detail',
+  'task.declared': 'declared',
+  'task.usage': 'measured',
+  'task.samples': 'samples {n}',
+  'task.noLog': 'no log yet — the task has not started',
+  'task.notInSnap': 'not in the current snapshot — script and log are still attempted',
+  'task.showAll': 'show all {n} lines',
+  'task.collapse': 'collapse',
+
   'res.gpuUtil': 'GPU Util',
   'res.vram': 'vRAM',
   'res.ram': 'RAM',

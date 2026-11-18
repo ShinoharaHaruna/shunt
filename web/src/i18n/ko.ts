@@ -68,6 +68,15 @@ export const ko: Dict = {
   'queue.done': '완료',
   'queue.failed': '실패',
 
+  'task.open': '상세',
+  'task.declared': '선언 리소스',
+  'task.usage': '실측',
+  'task.samples': '샘플 {n}',
+  'task.noLog': '로그 없음 — 작업 미시작',
+  'task.notInSnap': '현재 스냅샷에 없음 — 스크립트와 로그는 계속 시도',
+  'task.showAll': '전체 {n}줄 표시',
+  'task.collapse': '접기',
+
   'res.gpuUtil': 'GPU 사용률',
   'res.vram': 'VRAM',
   'res.ram': 'RAM',

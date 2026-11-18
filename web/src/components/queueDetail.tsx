@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { EntryDetail, ExitRecord, StatusReport } from '../types'
 import { mibToGib } from '../fmt'
-import { fetchLogs, fetchScript } from '../api'
+import { fetchLogs } from '../api'
 import { Bar, CopyText, Dot, Empty, Muted, Pill } from './ui'
 import type { Tone } from './ui'
 import { useI18n } from '../i18n'
@@ -86,7 +86,7 @@ export function ResourceBlock({ report, cores }: { report: StatusReport; cores?:
   )
 }
 
-function DeclaredChips({ d }: { d: EntryDetail['declared'] }) {
+export function DeclaredChips({ d }: { d: EntryDetail['declared'] }) {
   const { t } = useI18n()
   return (
     <>
@@ -122,26 +122,19 @@ export function UsageChips({ u }: { u: NonNullable<EntryDetail['usage']> }) {
 }
 
 /** Expandable pending/running entry list with declared+usage chips
- *  and a per-entry open hook: `onLogs` tails a running entry's log,
- *  `onPeek` opens a queued entry's task.sh — the script is the only
- *  artifact a pending entry has. `openName` marks the entry whose
- *  pane is currently shown. */
+ *  and a per-entry open hook: `onOpen` drills into the task detail
+ *  page, which owns script and log for every track. */
 export function EntryList({
   label,
   entries,
-  onLogs,
-  onPeek,
-  openName,
+  onOpen,
 }: {
   label: string
   entries: EntryDetail[]
-  onLogs?: (name: string) => void
-  onPeek?: (name: string) => void
-  openName?: string | null
+  onOpen?: (name: string) => void
 }) {
   const { t } = useI18n()
-  const onOpen = onLogs ?? onPeek
-  const hint = onLogs ? t('common.log') : t('common.script')
+  const hint = t('task.open')
   if (entries.length === 0) return null
   return (
     <details className="group">
@@ -168,11 +161,9 @@ export function EntryList({
                       }
                     : undefined
                 }
-                className={`group/entry rounded-lg px-2.5 py-1.5 ring-1 transition-all duration-150 ${
-                  openName === e.name
-                    ? 'bg-hover-2 ring-signal-bd'
-                    : `bg-hover ring-edge-soft ${onOpen ? 'hover:bg-hover-2 hover:ring-edge' : ''}`
-                } ${onOpen ? 'cursor-pointer' : ''}`}
+                className={`group/entry rounded-lg bg-hover px-2.5 py-1.5 ring-1 ring-edge-soft transition-all duration-150 ${
+                  onOpen ? 'cursor-pointer hover:bg-hover-2 hover:ring-edge' : ''
+                }`}
               >
                 <div className="flex items-center gap-1">
                   {/* name stays a copy button — stop the click from
@@ -185,14 +176,8 @@ export function EntryList({
                   </span>
                   <span className="flex-1" />
                   {onOpen && (
-                    <span
-                      className={`text-[10px] transition-colors ${
-                        openName === e.name
-                          ? 'text-signal-fg'
-                          : 'text-ink-4 group-hover/entry:text-signal-fg'
-                      }`}
-                    >
-                      {openName === e.name ? `${hint} ▾` : `${hint} ▸`}
+                    <span className="text-[10px] text-ink-4 transition-colors group-hover/entry:text-signal-fg">
+                      {hint} ▸
                     </span>
                   )}
                 </div>
@@ -220,14 +205,12 @@ export function RecentList({
   label,
   tone,
   items,
-  onLogs,
-  openName,
+  onOpen,
 }: {
   label: string
   tone: 'emerald' | 'rose'
   items: ExitRecord[]
-  onLogs?: (name: string) => void
-  openName?: string | null
+  onOpen?: (name: string) => void
 }) {
   if (items.length === 0) return null
   return (
@@ -236,22 +219,22 @@ export function RecentList({
       {items.slice(0, 6).map((x) => (
         <span
           key={x.name}
-          role={onLogs ? 'button' : undefined}
-          tabIndex={onLogs ? 0 : undefined}
-          onClick={onLogs ? () => onLogs(x.name) : undefined}
+          role={onOpen ? 'button' : undefined}
+          tabIndex={onOpen ? 0 : undefined}
+          onClick={onOpen ? () => onOpen(x.name) : undefined}
           onKeyDown={
-            onLogs
+            onOpen
               ? (ev) => {
                   if (ev.key === 'Enter' || ev.key === ' ') {
                     ev.preventDefault()
-                    onLogs(x.name)
+                    onOpen(x.name)
                   }
                 }
               : undefined
           }
           className={`group/x inline-flex items-center gap-1 rounded-md px-1 -mx-1 transition-colors ${
-            openName === x.name ? 'bg-hover-2' : onLogs ? 'hover:bg-hover-2' : ''
-          } ${onLogs ? 'cursor-pointer' : ''}`}
+            onOpen ? 'cursor-pointer hover:bg-hover-2' : ''
+          }`}
         >
           <span onClick={(ev) => ev.stopPropagation()} onKeyDown={(ev) => ev.stopPropagation()}>
             <CopyText text={x.name} className="max-w-36 text-ink-3" />
@@ -259,13 +242,9 @@ export function RecentList({
           <Pill tone={x.rc === 0 && tone === 'emerald' ? 'emerald' : 'rose'}>
             <span className="font-num">rc={x.rc}</span>
           </Pill>
-          {onLogs && (
-            <span
-              className={`text-[10px] text-ink-4 transition-opacity ${
-                openName === x.name ? 'opacity-100' : 'opacity-0 group-hover/x:opacity-100'
-              }`}
-            >
-              {openName === x.name ? '▾' : '▸'}
+          {onOpen && (
+            <span className="text-[10px] text-ink-4 opacity-0 transition-opacity group-hover/x:opacity-100">
+              ▸
             </span>
           )}
         </span>
@@ -284,12 +263,17 @@ export function LogPane({
   pattern,
   snapAt,
   onClose,
+  bodyClass = 'max-h-72',
 }: {
   client: string
   queue: string | null
   pattern: string | null
   snapAt: number
-  onClose: () => void
+  /** Absent on the task page — a dedicated page has nothing to close. */
+  onClose?: () => void
+  /** Scroll cap for the body — the task page wants a taller pane
+   *  than the 18rem inline variant. */
+  bodyClass?: string
 }) {
   const { t } = useI18n()
   const [tail, setTail] = useState(200)
@@ -355,12 +339,14 @@ export function LogPane({
             {n}
           </button>
         ))}
-        <button
-          onClick={onClose}
-          className="ml-1 rounded px-1.5 text-[11px] text-ink-4 transition-colors hover:bg-hover-2 hover:text-ink-2"
-        >
-          ✕
-        </button>
+        {onClose && (
+          <button
+            onClick={onClose}
+            className="ml-1 rounded px-1.5 text-[11px] text-ink-4 transition-colors hover:bg-hover-2 hover:text-ink-2"
+          >
+            ✕
+          </button>
+        )}
       </div>
       <div
         ref={box}
@@ -368,7 +354,7 @@ export function LogPane({
           const el = e.currentTarget
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
         }}
-        className="max-h-72 overflow-y-auto pr-1"
+        className={`${bodyClass} overflow-y-auto pr-1`}
       >
         {err ? (
           <Empty>{err}</Empty>
@@ -376,88 +362,6 @@ export function LogPane({
           <Empty>{t('state.loading')}</Empty>
         ) : text === '' ? (
           <Empty>{t('state.logEmpty')}</Empty>
-        ) : (
-          <pre className="font-num whitespace-pre-wrap text-[11px] leading-relaxed">
-            {text.split('\n').map((l, i) => (
-              <div key={i} className={tint(l)}>
-                {l}
-              </div>
-            ))}
-          </pre>
-        )}
-      </div>
-    </div>
-  )
-}
-
-/** A queued task's task.sh — the pending track's only artifact, so
- *  the script is what an entry click has to show. Fetched once per
- *  open: unlike a running log the file never grows under you. The
- *  `# shunt:`/`# shunt-env:` directive head tints signal — it's the
- *  rendered contract (id, workdir, env, timeout, retry); other
- *  comment lines fade to muted. */
-export function ScriptPane({
-  client,
-  queue,
-  name,
-  onClose,
-}: {
-  client: string
-  queue: string | null
-  name: string | null
-  onClose: () => void
-}) {
-  const { t } = useI18n()
-  const [text, setText] = useState<string | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    fetchScript(client, queue, name ?? '')
-      .then((r) => {
-        if (cancelled) return
-        if (r.ok) {
-          setText(r.text ?? '')
-          setErr(null)
-        } else {
-          setErr(r.error ?? t('probe.unknownError'))
-        }
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setErr(e instanceof Error ? e.message : String(e))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [client, queue, name])
-
-  const tint = (line: string): string => {
-    if (/^\s*#\s*shunt(-env)?:/.test(line)) return 'text-signal-fg'
-    if (/^\s*#/.test(line)) return 'text-ink-4'
-    return 'text-ink-2'
-  }
-
-  return (
-    <div className="mt-3 rounded-xl border border-edge bg-canvas/60 p-3">
-      <div className="mb-2 flex items-center gap-2 text-[11px]">
-        <Dot tone="signal" />
-        <span className="font-num text-ink-2">{name ?? 'task.sh'}</span>
-        <Muted>{t('common.script')}</Muted>
-        <span className="flex-1" />
-        <button
-          onClick={onClose}
-          className="ml-1 rounded px-1.5 text-[11px] text-ink-4 transition-colors hover:bg-hover-2 hover:text-ink-2"
-        >
-          ✕
-        </button>
-      </div>
-      <div className="max-h-72 overflow-y-auto pr-1">
-        {err ? (
-          <Empty>{err}</Empty>
-        ) : text === null ? (
-          <Empty>{t('state.loading')}</Empty>
-        ) : text === '' ? (
-          <Empty>{t('state.scriptEmpty')}</Empty>
         ) : (
           <pre className="font-num whitespace-pre-wrap text-[11px] leading-relaxed">
             {text.split('\n').map((l, i) => (

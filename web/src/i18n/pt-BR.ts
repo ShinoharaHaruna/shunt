@@ -68,6 +68,15 @@ export const ptBR: Dict = {
   'queue.done': 'concluída',
   'queue.failed': 'falhou',
 
+  'task.open': 'detalhe',
+  'task.declared': 'declarado',
+  'task.usage': 'medido',
+  'task.samples': 'amostras {n}',
+  'task.noLog': 'sem log ainda — tarefa não iniciada',
+  'task.notInSnap': 'fora do snapshot atual — script e log ainda são tentados',
+  'task.showAll': 'mostrar {n} linhas',
+  'task.collapse': 'recolher',
+
   'res.gpuUtil': 'Uso de GPU',
   'res.vram': 'VRAM',
   'res.ram': 'RAM',

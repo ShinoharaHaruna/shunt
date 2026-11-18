@@ -68,6 +68,15 @@ export const ja: Dict = {
   'queue.done': '完了',
   'queue.failed': '失敗',
 
+  'task.open': '詳細',
+  'task.declared': '宣言リソース',
+  'task.usage': '実測',
+  'task.samples': 'サンプル {n}',
+  'task.noLog': 'ログなし — タスク未開始',
+  'task.notInSnap': '現在のスナップショットに未収録 — スクリプトとログは引き続き試行',
+  'task.showAll': '全 {n} 行を表示',
+  'task.collapse': '折りたたむ',
+
   'res.gpuUtil': 'GPU 利用率',
   'res.vram': 'VRAM',
   'res.ram': 'RAM',

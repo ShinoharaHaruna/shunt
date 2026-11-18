@@ -68,6 +68,15 @@ export const zhCN: Dict = {
   'queue.done': '已完成',
   'queue.failed': '已失败',
 
+  'task.open': '详情',
+  'task.declared': '声明资源',
+  'task.usage': '实测用量',
+  'task.samples': '采样 {n}',
+  'task.noLog': '尚无日志 —— 任务未开始',
+  'task.notInSnap': '不在当前快照中 —— 仍将尝试读取脚本与日志',
+  'task.showAll': '展开全部 {n} 行',
+  'task.collapse': '收起',
+
   'res.gpuUtil': 'GPU 利用率',
   'res.vram': '显存',
   'res.ram': '内存',

@@ -68,6 +68,15 @@ export const zhTW: Dict = {
   'queue.done': '已完成',
   'queue.failed': '已失敗',
 
+  'task.open': '詳情',
+  'task.declared': '宣告資源',
+  'task.usage': '實測用量',
+  'task.samples': '採樣 {n}',
+  'task.noLog': '尚無日誌 —— 任務未開始',
+  'task.notInSnap': '不在當前快照中 —— 仍將嘗試讀取腳本與日誌',
+  'task.showAll': '展開全部 {n} 行',
+  'task.collapse': '收起',
+
   'res.gpuUtil': 'GPU 使用率',
   'res.vram': 'VRAM',
   'res.ram': 'RAM',
