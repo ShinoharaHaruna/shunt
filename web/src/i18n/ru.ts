@@ -78,8 +78,6 @@ export const ru: Dict = {
   'res.coreTime': '{m} мин процессорного времени',
   'res.peakVram': 'пик VRAM {gpu}',
   'res.peakRam': 'пик RAM',
-  'res.vramOf': 'VRAM {v}G',
-  'res.ramOf': 'RAM {v}G',
 
   'decl.gpu': 'gpu {v}G',
   'decl.ram': 'ram {v}G',

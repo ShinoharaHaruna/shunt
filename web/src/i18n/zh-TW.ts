@@ -77,8 +77,6 @@ export const zhTW: Dict = {
   'res.coreTime': '{m} 分鐘核心時間',
   'res.peakVram': 'VRAM 峰值 {gpu}',
   'res.peakRam': 'RAM 峰值',
-  'res.vramOf': 'VRAM {v}G',
-  'res.ramOf': 'RAM {v}G',
 
   'decl.gpu': 'gpu {v}G',
   'decl.ram': 'ram {v}G',

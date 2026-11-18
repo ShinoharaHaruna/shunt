@@ -77,8 +77,6 @@ export const zhCN: Dict = {
   'res.coreTime': '{m} 分钟核心时间',
   'res.peakVram': '峰值显存 {gpu}',
   'res.peakRam': '峰值内存',
-  'res.vramOf': '显存 {v}G',
-  'res.ramOf': '内存 {v}G',
 
   'decl.gpu': 'gpu {v}G',
   'decl.ram': '内存 {v}G',

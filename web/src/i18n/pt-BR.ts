@@ -78,8 +78,6 @@ export const ptBR: Dict = {
   'res.coreTime': '{m} min de núcleo',
   'res.peakVram': 'pico de vram {gpu}',
   'res.peakRam': 'pico de ram',
-  'res.vramOf': 'vram {v}G',
-  'res.ramOf': 'ram {v}G',
 
   'decl.gpu': 'gpu {v}G',
   'decl.ram': 'ram {v}G',

@@ -98,17 +98,21 @@ function DeclaredChips({ d }: { d: EntryDetail['declared'] }) {
   )
 }
 
-function UsageChips({ u }: { u: NonNullable<EntryDetail['usage']> }) {
+export function UsageChips({ u }: { u: NonNullable<EntryDetail['usage']> }) {
   const { t } = useI18n()
   return (
     <>
       {Object.entries(u.peak_vram_mb).map(([k, v]) => (
-        <Pill key={k} tone="zinc" title={t('res.peakVram', { gpu: k })}>
-          <span className="font-num">{t('res.vramOf', { v: mibToGib(v) })}</span>
+        <Pill key={k} tone="zinc">
+          <span className="font-num">
+            {t('res.peakVram', { gpu: `GPU${k}` })} {mibToGib(v)}G
+          </span>
         </Pill>
       ))}
-      <Pill tone="zinc" title={t('res.peakRam')}>
-        <span className="font-num">{t('res.ramOf', { v: mibToGib(u.peak_ram_mb) })}</span>
+      <Pill tone="zinc">
+        <span className="font-num">
+          {t('res.peakRam')} {mibToGib(u.peak_ram_mb)}G
+        </span>
       </Pill>
       <Pill tone="zinc">
         <span className="font-num">{t('res.coreTime', { m: Math.floor(u.cpu_seconds / 60) })}</span>

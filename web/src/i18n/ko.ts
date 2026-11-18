@@ -78,8 +78,6 @@ export const ko: Dict = {
   'res.coreTime': '{m}분 코어 시간',
   'res.peakVram': 'VRAM 피크 {gpu}',
   'res.peakRam': 'RAM 피크',
-  'res.vramOf': 'VRAM {v}G',
-  'res.ramOf': 'RAM {v}G',
 
   'decl.gpu': 'gpu {v}G',
   'decl.ram': 'ram {v}G',

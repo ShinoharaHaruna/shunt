@@ -78,8 +78,6 @@ export const en = {
   'res.coreTime': '{m}m core-time',
   'res.peakVram': 'peak vram {gpu}',
   'res.peakRam': 'peak ram',
-  'res.vramOf': 'vram {v}G',
-  'res.ramOf': 'ram {v}G',
 
   'decl.gpu': 'gpu {v}G',
   'decl.ram': 'ram {v}G',

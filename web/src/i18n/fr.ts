@@ -78,8 +78,6 @@ export const fr: Dict = {
   'res.coreTime': '{m} min cœur',
   'res.peakVram': 'pic VRAM {gpu}',
   'res.peakRam': 'pic RAM',
-  'res.vramOf': 'VRAM {v}G',
-  'res.ramOf': 'RAM {v}G',
 
   'decl.gpu': 'gpu {v}G',
   'decl.ram': 'ram {v}G',

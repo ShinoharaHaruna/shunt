@@ -78,8 +78,6 @@ export const id: Dict = {
   'res.coreTime': '{m}m waktu core',
   'res.peakVram': 'puncak vram {gpu}',
   'res.peakRam': 'puncak ram',
-  'res.vramOf': 'vram {v}G',
-  'res.ramOf': 'ram {v}G',
 
   'decl.gpu': 'gpu {v}G',
   'decl.ram': 'ram {v}G',

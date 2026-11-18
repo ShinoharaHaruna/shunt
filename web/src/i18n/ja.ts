@@ -78,8 +78,6 @@ export const ja: Dict = {
   'res.coreTime': 'コア時間 {m}分',
   'res.peakVram': 'VRAM ピーク {gpu}',
   'res.peakRam': 'RAM ピーク',
-  'res.vramOf': 'VRAM {v}G',
-  'res.ramOf': 'RAM {v}G',
 
   'decl.gpu': 'GPU {v}G',
   'decl.ram': 'RAM {v}G',
