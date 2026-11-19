@@ -110,10 +110,16 @@ fn two_queues_run_independently_on_one_client() -> Result<()> {
     // own seq space (the eval enqueue seeded .seq independently).
     dispatch::sweep_with(&t)?;
     assert!(spool::list()?.is_empty());
+    // Ledger order is pushed_at — wall-clock delivery time, which
+    // follows the sweep's per-queue drain order, not submission
+    // order. Same-second stamps fall back to id order, so assert the
+    // set rather than the sequence.
     let ledger = shunt::server::tasks::list()?;
     assert_eq!(ledger.len(), 2);
-    assert_eq!(ledger.iter().map(|r| r.queue.as_str()).collect::<Vec<_>>(), ["train", "eval"]);
-    assert_eq!(ledger[0].qroot.as_deref(), Some(home.path("q/train").to_str().unwrap()));
+    let mut queues: Vec<_> = ledger.iter().map(|r| r.queue.as_str()).collect();
+    queues.sort_unstable();
+    assert_eq!(queues, ["eval", "train"]);
+    assert_eq!(ledger.iter().find(|r| r.queue == "train").and_then(|r| r.qroot.as_deref()), Some(home.path("q/train").to_str().unwrap()));
 
     // Both daemons (auto-started by the sweep) claim and run their tasks.
     wait_until(30, "train task", || home.path("q/train/train-hit").exists())?;
