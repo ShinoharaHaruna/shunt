@@ -89,11 +89,7 @@ pub struct ProbeSkip {
 /// streak reaches `CONN_FAIL_ESCALATE` the background sweep retries it
 /// on a doubling clock instead of every tick — 30 s, 1 min, 2 min …
 /// capped at 10 min — and at `CONN_FAIL_QUARANTINE` consecutive failures
-/// it stops entirely until an explicit probe or row update. A row
-/// declaring `pre_connect` is the exception: the hook exists to restore
-/// a conditional reachability precondition, so it keeps the capped
-/// penalty cadence — each probe fires the hook inside the ssh call and
-/// a success clears the streak.
+/// it stops entirely until an explicit probe or row update.
 const PROBE_PENALTY_BASE_S: i64 = 30;
 const PROBE_PENALTY_CAP_S: i64 = 600;
 pub const PROBE_GIVE_UP: u32 = registry::CONN_FAIL_QUARANTINE;
@@ -115,13 +111,13 @@ fn probe_skip(client: &ClientEntry, streak: u32, last_fail: Option<i64>, now: i6
     match registry::inactive_reason(client, streak) {
         Some(InactiveReason::Disabled) => return Some(ProbeSkip { reason: "disabled", fails: None, retry_in_s: None }),
         Some(InactiveReason::Expired) => return Some(ProbeSkip { reason: "expired", fails: None, retry_in_s: None }),
-        // Quarantine is permanent only for a row with no repair hook.
-        // With `pre_connect` declared the row falls through to the
-        // penalty clock — a skipped probe can never run the hook, so a
-        // full stop would lock the row dead even though the
-        // precondition is one script away from restored.
-        Some(InactiveReason::Quarantined { consecutive_failures }) if client.pre_connect.trim().is_empty() => return Some(ProbeSkip { reason: "quarantined", fails: Some(consecutive_failures), retry_in_s: None }),
-        Some(InactiveReason::Quarantined { .. }) | None => {}
+        // Quarantine silences every row, `pre_connect` included: the
+        // hook already ran inside each bumped attempt and failed to
+        // restore reachability, so the sweep stops spending attempts —
+        // the next explicit probe still fires it before the first
+        // ssh try.
+        Some(InactiveReason::Quarantined { consecutive_failures }) => return Some(ProbeSkip { reason: "quarantined", fails: Some(consecutive_failures), retry_in_s: None }),
+        None => {}
     }
     if streak < registry::CONN_FAIL_ESCALATE {
         return None;
@@ -523,14 +519,15 @@ mod tests {
         assert_eq!(probe_skip(&live, 3, None, now), None);
         // The cap stops the background sweep outright.
         assert_eq!(probe_skip(&live, PROBE_GIVE_UP, Some(now), now), Some(ProbeSkip { reason: "quarantined", fails: Some(PROBE_GIVE_UP), retry_in_s: None }));
-        // …unless the row declares pre_connect: the hook is the
-        // repair path, so the row keeps the capped penalty cadence
-        // (skip reads as backoff — it WILL retry) instead of going
-        // permanently silent.
+        // A pre_connect row is not excepted: below the cap it rides
+        // the same penalty clock (each probe still fires the hook
+        // inside the ssh call); at the cap it goes silent like any
+        // other row, and only an explicit probe runs the hook again.
         let mut hooked = live.clone();
         hooked.pre_connect = "./vpn-up.sh".into();
-        assert_eq!(probe_skip(&hooked, PROBE_GIVE_UP, Some(now), now), Some(ProbeSkip { reason: "backoff", fails: Some(PROBE_GIVE_UP), retry_in_s: Some(600) }));
-        assert_eq!(probe_skip(&hooked, PROBE_GIVE_UP, Some(now - 601), now), None);
+        assert_eq!(probe_skip(&hooked, 3, Some(now), now), Some(ProbeSkip { reason: "backoff", fails: Some(3), retry_in_s: Some(30) }));
+        assert_eq!(probe_skip(&hooked, PROBE_GIVE_UP, Some(now), now), Some(ProbeSkip { reason: "quarantined", fails: Some(PROBE_GIVE_UP), retry_in_s: None }));
+        assert_eq!(probe_skip(&hooked, PROBE_GIVE_UP, Some(now - 601), now), Some(ProbeSkip { reason: "quarantined", fails: Some(PROBE_GIVE_UP), retry_in_s: None }));
         // Expiry outranks every streak state — infinite failures never
         // earn another background attempt.
         assert_eq!(probe_skip(&row("2020-01-01T00:00:00Z"), 0, None, now), Some(ProbeSkip { reason: "expired", fails: None, retry_in_s: None }));
